@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "/crates/entry-api"
+]
+resolver = "3"
