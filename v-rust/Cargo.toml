@@ -1,0 +1,4 @@
+[workspace]
+members = ["gateway", "projections", "worker-engine"]
+
+resolver = "3"
