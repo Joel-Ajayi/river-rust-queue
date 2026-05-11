@@ -2,7 +2,7 @@
 
 > What's been done, what's been designed, what's not started. Updated as the project moves.
 >
-> This file exists because "in-progress" projects often blur the line between *designed* and *built*. RRQ does not. If something has been built, this file says so. If only designed, this file says that. If neither, that too.
+> This file exists because "in-progress" projects often blur the line between _designed_ and _built_. RRQ does not. If something has been built, this file says so. If only designed, this file says that. If neither, that too.
 
 **Last updated:** Pre-implementation, design phase complete.
 
@@ -10,21 +10,21 @@
 
 ## Phase status
 
-| Phase | Status |
-| --- | --- |
-| Design — system, services, invariants | **Complete** (see `docs/`) |
-| Design — deep-dives (sagas, idempotency, ordering, locking, resilience) | In progress |
-| Design — deferred features (chargebacks, FX, K8s, mTLS) | Not started |
-| Implementation — scaffold (proto, migrations, docker-compose, CI) | Complete |
-| Implementation — API Gateway (Go + Rust) | Not started |
-| Implementation — Saga Worker (Go + Rust) | Not started |
-| Implementation — Webhook Worker (Go + Rust) | Not started |
-| Implementation — Fraud Worker (Go + Rust) | Not started |
-| Implementation — Reconciliation (Go + Rust) | Not started |
-| Implementation — Admin CLI (Go + Rust) | Not started |
-| Chaos tests (turmoil in Rust, testcontainers in Go) | Not started |
-| Benchmarks (k6 scenarios A–F) | Not started |
-| Deployment (Fly.io, both implementations) | Not started |
+| Phase                                                                   | Status                     |
+| ----------------------------------------------------------------------- | -------------------------- |
+| Design — system, services, invariants                                   | **Complete** (see `docs/`) |
+| Design — deep-dives (sagas, idempotency, ordering, locking, resilience) | In progress                |
+| Design — deferred features (chargebacks, FX, K8s, mTLS)                 | Not started                |
+| Implementation — scaffold (proto, migrations, docker-compose, CI)       | In progress                |
+| Implementation — API Gateway (Go + Rust)                                | Not started                |
+| Implementation — Saga Worker (Go + Rust)                                | Not started                |
+| Implementation — Webhook Worker (Go + Rust)                             | Not started                |
+| Implementation — Fraud Worker (Go + Rust)                               | Not started                |
+| Implementation — Reconciliation (Go + Rust)                             | Not started                |
+| Implementation — Admin CLI (Go + Rust)                                  | Not started                |
+| Chaos tests (turmoil in Rust, testcontainers in Go)                     | Not started                |
+| Benchmarks (k6 scenarios A–F)                                           | Not started                |
+| Deployment (Fly.io, both implementations)                               | Not started                |
 
 ---
 

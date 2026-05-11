@@ -14,7 +14,7 @@ RRQ is a payment processing core. Merchants hand it instructions like "move 5,00
 
 The interesting word in that sentence is **durably**. On a single machine, executing a transfer is a database transaction — three lines of code, ACID-protected, you're done. RRQ is harder than that because it accepts that the world it lives in is hostile: workers crash mid-operation, networks partition mid-request, the same instruction arrives twice because the merchant retried, two workers race to process the same message because the message broker redelivered it. The system has to handle every one of those without losing money or paying twice. That's what makes it a distributed-systems project rather than a CRUD app.
 
-## What it is *not*
+## What it is _not_
 
 RRQ does not hold custody of real funds. It does not connect to card networks, banks, or mobile money providers. It does not perform KYC, AML, or sanctions screening. It does not price foreign exchange. It is the **correctness-critical core** of a payment system — the part that, if implemented wrong, silently loses money — without the regulatory and integration surface area that would take a real payment company years to build.
 
@@ -60,7 +60,7 @@ Content-Type: application/json
 }
 ```
 
-Two things matter about this response. First, it's `202 Accepted`, not `200 OK`. The transfer hasn't happened yet — it's been *durably accepted for processing*. Second, the response comes back in tens of milliseconds even though the underlying transfer might take a second or more, because the API gateway's job is to accept and persist work, not to wait for it.
+Two things matter about this response. First, it's `202 Accepted`, not `200 OK`. The transfer hasn't happened yet — it's been _durably accepted for processing_. Second, the response comes back in tens of milliseconds even though the underlying transfer might take a second or more, because the API gateway's job is to accept and persist work, not to wait for it.
 
 The merchant learns the outcome through a webhook some time later (typically under a second under normal load):
 
@@ -78,23 +78,23 @@ X-RRQ-Signature: sha256=abc123...
 
 The merchant can also poll `GET /v1/jobs/<job_id>` for synchronous queries. Webhooks are the primary channel; polling is the fallback.
 
-That is the entire merchant-facing surface. Two endpoints to submit work, one webhook to learn outcomes, one endpoint for polling. Everything else in this design exists *behind* that interface to make it correct under failure.
+That is the entire merchant-facing surface. Two endpoints to submit work, one webhook to learn outcomes, one endpoint for polling. Everything else in this design exists _behind_ that interface to make it correct under failure.
 
 ## The seven big ideas
 
 Before the architecture, the seven concepts everything else is built from. If you understand these, the rest of the docs are filling in details.
 
-**1. The unknown outcome.** When you call a service across a network, you can get three answers: success, failure, or *no answer at all*. The third case — request lost, response lost, you can't tell which — is the source of most distributed-systems complexity. RRQ assumes it constantly.
+**1. The unknown outcome.** When you call a service across a network, you can get three answers: success, failure, or _no answer at all_. The third case — request lost, response lost, you can't tell which — is the source of most distributed-systems complexity. RRQ assumes it constantly.
 
 **2. Idempotency.** If a merchant retries a request because they didn't get a response, the system must not execute the underlying operation twice. Achieved by tagging every request with a key the merchant generates; the system processes the operation at most once per key.
 
-**3. Sagas.** A multi-step operation that crosses transaction boundaries. Each step has a corresponding *compensation* (undo). If step 4 of 6 fails, the system runs the compensations for steps 1–3 in reverse, leaving the world in a consistent state. RRQ uses **orchestrated** sagas — a central coordinator drives the steps — rather than choreographed ones.
+**3. Sagas.** A multi-step operation that crosses transaction boundaries. Each step has a corresponding _compensation_ (undo). If step 4 of 6 fails, the system runs the compensations for steps 1–3 in reverse, leaving the world in a consistent state. RRQ uses **orchestrated** sagas — a central coordinator drives the steps — rather than choreographed ones.
 
-**4. Event sourcing.** The source of truth is an append-only log of events ("debit applied," "credit applied," "transfer completed"). Current state — like a wallet's balance — is *derived* from replaying events, not stored as a mutable column you update. This makes the system's history reconstructible, auditable, and verifiable by reconciliation.
+**4. Event sourcing.** The source of truth is an append-only log of events ("debit applied," "credit applied," "transfer completed"). Current state — like a wallet's balance — is _derived_ from replaying events, not stored as a mutable column you update. This makes the system's history reconstructible, auditable, and verifiable by reconciliation.
 
 **5. CQRS.** Reads and writes are separated. The write path appends to the event log. The read path queries pre-computed projections — flat tables built asynchronously from events, optimized for query patterns the dashboard needs. The dashboard never reads from the event log directly.
 
-**6. At-least-once delivery with idempotent handlers.** The message broker (Redis Streams) guarantees every message reaches at least one consumer; it doesn't guarantee exactly one. RRQ achieves *effective* exactly-once by making every handler idempotent — processing a message twice produces the same final state as processing it once.
+**6. At-least-once delivery with idempotent handlers.** The message broker (Redis Streams) guarantees every message reaches at least one consumer; it doesn't guarantee exactly one. RRQ achieves _effective_ exactly-once by making every handler idempotent — processing a message twice produces the same final state as processing it once.
 
 **7. Distributed locking.** When two operations could touch the same wallet concurrently, one of them holds a lock and the other waits. The lock lives in Redis (Redlock algorithm) because the operations cross transaction boundaries — a database row lock only protects within a single transaction.
 
@@ -288,7 +288,7 @@ sequenceDiagram
     R-->>API: nil (key exists)
     API->>R: GET idemp:m:K
     R-->>API: "processing:hash" or "{hash}:{cached_response}"
-    
+
     alt Saga still running
         API-->>M: 409 Conflict (in-flight, retry later)
     else Saga finished
@@ -306,7 +306,7 @@ Detailed docs in `services/`. One paragraph each here for orientation.
 
 **Saga Worker.** The orchestrator. Consumes `JobRequested` events. Runs Transfer and Bulk Payout sagas as explicit state machines, persisting state to Postgres after every step transition. Acquires Redlock on involved wallets. Writes ledger entries and lifecycle events. On failure, runs compensations in reverse. Crash-resilient: a replacement worker reads `saga_state` and resumes from the last completed step. ([→ `11-SAGA-WORKER.md`](services/11-SAGA-WORKER.md))
 
-**Webhook Worker.** Delivers signed notifications to merchants. Consumes a stream that is *partitioned by merchant_id* so per-merchant ordering is preserved while different merchants run in parallel. Implements exponential backoff with full jitter. Has a per-merchant circuit breaker so one offline merchant doesn't waste resources on doomed retries. Routes terminally failed deliveries to the DLQ. ([→ `12-WEBHOOK-WORKER.md`](services/12-WEBHOOK-WORKER.md))
+**Webhook Worker.** Delivers signed notifications to merchants. Consumes a stream that is _partitioned by merchant_id_ so per-merchant ordering is preserved while different merchants run in parallel. Implements exponential backoff with full jitter. Has a per-merchant circuit breaker so one offline merchant doesn't waste resources on doomed retries. Routes terminally failed deliveries to the DLQ. ([→ `12-WEBHOOK-WORKER.md`](services/12-WEBHOOK-WORKER.md))
 
 **Fraud Worker.** Detective control: watches `TransferCompleted` events for velocity anomalies (N transfers from wallet W in window T) and freezes suspect wallets. Per-wallet event ordering is required for correctness, achieved by a two-level dispatch: one outer consumer per worker, lazily-spawned per-wallet tasks for the inner serial processing. ([→ `13-FRAUD-WORKER.md`](services/13-FRAUD-WORKER.md))
 
@@ -319,30 +319,10 @@ Detailed docs in `services/`. One paragraph each here for orientation.
 **Postgres** holds the event store, the ledger, the saga state table, the webhook delivery records, the DLQ. It is the source of truth. If Postgres loses data, the system has lost data. Treated with corresponding care: synchronous replication in production, AOF-style durability settings, indexed for the specific query patterns the system needs.
 
 **Redis** holds three different things, and confusing them is a source of bugs:
-- *Streams.* The job stream and the notify stream — used as a transport for events between services. Persisted with AOF (`appendfsync everysec`) so a crash loses at most ~1 second of in-flight messages. Anything that absolutely must not be lost goes to Postgres first; Redis is the conveyor belt, not the storage room.
-- *Idempotency cache.* `idemp:{merchant_id}:{key}` keys with 24-hour TTL. Hot path; latency-critical.
-- *Distributed locks.* Redlock keys with millisecond TTLs, held only for the duration of a saga's wallet-mutating section.
 
-The same Redis cluster serves all three uses in v1 because operational simplicity wins at this scale. Splitting them is a v2 concern.
-
-## What "v1" means in this design
-
-The full system as designed includes Chargebacks/Disputes, FX Settlement, Kubernetes deployment, and inter-service mTLS. **v1** — the version actually built before the project goes out for review — is a deliberate subset:
-
-| Feature                                | v1 status            | Where designed                                    |
-| -------------------------------------- | -------------------- | ------------------------------------------------- |
-| API Gateway + Idempotency              | Built                | `services/10-API-GATEWAY.md`                      |
-| Saga Worker (Transfer + Bulk Payout)   | Built                | `services/11-SAGA-WORKER.md`                      |
-| Webhook Worker                         | Built                | `services/12-WEBHOOK-WORKER.md`                   |
-| Fraud Worker                           | Built                | `services/13-FRAUD-WORKER.md`                     |
-| Reconciliation                         | Built                | `services/14-RECONCILIATION.md`                   |
-| Admin CLI                              | Built                | `services/15-ADMIN-CLI.md`                        |
-| Chargeback/Dispute saga                | Designed only        | `deferred/30-CHARGEBACKS.md`                      |
-| FX Settlement                          | Designed only        | `deferred/31-FX-SETTLEMENT.md`                    |
-| Kubernetes deployment                  | Manifests as docs    | `deferred/32-KUBERNETES.md`                       |
-| mTLS between services                  | Designed only        | `deferred/33-MTLS.md`                             |
-
-The deferred items have full design docs — pseudocode, schema additions, failure-mode analysis — but no running code. This is itself a deliberate choice: a senior engineer is judged not just on what they built but on what they could build. A complete design with a built subset reads stronger than a partially-built complete design.
+- _Streams._ The job stream and the notify stream — used as a transport for events between services. Persisted with AOF (`appendfsync everysec`) so a crash loses at most ~1 second of in-flight messages. Anything that absolutely must not be lost goes to Postgres first; Redis is the conveyor belt, not the storage room.
+- _Idempotency cache._ `idemp:{merchant_id}:{key}` keys with 24-hour TTL. Hot path; latency-critical.
+- _Distributed locks._ Redlock keys with millisecond TTLs, held only for the duration of a saga's wallet-mutating section.
 
 ## What "correct" means here
 
@@ -381,4 +361,4 @@ If this document has done its job, you can already sketch how each of these work
 
 ---
 
-*Pass 1 of the architecture series. Last updated pre-implementation.*
+_Pass 1 of the architecture series. Last updated pre-implementation._

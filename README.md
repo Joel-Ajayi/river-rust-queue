@@ -6,7 +6,7 @@ parallel implementations in **Go** and **Rust** to compare what each language
 gives you when you take distributed-systems correctness seriously.
 
 > **Project status: design complete, implementation in progress.**
-> A 60-page system design exists in [`docs/`](docs/), with eight named
+> A full system design exists in [`docs/`](docs/), with eight named
 > correctness invariants and an explicit failure-mode analysis. The code
 > scaffolding (proto schemas, SQL migrations, Docker development environment,
 > CI) is in place. Service implementations are not yet written.
@@ -25,10 +25,10 @@ The Knight Capital incident is vivid but not unusual. Every payment company
 has its own version: a retry path that double-charges customers, a
 reconciliation gap that takes weeks to surface, a worker that crashes after
 debiting a wallet but before crediting the recipient, leaving money in
-nobody's hands. These are not exotic failure modes. They are the *expected*
+nobody's hands. These are not exotic failure modes. They are the _expected_
 behavior of distributed systems built without specific countermeasures.
 
-RRQ is the kind of system you build *with* the countermeasures. Every
+RRQ is the kind of system you build _with_ the countermeasures. Every
 component exists because removing it would unhandle a specific named failure
 mode. The patterns are not decoration: orchestrated sagas handle partial
 completion, idempotency keys handle duplicate retries, distributed locks
@@ -134,7 +134,7 @@ paths — see [`docs/00-OVERVIEW.md`](docs/00-OVERVIEW.md).
 
 Building the same system in Go and Rust is not gratuitous. It's the
 methodology by which the project's claims about each language are
-*demonstrated*, not asserted.
+_demonstrated_, not asserted.
 
 The Go implementation is the reference. It uses the patterns Go-shop
 engineering teams will recognize: chi for routing, an interface-based saga
@@ -167,23 +167,23 @@ network long before the runtime matters; reconciliation does not.
 
 ## What's in the repo
 
-| Path | Purpose |
-| --- | --- |
-| [`docs/`](docs/) | Full system design — overview, problem, invariants, service docs, deep-dives, deferred features, appendices |
-| [`proto/`](proto/) | Protobuf schemas: every event type, every internal gRPC contract |
-| [`migrations/`](migrations/) | PostgreSQL schema: seven tables with the indexes and constraints that uphold the invariants |
-| [`v-go/`](v-go/) | Go reference implementation (six services, shared package) |
-| [`v-rust/`](v-rust/) | Rust comparison implementation (six services, shared crate) |
-| [`k8s/`](k8s/) | Kubernetes manifests (documentation; not deployed in v1) |
-| [`scripts/`](scripts/) | k6 benchmark scripts, seed scripts, Prometheus config |
-| [`benchmarks/`](benchmarks/) | Benchmark results (populated when the suite runs) |
-| [`docker-compose.yml`](docker-compose.yml) | Local infrastructure: Postgres, Redis, Jaeger, Prometheus, Grafana |
-| [`Makefile`](Makefile) | The developer entry point (`make help` lists targets) |
-| [`STATUS.md`](STATUS.md) | Honest, up-to-date project state |
+| Path                                       | Purpose                                                                                                     |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| [`docs/`](docs/)                           | Full system design — overview, problem, invariants, service docs, deep-dives, deferred features, appendices |
+| [`proto/`](proto/)                         | Protobuf schemas: every event type, every internal gRPC contract                                            |
+| [`migrations/`](migrations/)               | PostgreSQL schema: seven tables with the indexes and constraints that uphold the invariants                 |
+| [`v-go/`](v-go/)                           | Go reference implementation (six services, shared package)                                                  |
+| [`v-rust/`](v-rust/)                       | Rust comparison implementation (six services, shared crate)                                                 |
+| [`k8s/`](k8s/)                             | Kubernetes manifests (documentation; not deployed in v1)                                                    |
+| [`scripts/`](scripts/)                     | k6 benchmark scripts, seed scripts, Prometheus config                                                       |
+| [`benchmarks/`](benchmarks/)               | Benchmark results (populated when the suite runs)                                                           |
+| [`docker-compose.yml`](docker-compose.yml) | Local infrastructure: Postgres, Redis, Jaeger, Prometheus, Grafana                                          |
+| [`Makefile`](Makefile)                     | The developer entry point (`make help` lists targets)                                                       |
+| [`STATUS.md`](STATUS.md)                   | Honest, up-to-date project state                                                                            |
 
 ---
 
-## Quick start
+## Quick start, Yet Pending
 
 Bring up the local infrastructure and run migrations:
 
@@ -224,7 +224,7 @@ Being explicit about scope matters more than being aspirational about it.
 
 **RRQ is not a complete payment platform.** No card network integration, no
 bank rails, no KYC/AML, no FX pricing, no PCI-DSS compliance, no multi-region
-replication. RRQ is the correctness-critical *core* of a payment platform —
+replication. RRQ is the correctness-critical _core_ of a payment platform —
 the part that, if implemented wrong, silently loses money.
 
 **RRQ is not optimized for global scale.** v1 targets 1,000 transfers/second
