@@ -1,69 +1,261 @@
-# 🚀 RRQ: River Rust Queue
+# RRQ — A Payment Processing Core
 
-### _A Parallel-Stack Implementation in Rust & NestJS_
+A correctness-critical payment engine that moves value between wallets while
+surviving worker crashes, network partitions, and duplicate retries — built in
+parallel implementations in **Go** and **Rust** to compare what each language
+gives you when you take distributed-systems correctness seriously.
 
-**Domain:** Enterprise Financial Data & Task Orchestration  
-**Infrastructure:** DigitalOcean K8s (DOKS), Redis Streams, PostgreSQL  
-**Architecture:** Event-Driven Architecture (EDA) with CQRS & Saga Patterns
-
----
-
-## 📖 Overview
-
-RRQ is a high-performance, fault-tolerant job execution platform designed to handle complex business logic and heavy data processing. The core innovation of this project is the **Parallel Stack Implementation**: solving identical distributed systems challenges in both **Rust (Tokio)** and **NestJS (Node.js)** to compare performance, concurrency models, and developer velocity.
-
----
-
-## 🏗️ System Architecture
-
-### 1. The High-Level Flow
-
-1.  **Ingress:** Traefik (L7) terminates SSL and routes traffic to the API Gateways.
-2.  **Producer:** NestJS/Rust APIs validate requests and emit `JobRequested` events.
-3.  **Broker:** Redis Streams acts as the immutable "Truth" for all active jobs.
-4.  **Consumer:** Distributed Workers (Rust/NestJS) react to events, processing data or financial ledgers.
-5.  **Persistence:** PostgreSQL stores the audited "Event Store" and final job states.
-
-### 2. Parallel Stack Comparison
-
-| Feature           | Rust Implementation           | NestJS Implementation        |
-| :---------------- | :---------------------------- | :--------------------------- |
-| **Concurrency**   | Multi-threaded (Tokio)        | Single-threaded (Event Loop) |
-| **Safety**        | Compile-time (Borrow Checker) | Runtime (TypeScript/DTOs)    |
-| **Communication** | gRPC / Protobuf / RESP        | BullMQ / REST / gRPC         |
-| **Best For**      | CPU-Intensive / Low Latency   | I/O-Intensive / Rapid Logic  |
+> **Project status: design complete, implementation in progress.**
+> A 60-page system design exists in [`docs/`](docs/), with eight named
+> correctness invariants and an explicit failure-mode analysis. The code
+> scaffolding (proto schemas, SQL migrations, Docker development environment,
+> CI) is in place. Service implementations are not yet written.
+> See [`STATUS.md`](STATUS.md) for the precise state.
 
 ---
 
-## 🛠️ Deep-Dive: The 16 "Systems" Pillars
+## The problem this exists to solve
 
-### Phase 1: Architectural Patterns
+In 2012, Knight Capital Group lost $440 million in 45 minutes because a
+deployment left old code on one of eight servers, and that one server
+interpreted incoming orders using stale logic. By the time the team understood
+what was happening, the firm was insolvent.
 
-- **EDA:** Utilizing Redis Streams for decoupled asynchronous event flows.
-- **Idempotency:** Unique `request_id` tracking to prevent double-charging/double-processing.
-- **CAP Theorem:** Prioritizing **Availability** for job submission and **Consistency** for ledger writes.
-- **Saga Pattern:** Implementing **Compensating Transactions** for failed multi-step transfers.
-- **CQRS & Event Sourcing:** Separating command logic from dashboard read-models via an immutable event log.
+The Knight Capital incident is vivid but not unusual. Every payment company
+has its own version: a retry path that double-charges customers, a
+reconciliation gap that takes weeks to surface, a worker that crashes after
+debiting a wallet but before crediting the recipient, leaving money in
+nobody's hands. These are not exotic failure modes. They are the *expected*
+behavior of distributed systems built without specific countermeasures.
 
-### Phase 2: Communication & Networking
+RRQ is the kind of system you build *with* the countermeasures. Every
+component exists because removing it would unhandle a specific named failure
+mode. The patterns are not decoration: orchestrated sagas handle partial
+completion, idempotency keys handle duplicate retries, distributed locks
+handle concurrent access, event sourcing handles silent integrity drift,
+circuit breakers handle external dependency failures, and a reconciliation
+job verifies that the ledger and the event log have not diverged.
 
-- **Infrastructure:** TLS termination at Traefik with internal mTLS for service-to-service security.
-- **L4/L7 Balancing:** Path-based routing for APIs (L7) and direct TCP balancing for Redis/DB (L4).
-- **gRPC & Protobuf:** Binary contracts for high-speed internal service synchronization.
-- **API Gateway:** Edge-level Rate Limiting, JWT Validation, and Request Shaping.
-
-### Phase 3: Execution & The Engine
-
-- **Queues Deep-Dive:** Implementing **Bounded Queues** for backpressure and **Dead Letter Queues (DLQ)** for poison-pill jobs.
-- **Concurrency:** Handling shared state via `Arc/Mutex` in Rust and Worker Threads in NestJS.
-- **Distributed Locking:** Using **Redlock** to ensure mutual exclusion across the cluster.
-- **Data Sharing:** Event-carried state transfer to minimize "N+1" database queries.
-
-### Phase 4: Resilience & Monitoring
-
-- **Caching:** Implementing **Cache-Aside** for user data and **Write-Through** for job metadata.
-- **Circuit Breakers:** Preventing cascade failures during external API (Brevo/Bank) outages.
-- **Bulkheading:** Dedicated K8s namespaces and resource quotas for High vs. Low priority tasks.
-- **Distributed Tracing:** Full-stack observability using **OpenTelemetry (OTel)** and Jaeger.
+For the full problem statement and the failure-modes-to-mechanisms mapping,
+read [`docs/01-PROBLEM.md`](docs/01-PROBLEM.md).
 
 ---
+
+## What RRQ guarantees
+
+Eight invariants, stated precisely enough to be tested:
+
+1. **Conservation of value.** Every debit is paired with either a corresponding
+   credit or a corresponding reversal. No floating debits or credits.
+2. **No negative balances on active wallets.**
+3. **At-most-once execution per idempotency key.** A merchant can retry a
+   request a million times with the same key; the underlying operation
+   happens once.
+4. **Per-wallet event ordering.** Events for a wallet are causally ordered;
+   the wallet's history can always be reconstructed by replay.
+5. **Per-merchant webhook ordering.** A merchant sees their notifications in
+   the order things happened.
+6. **Immutable history.** Events are never updated or deleted. Corrections
+   are new events.
+7. **Saga termination.** Every saga reaches a terminal state in bounded time,
+   or is observable as stuck by operational tooling.
+8. **DLQ entries are recoverable.** Messages exhausting automatic retry are
+   persisted with full context for operator replay, never silently dropped.
+
+For the testable form of each invariant, including how they're enforced and
+how they're validated, see [`docs/02-INVARIANTS.md`](docs/02-INVARIANTS.md).
+
+---
+
+## Architecture
+
+```
+                          ┌──────────────────────┐
+                          │   Merchant System    │
+                          └──────────┬───────────┘
+                                     │ HTTPS (request)
+                                     ▼
+                          ┌──────────────────────┐
+                          │    API Gateway       │
+                          │  (idempotency,       │
+                          │   auth, validation)  │
+                          └──────────┬───────────┘
+                                     │ XADD (append job event)
+                                     ▼
+              ┌──────────────────────────────────────────┐
+              │         Job Stream  (Redis Streams)      │
+              │     consumer-group: saga-workers         │
+              │     consumer-group: fraud-workers        │
+              └────────┬───────────────┬─────────────────┘
+                       │               │
+                       ▼               ▼
+            ┌──────────────────┐  ┌──────────────────┐
+            │   Saga Worker    │  │   Fraud Worker   │
+            │ (orchestrator)   │  │ (per-wallet ord) │
+            └──────┬───────────┘  └────────┬─────────┘
+                   │                       │
+                   │ INSERT (events,       │ INSERT (events,
+                   │  ledger, saga_state)  │  freeze decisions)
+                   ▼                       ▼
+              ┌────────────────────────────────────────┐
+              │  Event Store + Ledger (PostgreSQL)     │
+              │  ── source of truth, append-only       │
+              └──────────────────┬─────────────────────┘
+                                 │
+                                 │ XADD (notify event)
+                                 ▼
+                       ┌──────────────────────┐
+                       │  Notify Stream       │
+                       │  (Redis, sharded     │
+                       │   by merchant_id)    │
+                       └──────────┬───────────┘
+                                  │
+                                  ▼
+                       ┌──────────────────────┐
+                       │   Webhook Worker     │
+                       │  (per-merchant ord,  │
+                       │   retry, breaker)    │
+                       └──────────┬───────────┘
+                                  │ HTTPS
+                                  ▼
+                       ┌──────────────────────┐
+                       │  Merchant Endpoint   │
+                       └──────────────────────┘
+```
+
+Six services, three stateful backends. Every arrow is intentional; every
+component handles at least one named failure mode. For the full system in one
+read — including the sequence diagrams for the success, failure, and retry
+paths — see [`docs/00-OVERVIEW.md`](docs/00-OVERVIEW.md).
+
+---
+
+## Why two implementations
+
+Building the same system in Go and Rust is not gratuitous. It's the
+methodology by which the project's claims about each language are
+*demonstrated*, not asserted.
+
+The Go implementation is the reference. It uses the patterns Go-shop
+engineering teams will recognize: chi for routing, an interface-based saga
+step machine with runtime-enforced state transitions, `sync.RWMutex` and
+`map[K]chan T` for per-key dispatch, `sony/gobreaker` for circuit breaking.
+
+The Rust implementation explores what Rust's type system buys you for
+correctness-critical code. The Saga state machine is encoded with the
+**type-state pattern**: `Saga<Debited>` is a distinct type from
+`Saga<Credited>`, and calling `credit()` on a `Saga<Init>` is a compile error,
+not a runtime panic. The circuit breaker is a Tower middleware layer composed
+into the HTTP client stack. Deterministic distributed-systems testing uses
+**turmoil**, which simulates network failures, host crashes, and message
+drops inside a single-threaded test runner — a category of test Go does not
+have a direct equivalent for.
+
+Both implementations target identical infrastructure, uphold identical
+invariants, and pass an identical integration test suite. Where the languages
+genuinely differ — saga state encoding, concurrency patterns, ecosystem of
+testing tools — the differences are documented as observations, not
+preferences. The benchmark suite measures them honestly: same hardware, same
+warm-up, median of three runs, no GC tuning, no cherry-picking.
+
+The Go-vs-Rust comparison is most informative for the **reconciliation
+batch**, which is CPU-bound and parallelizable — the place where the two
+runtimes actually differ. HTTP throughput benchmarks tend to saturate the
+network long before the runtime matters; reconciliation does not.
+
+---
+
+## What's in the repo
+
+| Path | Purpose |
+| --- | --- |
+| [`docs/`](docs/) | Full system design — overview, problem, invariants, service docs, deep-dives, deferred features, appendices |
+| [`proto/`](proto/) | Protobuf schemas: every event type, every internal gRPC contract |
+| [`migrations/`](migrations/) | PostgreSQL schema: seven tables with the indexes and constraints that uphold the invariants |
+| [`v-go/`](v-go/) | Go reference implementation (six services, shared package) |
+| [`v-rust/`](v-rust/) | Rust comparison implementation (six services, shared crate) |
+| [`k8s/`](k8s/) | Kubernetes manifests (documentation; not deployed in v1) |
+| [`scripts/`](scripts/) | k6 benchmark scripts, seed scripts, Prometheus config |
+| [`benchmarks/`](benchmarks/) | Benchmark results (populated when the suite runs) |
+| [`docker-compose.yml`](docker-compose.yml) | Local infrastructure: Postgres, Redis, Jaeger, Prometheus, Grafana |
+| [`Makefile`](Makefile) | The developer entry point (`make help` lists targets) |
+| [`STATUS.md`](STATUS.md) | Honest, up-to-date project state |
+
+---
+
+## Quick start
+
+Bring up the local infrastructure and run migrations:
+
+```bash
+make dev       # Start Postgres, Redis, Jaeger, Prometheus, Grafana
+make migrate   # Apply schema migrations to local Postgres
+```
+
+Once services are implemented, individual builds and tests are:
+
+```bash
+make build     # Build both Go and Rust implementations
+make test      # Run both test suites with -race / cargo test
+make lint      # Vet, clippy, gofmt, rustfmt, buf lint
+```
+
+For the local infrastructure consoles:
+
+- Jaeger UI: <http://localhost:16686>
+- Prometheus: <http://localhost:9090>
+- Grafana: <http://localhost:3000>
+
+---
+
+## Reading order
+
+If you have 15 minutes: read [`docs/00-OVERVIEW.md`](docs/00-OVERVIEW.md). That's the whole system.
+
+If you have an hour: read `00-OVERVIEW.md`, then `01-PROBLEM.md`, then `02-INVARIANTS.md`. After that you understand what RRQ is, why it exists, and what it promises.
+
+If you're reviewing the project for a role and want to assess engineering depth: skim the three foundation docs, then pick a service doc from [`docs/services/`](docs/services/) (coming in Pass 2) and a deep-dive from [`docs/deep-dives/`](docs/deep-dives/) (coming in Pass 3) and read those in full. That's roughly 90 minutes and tells you what you need to know.
+
+---
+
+## Non-goals
+
+Being explicit about scope matters more than being aspirational about it.
+
+**RRQ is not a complete payment platform.** No card network integration, no
+bank rails, no KYC/AML, no FX pricing, no PCI-DSS compliance, no multi-region
+replication. RRQ is the correctness-critical *core* of a payment platform —
+the part that, if implemented wrong, silently loses money.
+
+**RRQ is not optimized for global scale.** v1 targets 1,000 transfers/second
+on a single machine. Real payment companies handle tens of thousands; the
+techniques (database sharding, partitioned Redis, multi-region) are
+well-understood and not the focus.
+
+**RRQ is not a research artifact.** Every pattern in here is a working
+engineer's tool drawn from existing literature — sagas (Garcia-Molina &
+Salem, 1987), idempotency at Stripe scale, Redlock (Antirez, 2014),
+event sourcing (Fowler, Vernon). The contribution, if any, is the rigor with
+which they're composed and demonstrated.
+
+---
+
+## Why I'm building this
+
+I'm a computer engineering student going deep on distributed systems because
+the kind of engineering I want to do — payment infrastructure, ledger systems,
+the boring correctness-critical guts of money movement — is judged on
+exactly this kind of work. The project is small enough for one person to
+build correctly and rigorous enough to demonstrate the craft.
+
+The design docs are public, the implementation will be public, the
+benchmarks will report whatever numbers come out, and the failure modes are
+demonstrated with tests, not assertions.
+
+— [Ayotunde Ajayi](https://github.com/Joel-Ajayi) · [LinkedIn](https://linkedin.com/in/yotstack)
+
+---
+
+## License
+
+[MIT](LICENSE).
