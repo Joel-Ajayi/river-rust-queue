@@ -69,58 +69,17 @@ how they're validated, see [`docs/02-INVARIANTS.md`](docs/02-INVARIANTS.md).
 
 ## Architecture
 
-```
-                          ┌──────────────────────┐
-                          │   Merchant System    │
-                          └──────────┬───────────┘
-                                     │ HTTPS (request)
-                                     ▼
-                          ┌──────────────────────┐
-                          │    API Gateway       │
-                          │  (idempotency,       │
-                          │   auth, validation)  │
-                          └──────────┬───────────┘
-                                     │ XADD (append job event)
-                                     ▼
-              ┌──────────────────────────────────────────┐
-              │         Job Stream  (Redis Streams)      │
-              │     consumer-group: saga-workers         │
-              │     consumer-group: fraud-workers        │
-              └────────┬───────────────┬─────────────────┘
-                       │               │
-                       ▼               ▼
-            ┌──────────────────┐  ┌──────────────────┐
-            │   Saga Worker    │  │   Fraud Worker   │
-            │ (orchestrator)   │  │ (per-wallet ord) │
-            └──────┬───────────┘  └────────┬─────────┘
-                   │                       │
-                   │ INSERT (events,       │ INSERT (events,
-                   │  ledger, saga_state)  │  freeze decisions)
-                   ▼                       ▼
-              ┌────────────────────────────────────────┐
-              │  Event Store + Ledger (PostgreSQL)     │
-              │  ── source of truth, append-only       │
-              └──────────────────┬─────────────────────┘
-                                 │
-                                 │ XADD (notify event)
-                                 ▼
-                       ┌──────────────────────┐
-                       │  Notify Stream       │
-                       │  (Redis, sharded     │
-                       │   by merchant_id)    │
-                       └──────────┬───────────┘
-                                  │
-                                  ▼
-                       ┌──────────────────────┐
-                       │   Webhook Worker     │
-                       │  (per-merchant ord,  │
-                       │   retry, breaker)    │
-                       └──────────┬───────────┘
-                                  │ HTTPS
-                                  ▼
-                       ┌──────────────────────┐
-                       │  Merchant Endpoint   │
-                       └──────────────────────┘
+```mermaid
+graph TD
+   merchant["Merchant System"] -->|HTTPS request| gateway["API Gateway<br/>(idempotency, auth, validation)"]
+   gateway -->|XADD append job event| jobStream["Job Stream(Redis Streams)<br/>consumer-group: saga-workers<br/>consumer-group: fraud-workers"]
+   jobStream --> sagaWorker["Saga Worker<br/>(orchestrator)"]
+   jobStream --> fraudWorker["Fraud Worker<br/>(per-wallet ordering)"]
+   sagaWorker -->| INSERT - events, ledger, saga_state  | eventStore["Event Store + Ledger<br/>PostgreSQL<br/>source of truth, append-only"]
+   fraudWorker -->|INSERT - events, freeze decisions| eventStore
+   eventStore -->|XADD notify event| notifyStream["Notify Stream<br/>Redis, sharded by merchant_id"]
+   notifyStream --> webhookWorker["Webhook Worker<br/>(per-merchant ordering, retry, breaker)"]
+   webhookWorker -->|HTTPS| merchantEndpoint["Merchant Endpoint"]
 ```
 
 Six services, three stateful backends. Every arrow is intentional; every

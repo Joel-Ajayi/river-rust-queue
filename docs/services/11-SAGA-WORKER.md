@@ -20,7 +20,7 @@ Validate → AcquireLock → Debit → Credit → Complete → Notify
 
 Each step is durable: its outcome is persisted before the next step begins. If the worker crashes between step 3 and step 4, a replacement worker reads the persisted state, sees "the debit happened, the credit didn't," and resumes from step 4. If step 4 cannot succeed, the saga runs compensations in reverse — undoing the debit, releasing the lock — and reaches a `Failed` terminal state with the ledger net-zero.
 
-This sounds straightforward and it almost is. The hard parts are not in the happy path; they're in the failure paths. Specifically: making sure crash recovery resumes from *exactly* the right step, making sure compensations are *exactly* idempotent so a crashed compensation re-runs safely, making sure two workers can never simultaneously process the same saga, and making sure a saga that genuinely cannot succeed reaches a terminal state rather than retrying forever.
+This sounds straightforward and it almost is. The hard parts are not in the happy path; they're in the failure paths. Specifically: making sure crash recovery resumes from _exactly_ the right step, making sure compensations are _exactly_ idempotent so a crashed compensation re-runs safely, making sure two workers can never simultaneously process the same saga, and making sure a saga that genuinely cannot succeed reaches a terminal state rather than retrying forever.
 
 The rest of this document is those hard parts.
 
@@ -29,10 +29,12 @@ The rest of this document is those hard parts.
 ## Inputs, outputs, guarantees
 
 **Inputs**
+
 - `JobRequested` events from the Redis job stream (`stream:jobs`), consumed by the `saga-workers` consumer group.
 - Saga state from Postgres (read on startup for crash recovery, and per step transition).
 
 **Outputs**
+
 - Events written to the Postgres event store: `DebitApplied`, `CreditApplied`, `DebitReversed`, `TransferCompleted`, `TransferFailed`, `BulkPayoutCompleted`.
 - Ledger entries written to `ledger_entries` (the materialized projection from which balances are derived).
 - Saga state updates written to `saga_state` after every step transition.
@@ -40,6 +42,7 @@ The rest of this document is those hard parts.
 - Redlock acquisitions and releases against Redis (during the mutating section of each saga).
 
 **Guarantees**
+
 - Every accepted `JobRequested` event either reaches a terminal saga state (`Completed`, `Failed`, `DeadLettered`) within bounded time, or is observable as stuck via operational tooling. (Upholds **I7**.)
 - The event log reflects a consistent, causally-ordered record of what happened. For every successful Transfer saga, exactly one `DebitApplied` and one `CreditApplied` exist with the same `saga_id`. For every failed Transfer saga where the debit succeeded, a matching `DebitReversed` exists. (Upholds **I1**, **I4**.)
 - At most one worker executes a given saga at a time. (Upholds the per-wallet ordering required by **I4**.)
@@ -47,6 +50,7 @@ The rest of this document is those hard parts.
 - Active wallets never have a negative derived balance. The `Validate` step rejects transfers that would violate this, holding the wallet's Redlock during the check. (Upholds **I2**.)
 
 **Non-guarantees**
+
 - The worker does not guarantee throughput SLO. Under load, sagas may queue. Backpressure is via stream lag, not request rejection.
 - The worker does not guarantee delivery of merchant webhooks. It only guarantees enqueueing them. The Webhook Worker handles the rest.
 - The worker does not guarantee linearizability across sagas for different wallets. Two sagas affecting wallet A and wallet B respectively may complete in any order relative to wall-clock time.
@@ -101,44 +105,24 @@ A few things to notice:
 
 ### The Transfer saga state machine
 
-```
-                ┌─────────┐
-                │  Init   │
-                └────┬────┘
-                     │ Validate (check wallets exist, check status, check balance)
-                     ▼
-                ┌─────────┐                        ┌─────────┐
-                │ Valid   │── validation fails ───▶│ Failed  │
-                └────┬────┘                        └─────────┘
-                     │ AcquireLock (Redlock on sorted wallet IDs)
-                     ▼
-                ┌─────────┐                        ┌─────────┐
-                │ Locked  │── lock timeout ───────▶│ Failed  │
-                └────┬────┘                        └─────────┘
-                     │ Debit (INSERT ledger_entry + DebitApplied event)
-                     ▼
-                ┌─────────┐
-                │ Debited │── credit fails ──┐
-                └────┬────┘                  │
-                     │ Credit                ▼
-                     ▼                ┌──────────────┐
-                ┌──────────┐          │ Compensating │
-                │ Credited │          └───────┬──────┘
-                └────┬─────┘                  │ CompensationDebit (= credit-back)
-                     │ Complete (write TransferCompleted event, mark saga done)
-                     ▼
-                ┌────────────┐                ┌──────────────┐
-                │ Completed  │                │ Compensated  │
-                └─────┬──────┘                └──────┬───────┘
-                      │ Notify                       │
-                      ▼                              ▼
-              ┌──────────────────────┐       ┌─────────┐
-              │ XADD to notify-stream│       │ Failed  │
-              └──────────────────────┘       └─────────┘
-              (also marks saga 'Completed' & releases lock)
+```mermaid
+stateDiagram-v2
+    [*] --> Init
+    Init --> Valid: Validate (check wallets exist, check status, check balance)
+    Valid --> Failed: validation fails
+    Valid --> Locked: AcquireLock (Redlock on sorted wallet IDs)
+    Locked --> Failed: lock timeout
+    Locked --> Debited: Debit (INSERT ledger_entry + DebitApplied event)
+    Debited --> Credited: Credit
+    Debited --> Compensating: credit fails
+    Compensating --> Compensated: CompensationDebit (= credit-back)
+    Credited --> Completed: Complete (write TransferCompleted event, mark saga done)
+    Completed --> [*]: XADD to notify-stream / release lock
+    Compensated --> Failed
 ```
 
 Each transition does three things, in order:
+
 1. Execute the work (insert ledger row, acquire lock, etc.).
 2. Update `saga_state` (`current_state`, `last_completed_step`, `state_data`, `updated_at`).
 3. Within the same database transaction as (2), insert any associated event into `events`.
@@ -180,7 +164,7 @@ fn execute_step(saga_id, step):
         if work_result.produces_ledger_entry:
             INSERT ledger_entries (...)  // unique constraint guards against duplicate execution
         INSERT events (event_type = step.success_event_type, payload = ...)
-        UPDATE saga_state SET 
+        UPDATE saga_state SET
             current_state = next_state_for(step),
             last_completed_step = step.name,
             state_data = state.state_data || work_result.data,
@@ -205,6 +189,7 @@ A transfer of 5,000 NGN from `wal_A` to `wal_B`, originated by merchant `m_M`, j
 **Step 0: Message pickup.** Worker calls `XREADGROUP`, receives a message with the `JobRequested` event. The message ID is `1700000000-0`.
 
 **Step 1: Validate.**
+
 - `SELECT * FROM saga_state WHERE saga_id = 'sg_99'` returns nothing.
 - `INSERT INTO saga_state` with `current_state='Init'`, `saga_type='transfer'`, etc.
 - Lookup wallets: `SELECT id, merchant_id, currency, status FROM wallets WHERE id IN ('wal_A', 'wal_B')`. Both exist, both are `active`.
@@ -218,6 +203,7 @@ Actually let's redo this example with sufficient balance. Suppose the balance is
 - Insert event `SagaValidated` (this is a soft event; it doesn't represent ledger movement, just progress).
 
 **Step 2: AcquireLock.**
+
 - Sort the wallet IDs lexicographically: `('wal_A', 'wal_B')` is already sorted.
 - For each wallet ID, run Redlock acquisition:
   - `SET lock:wallet:wal_A <unique-token> NX PX 5000` (5-second lease)
@@ -227,6 +213,7 @@ Actually let's redo this example with sufficient balance. Suppose the balance is
 - No event emitted; locking is internal.
 
 **Step 3: Debit.**
+
 - `BEGIN`
 - `INSERT INTO ledger_entries (wallet_id='wal_A', amount=-500000, balance_after=500000, saga_id='sg_99', step_name='debit', event_id=<...>, ...)`. The `UNIQUE(saga_id, step_name)` constraint will reject this on retry.
 - `INSERT INTO events (event_type='ledger.debit_applied', aggregate_id='wal_A', payload=<...>, correlation_id='sg_99', ...)`.
@@ -234,6 +221,7 @@ Actually let's redo this example with sufficient balance. Suppose the balance is
 - `COMMIT`
 
 **Step 4: Credit.**
+
 - `BEGIN`
 - `INSERT INTO ledger_entries (wallet_id='wal_B', amount=+500000, balance_after=..., saga_id='sg_99', step_name='credit', ...)`.
 - `INSERT INTO events (event_type='ledger.credit_applied', aggregate_id='wal_B', ...)`.
@@ -241,16 +229,19 @@ Actually let's redo this example with sufficient balance. Suppose the balance is
 - `COMMIT`
 
 **Step 5: Complete.**
+
 - `BEGIN`
 - `INSERT INTO events (event_type='transfer.completed', aggregate_id='sg_99', payload=<from, to, amount>, correlation_id='sg_99', ...)`.
 - `UPDATE saga_state SET current_state='Completed', terminated_at=NOW(), ...`
 - `COMMIT`
 
 **Step 6: Notify.**
+
 - Release Redlocks (Lua script: GET the lock value, compare to our token, DEL if match). On each wallet.
 - `XADD stream:notify-<shard> *` with the notify event. The shard is `hash('m_M') mod 16`.
 
 **Step 7: ACK.**
+
 - `XACK stream:jobs saga-workers 1700000000-0`. The message is now consumed.
 
 Total time for a healthy run: typically 5–20 ms depending on Postgres latency. The Postgres writes dominate.
@@ -342,9 +333,10 @@ This is sometimes a real failure mode (very high contention on a single wallet) 
 
 Unusual but possible — network blip between worker and Postgres at the exact moment of commit.
 
-The worker's database client returns an error. The saga step is incomplete: we don't know if the commit succeeded on the database side or not. (This is the *unknown outcome* problem from `01-PROBLEM.md`, applied locally.)
+The worker's database client returns an error. The saga step is incomplete: we don't know if the commit succeeded on the database side or not. (This is the _unknown outcome_ problem from `01-PROBLEM.md`, applied locally.)
 
 The worker treats this as a retryable error and re-attempts the step. The retry hits the `UNIQUE(saga_id, step_name)` constraint:
+
 - If the commit had succeeded, the second insert fails with duplicate-key. Worker reads the existing row, treats the step as already done, moves on.
 - If the commit had failed, the second insert succeeds. Worker proceeds normally.
 
@@ -355,11 +347,13 @@ Both paths converge to "the step is now done, move to the next." The `UNIQUE` co
 Bulk payouts are 1-to-N transfers. The Saga Worker handles them by fanning out: one `BulkPayoutSaga` orchestrator that spawns N sub-`TransferSaga` instances, each independent.
 
 Sub-transfer fails (e.g., one recipient wallet is closed):
+
 - The sub-saga transitions to `Failed` with a specific reason.
 - The parent `BulkPayoutSaga` continues to track all sub-sagas.
 - When all sub-sagas have reached terminal states, the parent emits `BulkPayoutCompleted` with success/failure counts.
 
 Two important properties:
+
 - **One bad sub-transfer does NOT roll back the others.** The merchant sent 5000 payouts; if 4999 succeed, those money movements are real and final. The failed 4998th sub-transfer's funds go back to the source wallet via its own compensation, but the others are independent.
 - **Each sub-transfer has its own saga_id, lock, idempotency.** No shared state that could cause cascading failure.
 
@@ -434,10 +428,10 @@ type Orchestrator struct {
 // from saga_state.current_state.
 func (o *Orchestrator) Run(ctx context.Context, sc *SagaContext) error {
     steps := o.stepsFor(sc.Type)
-    
+
     // Find resume point.
     resumeIdx, mode := o.resumePoint(sc, steps)
-    
+
     if mode == ForwardMode {
         // Run forward from resume point.
         for i := resumeIdx; i < len(steps); i++ {
@@ -464,7 +458,7 @@ func (o *Orchestrator) Run(ctx context.Context, sc *SagaContext) error {
         }
         return o.markTerminalSuccess(ctx, sc)
     }
-    
+
     // CompensateMode: resuming in the middle of compensation.
     return o.compensate(ctx, sc, steps, resumeIdx)
 }
@@ -501,13 +495,13 @@ func (DebitStep) Name() string { return "debit" }
 
 func (DebitStep) Forward(ctx context.Context, sc *SagaContext) (StepOutcome, error) {
     transfer := sc.Data["transfer"].(*TransferData)
-    
+
     tx, err := sc.DB.Begin(ctx)
     if err != nil {
         return Retry, err
     }
     defer tx.Rollback(ctx)
-    
+
     // Re-compute current balance under FOR UPDATE on the row.
     var currentBalance int64
     err = tx.QueryRow(ctx, `
@@ -518,11 +512,11 @@ func (DebitStep) Forward(ctx context.Context, sc *SagaContext) (StepOutcome, err
     if err != nil {
         return Retry, err
     }
-    
+
     if currentBalance < transfer.Amount {
         return Terminate, ErrInsufficientBalance
     }
-    
+
     // Insert ledger entry. Will fail with unique violation if the step
     // already ran (idempotent retry).
     eventID := ulid.New()
@@ -530,7 +524,7 @@ func (DebitStep) Forward(ctx context.Context, sc *SagaContext) (StepOutcome, err
         INSERT INTO ledger_entries (wallet_id, amount, balance_after, saga_id, step_name, event_id)
         VALUES ($1, $2, $3, $4, $5, $6)
     `, transfer.FromWallet, -transfer.Amount, currentBalance-transfer.Amount, sc.SagaID, "debit", eventID)
-    
+
     if isUniqueViolation(err) {
         // We've already done this step. Return Done so caller doesn't double-count.
         return Done, nil
@@ -538,7 +532,7 @@ func (DebitStep) Forward(ctx context.Context, sc *SagaContext) (StepOutcome, err
     if err != nil {
         return Retry, err
     }
-    
+
     // Insert the event in the same transaction.
     payload, _ := proto.Marshal(&events.DebitApplied{
         WalletId:     transfer.FromWallet,
@@ -554,31 +548,31 @@ func (DebitStep) Forward(ctx context.Context, sc *SagaContext) (StepOutcome, err
     if err != nil {
         return Retry, err
     }
-    
+
     return Continue, tx.Commit(ctx)
 }
 
 func (DebitStep) Compensate(ctx context.Context, sc *SagaContext) error {
     transfer := sc.Data["transfer"].(*TransferData)
-    
+
     tx, err := sc.DB.Begin(ctx)
     if err != nil {
         return err
     }
     defer tx.Rollback(ctx)
-    
+
     // Re-fetch current balance for balance_after.
     var currentBalance int64
     if err := tx.QueryRow(ctx, /* same SUM as above */).Scan(&currentBalance); err != nil {
         return err
     }
-    
+
     eventID := ulid.New()
     _, err = tx.Exec(ctx, `
         INSERT INTO ledger_entries (wallet_id, amount, balance_after, saga_id, step_name, event_id)
         VALUES ($1, $2, $3, $4, $5, $6)
     `, transfer.FromWallet, +transfer.Amount, currentBalance+transfer.Amount, sc.SagaID, "compensation_credit", eventID)
-    
+
     if isUniqueViolation(err) {
         // Already compensated.
         return tx.Commit(ctx)  // commit empty tx, no-op
@@ -586,9 +580,9 @@ func (DebitStep) Compensate(ctx context.Context, sc *SagaContext) error {
     if err != nil {
         return err
     }
-    
+
     // ... emit DebitReversed event ...
-    
+
     return tx.Commit(ctx)
 }
 ```
@@ -657,7 +651,7 @@ impl Saga<Debited> {
     pub async fn credit(self, ctx: &SagaCtx) -> Result<Saga<Credited>, SagaFailure> {
         // ...
     }
-    
+
     // Compensation is only callable from Debited state (or later).
     pub async fn compensate(self, ctx: &SagaCtx) -> Result<Saga<Failed>, SagaFailure> {
         // Insert compensation_credit ledger entry, emit DebitReversed.
@@ -709,11 +703,11 @@ pub enum TerminalState {
 
 The thing the type-state pattern prevents is: writing code that calls `credit()` on a saga that hasn't been debited yet. In Go, the only thing stopping you is convention and tests — you have to remember to check the state first, and if you forget, the bug exists at runtime and only manifests when the wrong path is exercised. In Rust, the function `credit` doesn't exist on `Saga<Init>`. Calling it is a compile error: "method not found." The bug never reaches runtime; it never reaches code review; it never reaches production.
 
-In a saga with 6 steps and a compensation path, the number of invalid transitions is large enough that catching them all in tests is tedious. The type-state encoding makes the invalid transitions *unrepresentable*. That's the qualitative difference.
+In a saga with 6 steps and a compensation path, the number of invalid transitions is large enough that catching them all in tests is tedious. The type-state encoding makes the invalid transitions _unrepresentable_. That's the qualitative difference.
 
 **What's the catch?**
 
-Recovery from crashes. The type-state pattern's strength is at the point of code authorship — you write `saga.debit()` and it only compiles in the right context. But when a worker crashes mid-saga and a replacement reads `saga_state.current_state = 'Debited'` from the database, it has to *reconstruct* a `Saga<Debited>` value to continue. The reconstruction is unavoidably stringly-typed: read the string `'Debited'`, match on it, build the right type.
+Recovery from crashes. The type-state pattern's strength is at the point of code authorship — you write `saga.debit()` and it only compiles in the right context. But when a worker crashes mid-saga and a replacement reads `saga_state.current_state = 'Debited'` from the database, it has to _reconstruct_ a `Saga<Debited>` value to continue. The reconstruction is unavoidably stringly-typed: read the string `'Debited'`, match on it, build the right type.
 
 ```rust
 pub fn resume_saga(state: SagaStateRow, ctx: &SagaCtx) -> ResumeResult {
@@ -738,7 +732,7 @@ pub enum ResumeResult {
 
 After `resume_saga`, you match on `ResumeResult` and call the appropriate continuation. The type-state guarantee resumes from that point.
 
-The honest answer is that the type-state pattern doesn't prevent *all* state-machine bugs — the reconstruction boundary is fundamentally untyped. What it does is prevent the much larger class of bugs that originate inside the saga logic itself. The reconstruction is one place that needs careful testing; the rest is compiler-enforced.
+The honest answer is that the type-state pattern doesn't prevent _all_ state-machine bugs — the reconstruction boundary is fundamentally untyped. What it does is prevent the much larger class of bugs that originate inside the saga logic itself. The reconstruction is one place that needs careful testing; the rest is compiler-enforced.
 
 ---
 
@@ -800,11 +794,11 @@ Three reasons. First, our sagas have inter-step data dependencies — the Redloc
 
 **Q: Why do compensations need to be idempotent? Give me a concrete example.**
 
-Say compensation runs the credit-back for a Debit, then the worker crashes before updating `saga_state` to `Compensated`. A replacement worker reads `saga_state` and sees `current_state='Compensating'`, so it re-runs the compensation. If the compensation is not idempotent — naively inserts another credit row — the source wallet now has a *double* credit-back, so it's actually richer than before the transfer. That's a conservation violation. With idempotent compensation, the `INSERT INTO ledger_entries` hits the `UNIQUE(saga_id, step_name)` constraint, the worker recognizes "this step already ran," and moves on. The database-level constraint is the actual idempotency mechanism; the code just handles the duplicate-key error.
+Say compensation runs the credit-back for a Debit, then the worker crashes before updating `saga_state` to `Compensated`. A replacement worker reads `saga_state` and sees `current_state='Compensating'`, so it re-runs the compensation. If the compensation is not idempotent — naively inserts another credit row — the source wallet now has a _double_ credit-back, so it's actually richer than before the transfer. That's a conservation violation. With idempotent compensation, the `INSERT INTO ledger_entries` hits the `UNIQUE(saga_id, step_name)` constraint, the worker recognizes "this step already ran," and moves on. The database-level constraint is the actual idempotency mechanism; the code just handles the duplicate-key error.
 
 **Q: What does "at-most-once" actually mean? Isn't that the same as "exactly once"?**
 
-No, and the distinction matters. At-most-once means "the operation runs zero or one times." Zero is possible if the system loses the request entirely. Exactly-once means "the operation runs exactly one time." Achieving exactly-once delivery from a message broker is mathematically impossible in the general case (it's the Two Generals' Problem). What we achieve is *effective* exactly-once by combining at-least-once delivery (Redis Streams guarantees messages are delivered at least once) with idempotent handlers (so processing twice has the same effect as once). The idempotency keys at the API layer prevent the same logical operation from being submitted twice; the UNIQUE constraints in the database prevent the same step from being applied twice. Both together give us the property the merchant cares about: "my retry doesn't double-charge."
+No, and the distinction matters. At-most-once means "the operation runs zero or one times." Zero is possible if the system loses the request entirely. Exactly-once means "the operation runs exactly one time." Achieving exactly-once delivery from a message broker is mathematically impossible in the general case (it's the Two Generals' Problem). What we achieve is _effective_ exactly-once by combining at-least-once delivery (Redis Streams guarantees messages are delivered at least once) with idempotent handlers (so processing twice has the same effect as once). The idempotency keys at the API layer prevent the same logical operation from being submitted twice; the UNIQUE constraints in the database prevent the same step from being applied twice. Both together give us the property the merchant cares about: "my retry doesn't double-charge."
 
 **Q: Why store saga state separately from events? Couldn't you derive state from events?**
 
@@ -862,4 +856,4 @@ Each saga step does roughly: one row read (saga_state, for-update), one row inse
 
 ---
 
-*Pass 2 of the architecture series. Last updated pre-implementation.*
+_Pass 2 of the architecture series. Last updated pre-implementation._
