@@ -12,7 +12,7 @@
 
 The Admin CLI is the **operator's interface** to the rest of the system. It's the tool an engineer uses when something has gone wrong and they need to investigate, diagnose, or intervene. It's how DLQ entries get replayed, how stuck sagas get inspected, how wallet freezes get applied or reversed, how consumer lag gets surfaced.
 
-It is *not* an interactive shell or a dashboard. It's a Unix-style CLI with a fixed set of subcommands. Each subcommand does one operation, prints structured output (table or JSON), and exits. This makes it scriptable, log-friendly, and easy to test.
+It is _not_ an interactive shell or a dashboard. It's a Unix-style CLI with a fixed set of subcommands. Each subcommand does one operation, prints structured output (table or JSON), and exits. This makes it scriptable, log-friendly, and easy to test.
 
 The CLI exists for two reasons:
 
@@ -27,22 +27,26 @@ Every CLI action that mutates state writes an event to the event log, recording 
 ## Inputs, outputs, guarantees
 
 **Inputs**
+
 - Command-line arguments (subcommand + flags).
 - Environment variables for connection strings and operator identity.
 - Optional config file for default values.
 
 **Outputs**
+
 - Tabular or JSON output to stdout. Default is tabular; `--json` flag switches.
 - Exit code: 0 on success, non-zero on error.
 - Side effects (for mutating commands): inserts to the events table, updates to wallets/saga_state/dlq_entries.
 - Audit events: every mutating action writes a corresponding `operator.action` event with operator identity, command run, and parameters.
 
 **Guarantees**
+
 - **Auditability.** Every mutation produces an event. The audit trail is complete; no operator action is invisible.
 - **Idempotency where possible.** `freeze` on an already-frozen wallet is a no-op. `replay` on an already-replayed DLQ entry is rejected. The CLI defends against accidental double-action.
 - **Confirmation for destructive operations.** Mutations require either `--yes` flag or an interactive y/n prompt.
 
 **Non-guarantees**
+
 - **Not a permissions system.** v1 assumes the operator running the CLI has access to the database and Redis (typically via VPN + bastion). v2 would add operator identity verification and per-command permissions; v1 logs the configured `OPERATOR_ID` but trusts it.
 - **Not transactional across multiple commands.** Each subcommand is its own database transaction. Running `freeze wal_X` and then `freeze wal_Y` is two independent operations; if the second fails, the first is not rolled back.
 
@@ -119,7 +123,7 @@ dlq_01HQZ...          webhook  10        2d ago  replayed (job_42)
 Saga sg_42 (transfer)
   job_id:       job_42
   state:        Debited                ← stuck here
-  last_step:    debit                  
+  last_step:    debit
   started:      14:23:01Z (5m 12s ago)
   deadline:     14:28:01Z (expired)
   state_data:
@@ -130,13 +134,13 @@ Saga sg_42 (transfer)
 Recent events:
   [14:23:01.123]  saga.validated
   [14:23:01.456]  ledger.debit_applied  (wal_A: -500000, balance 1500000)
-  
+
 Worker assignment:
   consumer: fraud-host-3-7
   message_id: 1700000000-0
   pending in: stream:jobs
   idle: 4m 12s
-  
+
 Actions:
   This saga has likely lost its worker. It should be reclaimed by XAUTOCLAIM
   within the next minute. If still stuck after 5 minutes, run:
@@ -168,10 +172,13 @@ Every mutating command writes an `operator.action` event to the event store. Exa
   "data": {
     "operator_id": "ops-eng-3",
     "command": "wallet freeze",
-    "args": { "wallet_id": "wal_X", "reason": "manual review - suspicious activity" },
+    "args": {
+      "wallet_id": "wal_X",
+      "reason": "manual review - suspicious activity"
+    },
     "outcome": "success",
     "before_state": { "status": "active" },
-    "after_state":  { "status": "frozen" }
+    "after_state": { "status": "frozen" }
   }
 }
 ```
@@ -206,7 +213,7 @@ Entry dlq_01HQA...
   first_failed:  Friday 14:23 UTC
   last_failed:   Friday 17:12 UTC (after 10 attempts)
   last_error:    HTTP 500 - "Internal Server Error"
-  
+
   original_payload:
     event_type: transfer.completed
     event_id:   ev_01HQ...
@@ -343,7 +350,7 @@ func main() {
         Use:   "rrq",
         Short: "RRQ operator CLI",
     }
-    
+
     rootCmd.AddCommand(
         dlqCmd(),
         sagaCmd(),
@@ -353,7 +360,7 @@ func main() {
         eventsCmd(),
         reconcileCmd(),
     )
-    
+
     if err := rootCmd.Execute(); err != nil {
         os.Exit(1)
     }
@@ -378,11 +385,11 @@ func dlqReplayCmd() *cobra.Command {
         Args:  cobra.ExactArgs(1),
         RunE: func(cmd *cobra.Command, args []string) error {
             entryID := args[0]
-            
+
             ctx := context.Background()
             client := mustConnect(ctx)
             defer client.Close()
-            
+
             // Fetch the entry, show summary.
             entry, err := client.DLQ.Get(ctx, entryID)
             if err != nil {
@@ -391,18 +398,18 @@ func dlqReplayCmd() *cobra.Command {
             if entry.Status != "open" {
                 return fmt.Errorf("entry status is %q; only 'open' entries can be replayed", entry.Status)
             }
-            
+
             printEntry(entry)
-            
+
             if !assumeYes && !confirm("Replay this entry?") {
                 return errors.New("aborted")
             }
-            
+
             newJobID, err := client.DLQ.Replay(ctx, entryID, getOperatorID())
             if err != nil {
                 return err
             }
-            
+
             fmt.Printf("Replayed %s → new job_id: %s\n", entryID, newJobID)
             return nil
         },
@@ -431,7 +438,7 @@ func (d *DLQOps) Replay(ctx context.Context, entryID string, operatorID string) 
         return "", err
     }
     defer tx.Rollback(ctx)
-    
+
     // Fetch entry under FOR UPDATE to prevent concurrent replays.
     var entry DLQEntry
     err = tx.QueryRow(ctx, `
@@ -444,11 +451,11 @@ func (d *DLQOps) Replay(ctx context.Context, entryID string, operatorID string) 
     if entry.Status != "open" {
         return "", fmt.Errorf("already %s", entry.Status)
     }
-    
+
     // Generate new job_id with idempotency derived from DLQ entry id.
     newJobID := ulid.New()
     newIdempotencyKey := "dlq-replay-" + entryID
-    
+
     // Re-emit to the appropriate stream.
     if entry.Source == "webhook" {
         // The original payload contains everything we need to re-emit.
@@ -460,7 +467,7 @@ func (d *DLQOps) Replay(ctx context.Context, entryID string, operatorID string) 
             return "", err
         }
     }
-    
+
     // Mark DLQ entry as replayed.
     _, err = tx.Exec(ctx, `
         UPDATE dlq_entries
@@ -470,7 +477,7 @@ func (d *DLQOps) Replay(ctx context.Context, entryID string, operatorID string) 
     if err != nil {
         return "", err
     }
-    
+
     // Write audit event.
     _, err = tx.Exec(ctx, `
         INSERT INTO events (event_id, event_type, aggregate_type, aggregate_id, payload, occurred_at)
@@ -485,7 +492,7 @@ func (d *DLQOps) Replay(ctx context.Context, entryID string, operatorID string) 
     if err != nil {
         return "", err
     }
-    
+
     return newJobID, tx.Commit(ctx)
 }
 ```
@@ -540,7 +547,7 @@ enum DlqAction {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let client = AdminClient::connect().await?;
-    
+
     match cli.command {
         Commands::Dlq(args) => handle_dlq(&client, args).await,
         Commands::Saga(args) => handle_saga(&client, args).await,
@@ -558,11 +565,11 @@ async fn handle_dlq(client: &AdminClient, args: DlqArgs) -> Result<()> {
         DlqAction::Replay { entry_id, yes } => {
             let entry = client.dlq.get(&entry_id).await?;
             print_entry(&entry);
-            
+
             if !yes && !confirm("Replay this entry?")? {
                 return Err(anyhow!("aborted"));
             }
-            
+
             let new_job_id = client.dlq.replay(&entry_id, &get_operator_id()).await?;
             println!("Replayed {entry_id} → new job_id: {new_job_id}");
             Ok(())
@@ -602,40 +609,6 @@ The CLI has both unit tests (parsing, validation) and integration tests (full op
 
 ---
 
-## FAQ — the questions interviewers actually ask
-
-**Q: Why a CLI and not a web admin dashboard?**
-
-Three reasons. First, simplicity: a CLI doesn't need an auth system, a frontend framework, a deployment surface, or its own observability. It runs on the operator's laptop. Second, scriptability: real ops work involves piping commands together (`rrq dlq list ... | jq ... | xargs rrq dlq replay`), which a dashboard doesn't support naturally. Third, audit-friendliness: a CLI command is one line in bash history; a dashboard action is harder to log and reproduce. For an early-stage system, the CLI is enough. A v2 could add a dashboard on top, reading the same data.
-
-**Q: How do operators get the credentials to run this?**
-
-In production: the CLI reads connection strings from environment variables that are populated by a credentials broker (Vault, AWS Secrets Manager, etc.) accessed via a bastion host. The operator SSHs to the bastion, the bastion injects credentials, the CLI runs. v1 documents this pattern but doesn't implement the broker — the credentials are read from a local config file or env vars. v2 would harden this.
-
-**Q: What if an operator runs a dangerous command by accident?**
-
-Two defenses. First, mutating commands require either `--yes` or interactive confirmation; you can't fat-finger `rrq saga abort` without acknowledging the prompt. Second, every action writes an audit event, so even if a mistake happens, it's traceable and reversible (most mutations have an inverse: freeze → unfreeze, replay → resolve, etc.). The system trusts operators not to be malicious; it defends against being careless.
-
-**Q: Why does `saga abort` exist? Isn't that bypassing the saga's correctness guarantees?**
-
-Yes, deliberately. It's the escape valve for situations where the saga's normal failure handling can't make progress — like a compensation step that's permanently broken because of an environmental issue. The operator force-marks the saga `Failed`, *and is responsible for cleaning up the ledger manually*. The CLI documents this in the abort command's help text: "This does not run compensation. You are responsible for ensuring ledger consistency. Recommended: insert a manual adjustment event with full reasoning."
-
-It exists because the alternative — a saga stuck forever with no way out — is worse. Real systems have to have escape valves. The escape valve is logged and audit-trailed; that's what makes it safe to have one.
-
-**Q: How do you know who an operator is? The `OPERATOR_ID` env var seems trust-based.**
-
-It is, in v1. The CLI reads `OPERATOR_ID` from the environment and trusts it. Production would have a real identity system: SSO-based, with mTLS certificates for the CLI authenticating to the database. v1 documents this gap; the audit events capture whatever `OPERATOR_ID` was set, which in practice is set by the bastion host based on the SSO identity used to access it. So even in v1, the trust isn't unbounded — the bastion is the trust anchor.
-
-**Q: Can the CLI be used remotely or only locally?**
-
-Locally. The CLI connects directly to Postgres and Redis. To run it, you need network access to those services. In production, that means VPN + bastion. There's no "RRQ admin API" exposed publicly; the database is the API. This is intentional — the surface area is smaller, the audit trail is more direct, and there's no separate admin-API service to maintain.
-
-**Q: What's the most-used command in practice?**
-
-`rrq dlq list` and `rrq stream lag`, by a wide margin. The first is the "what needs human attention" view; the second is the "is the system healthy" view. The other commands are used during incidents, which are rare. The CLI's design optimizes for the read-heavy operational queries.
-
----
-
 ## What this service depends on
 
 - **Postgres** — reads everything; writes audit events.
@@ -655,4 +628,4 @@ Locally. The CLI connects directly to Postgres and Redis. To run it, you need ne
 
 ---
 
-*Pass 2 of the architecture series. Last updated pre-implementation.*
+_Pass 2 of the architecture series. Last updated pre-implementation._

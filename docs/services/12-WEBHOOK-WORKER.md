@@ -1,9 +1,11 @@
 # 12 — Webhook Worker
 
 > **What this is.** The service document for the Webhook Worker. Explains how RRQ delivers signed notifications to merchants with per-merchant ordering, exponential backoff with full jitter, per-merchant circuit breakers, and DLQ routing for terminal failures.
->
-> **Reading time.** ~20 minutes.
->
+
+## FAQ
+
+The FAQ for this document has been moved to `docs/faq/12-WEBHOOK-WORKER-FAQ.md`.
+
 > **Prerequisites.** Read [`11-SAGA-WORKER.md`](11-SAGA-WORKER.md) — webhooks consume what sagas produce.
 
 ---
@@ -31,11 +33,13 @@ The interesting design tensions are:
 ## Inputs, outputs, guarantees
 
 **Inputs**
+
 - Messages from `stream:notify-{shard}` for some `shard ∈ [0, 16)`. Each shard is consumed by exactly one consumer at a time within the `webhook-workers` consumer group.
 - Webhook delivery records from `webhook_deliveries` (read by the retry scheduler).
 - Merchant configuration (webhook URL, signing secret, status) from Postgres with short-TTL Redis cache.
 
 **Outputs**
+
 - HTTPS POST requests to merchant endpoints.
 - `WebhookDelivered` or `WebhookFailed` events to the event store.
 - Inserts/updates to `webhook_deliveries` tracking attempt history.
@@ -44,12 +48,14 @@ The interesting design tensions are:
 - Metrics: deliveries/sec, success rate, retry rate, breaker state per merchant.
 
 **Guarantees**
+
 - **Per-merchant ordering at the attempt level**: for merchant M, the worker attempts deliveries in the order their source events occurred. (Upholds **I5**.)
 - **At-least-once delivery**: a merchant may see duplicate webhooks (network blip during ACK); each payload carries a unique `event_id` the merchant can dedupe on.
 - **No silent drops**: every delivery that exhausts automatic retry lands in `dlq_entries` with full context. (Upholds **I8**.)
 - **HMAC-SHA256 signature on every payload**: merchants can verify authenticity.
 
 **Non-guarantees**
+
 - **No global webhook ordering**. Merchant A's webhooks and merchant B's webhooks are unordered relative to each other.
 - **No "successful delivery" guarantee per attempt**. A delivery may succeed at attempt 7 of 10; we promise per-merchant attempt order, not per-merchant success order.
 - **No guarantee that the merchant's endpoint processed the payload correctly**. We only know they returned 2xx. Their idempotent processing is their responsibility — we provide the `event_id` to make it possible.
@@ -64,7 +70,7 @@ Per-merchant ordering with horizontal scalability is the core problem. Here's wh
 
 **Approach 1: single consumer, one stream.** All notify events go to `stream:notify`. One consumer reads serially. Ordering is preserved trivially. Problem: throughput is bounded by one consumer's processing rate. A merchant with a slow endpoint blocks every other merchant. Unacceptable.
 
-**Approach 2: consumer group, one stream.** All events go to `stream:notify`, but a consumer group with N consumers balances messages across them. Throughput scales. Problem: Redis Streams' consumer group balances messages without regard to content. Two consumers can simultaneously process two events for the *same* merchant, delivered to the merchant out of order. Ordering broken.
+**Approach 2: consumer group, one stream.** All events go to `stream:notify`, but a consumer group with N consumers balances messages across them. Throughput scales. Problem: Redis Streams' consumer group balances messages without regard to content. Two consumers can simultaneously process two events for the _same_ merchant, delivered to the merchant out of order. Ordering broken.
 
 **Approach 3: stream per merchant.** Create `stream:notify:m_A`, `stream:notify:m_B`, etc. Each stream has its own consumer. Ordering preserved per merchant; parallelism across merchants. Problem: number of streams grows with merchant count. Thousands of streams is operationally awkward — Redis handles it but tooling, monitoring, and consumer-process count become unwieldy.
 
@@ -86,14 +92,14 @@ sequenceDiagram
 
     Note over SW: saga reaches terminal state
     SW->>NS: XADD stream:notify-<shard> *
-    
+
     WW->>NS: XREADGROUP webhook-workers <consumer> COUNT 10 BLOCK 2000ms
     NS-->>WW: messages
-    
+
     loop per message
         WW->>DB: SELECT * FROM merchants WHERE id = ?
         Note over WW: read merchant URL + signing secret (cached 60s)
-        
+
         WW->>CB: check breaker state for merchant
         alt breaker is open
             Note over WW: skip immediate attempt
@@ -206,18 +212,18 @@ next_retry_at = NOW() + delay
 
 With `base = 1s` and `cap = 5min`, and `max_attempts = 10`:
 
-| Attempt | Max delay window | Typical delay |
-|---------|------------------|---------------|
-| 1 (first retry) | 0–2s | ~1s |
-| 2 | 0–4s | ~2s |
-| 3 | 0–8s | ~4s |
-| 4 | 0–16s | ~8s |
-| 5 | 0–32s | ~16s |
-| 6 | 0–64s | ~32s |
-| 7 | 0–128s | ~64s |
-| 8 | 0–256s (capped 300s) | ~128s |
-| 9 | 0–300s (capped) | ~150s |
-| 10 | 0–300s (capped) | ~150s |
+| Attempt         | Max delay window     | Typical delay |
+| --------------- | -------------------- | ------------- |
+| 1 (first retry) | 0–2s                 | ~1s           |
+| 2               | 0–4s                 | ~2s           |
+| 3               | 0–8s                 | ~4s           |
+| 4               | 0–16s                | ~8s           |
+| 5               | 0–32s                | ~16s          |
+| 6               | 0–64s                | ~32s          |
+| 7               | 0–128s               | ~64s          |
+| 8               | 0–256s (capped 300s) | ~128s         |
+| 9               | 0–300s (capped)      | ~150s         |
+| 10              | 0–300s (capped)      | ~150s         |
 
 Total worst-case retry window: roughly 45 minutes from first attempt to last. After attempt 10 fails, the delivery moves to DLQ.
 
@@ -269,7 +275,7 @@ Key property: **breaker state is per-merchant**, keyed `breaker:webhook:{merchan
 
 **Interaction with the retry scheduler.** When the breaker is open, the scheduler still polls `webhook_deliveries` and finds due retries. Instead of attempting them, it updates `next_retry_at` to the breaker's cooldown end time and moves on. This naturally pauses retries for that merchant while keeping the scheduler responsive for others.
 
-**The half-open state is the riskiest moment.** During cooldown, real events keep arriving and getting deferred. When the breaker transitions to half-open, exactly one trial attempt is allowed. If that succeeds, the breaker closes and the backlog drains. If it fails, the breaker opens again — and the *backlog also got bigger* during cooldown. For very-long-broken merchants, the backlog can grow unbounded. The mitigation: deliveries that have been pending more than 24 hours go to DLQ directly, regardless of attempt count. The DLQ becomes the safety valve.
+**The half-open state is the riskiest moment.** During cooldown, real events keep arriving and getting deferred. When the breaker transitions to half-open, exactly one trial attempt is allowed. If that succeeds, the breaker closes and the backlog drains. If it fails, the breaker opens again — and the _backlog also got bigger_ during cooldown. For very-long-broken merchants, the backlog can grow unbounded. The mitigation: deliveries that have been pending more than 24 hours go to DLQ directly, regardless of attempt count. The DLQ becomes the safety valve.
 
 ---
 
@@ -286,45 +292,47 @@ A `transfer.completed` event needs to be delivered to merchant `m_M`'s endpoint 
 4. **Breaker check.** `GET breaker:webhook:m_M` from Redis. Returns `closed` (or nil, which means closed). Proceed.
 
 5. **Sign and POST.**
-    ```
-    payload = canonical_json({
-      event_id: "ev_42",
-      event_type: "transfer.completed",
-      occurred_at: "2026-05-11T14:23:45.123Z",
-      delivery_attempt: 1,
-      data: { ... }
-    })
-    signature = HMAC-SHA256(secret, payload)
-    
-    HTTP POST https://merchant.example/webhooks/rrq
-      Headers:
-        Content-Type: application/json
-        X-RRQ-Signature: sha256=<hex>
-        X-RRQ-Event-Id: ev_42
-        X-RRQ-Delivery-Attempt: 1
-        User-Agent: rrq-webhook/1.0
-      Body: payload
-      Timeout: 10s
-    ```
 
-6. **Response handling.** Merchant returns `200 OK`. 
+   ```
+   payload = canonical_json({
+     event_id: "ev_42",
+     event_type: "transfer.completed",
+     occurred_at: "2026-05-11T14:23:45.123Z",
+     delivery_attempt: 1,
+     data: { ... }
+   })
+   signature = HMAC-SHA256(secret, payload)
+
+   HTTP POST https://merchant.example/webhooks/rrq
+     Headers:
+       Content-Type: application/json
+       X-RRQ-Signature: sha256=<hex>
+       X-RRQ-Event-Id: ev_42
+       X-RRQ-Delivery-Attempt: 1
+       User-Agent: rrq-webhook/1.0
+     Body: payload
+     Timeout: 10s
+   ```
+
+6. **Response handling.** Merchant returns `200 OK`.
 
 7. **Record success.**
-    ```
-    INSERT INTO webhook_deliveries (
-      id, merchant_id, source_event_id, url, payload, signature,
-      attempt_count, last_attempt_at, status, last_status, delivered_at
-    ) VALUES (
-      'wd_01HQX...', 'm_M', 'ev_42', '<url>', <payload_json>, '<hex>',
-      1, NOW(), 'delivered', 200, NOW()
-    );
-    
-    INSERT INTO events (
-      event_id, event_type, aggregate_type, aggregate_id, payload, occurred_at
-    ) VALUES (
-      'ev_<new>', 'webhook.delivered', 'webhook', 'wd_01HQX...', <payload>, NOW()
-    );
-    ```
+
+   ```
+   INSERT INTO webhook_deliveries (
+     id, merchant_id, source_event_id, url, payload, signature,
+     attempt_count, last_attempt_at, status, last_status, delivered_at
+   ) VALUES (
+     'wd_01HQX...', 'm_M', 'ev_42', '<url>', <payload_json>, '<hex>',
+     1, NOW(), 'delivered', 200, NOW()
+   );
+
+   INSERT INTO events (
+     event_id, event_type, aggregate_type, aggregate_id, payload, occurred_at
+   ) VALUES (
+     'ev_<new>', 'webhook.delivered', 'webhook', 'wd_01HQX...', <payload>, NOW()
+   );
+   ```
 
 8. **Update breaker.** `record_success(m_M)` — if breaker was half-open, transition to closed. Reset consecutive-failure counter to zero.
 
@@ -360,7 +368,7 @@ After 10 failures: see F4.
 
 1. POST hits the 10-second timeout. Connection aborted, no response received.
 2. Worker classifies timeout as retryable.
-3. **Critical:** the timeout case is the unknown-outcome case. The merchant *might* have processed the request and returned 200 — we just never got the response. We have to retry, but we have to acknowledge that this might create a duplicate on the merchant's side.
+3. **Critical:** the timeout case is the unknown-outcome case. The merchant _might_ have processed the request and returned 200 — we just never got the response. We have to retry, but we have to acknowledge that this might create a duplicate on the merchant's side.
 4. Update `webhook_deliveries` with `last_error='timeout'`, increment attempt count, schedule retry.
 5. The merchant, when they next receive the same `event_id`, recognizes the duplicate and no-ops it.
 
@@ -388,6 +396,7 @@ The merchant's experience during this is: webhooks stop arriving for ~30s, then 
 5. Emit a Prometheus metric `webhook_deliveries_dlq_total{merchant_id}` so monitoring picks it up.
 
 The operator, alerted by the metric or noticing the DLQ growing, can:
+
 - Investigate why the merchant's endpoint is failing.
 - After fixing the underlying issue, run `rrq dlq replay wd_<id>` to retry.
 - Or `rrq dlq resolve wd_<id> --note "merchant decommissioned"` to close out without retrying.
@@ -432,42 +441,42 @@ type Worker struct {
     breakers    *BreakerRegistry   // per-merchant gobreaker instances
     httpClient  *http.Client       // 10s timeout
     metrics     *Metrics
-    
+
     shardAssignments []int          // which shards this replica owns
 }
 
 // Run launches the two main loops: stream consumer and retry scheduler.
 func (w *Worker) Run(ctx context.Context) error {
     g, gctx := errgroup.WithContext(ctx)
-    
+
     for _, shard := range w.shardAssignments {
         shard := shard  // capture
         g.Go(func() error {
             return w.consumeShard(gctx, shard)
         })
     }
-    
+
     g.Go(func() error {
         return w.retryScheduler(gctx)
     })
-    
+
     return g.Wait()
 }
 
 func (w *Worker) consumeShard(ctx context.Context, shard int) error {
     stream := fmt.Sprintf("stream:notify-%d", shard)
     consumerID := fmt.Sprintf("webhook-%s-%d", os.Hostname(), shard)
-    
+
     // Ensure consumer group exists.
     _ = w.redis.XGroupCreateMkStream(ctx, stream, "webhook-workers", "$").Err()
-    
+
     for {
         select {
         case <-ctx.Done():
             return ctx.Err()
         default:
         }
-        
+
         msgs, err := w.redis.XReadGroup(ctx, &redis.XReadGroupArgs{
             Group:    "webhook-workers",
             Consumer: consumerID,
@@ -479,7 +488,7 @@ func (w *Worker) consumeShard(ctx context.Context, shard int) error {
             // Log, backoff, retry.
             continue
         }
-        
+
         for _, stream := range msgs {
             for _, msg := range stream.Messages {
                 w.handleMessage(ctx, stream.Stream, msg)
@@ -493,7 +502,7 @@ func (w *Worker) handleMessage(ctx context.Context, stream string, msg redis.XMe
     merchantID := msg.Values["merchant_id"].(string)
     eventID := msg.Values["event_id"].(string)
     payload := []byte(msg.Values["payload"].(string))
-    
+
     merchant, err := w.merchants.Get(ctx, merchantID)
     if err != nil {
         // Can't deliver without merchant config. Log and DLQ?
@@ -503,13 +512,13 @@ func (w *Worker) handleMessage(ctx context.Context, stream string, msg redis.XMe
         w.ack(ctx, stream, msg.ID)
         return
     }
-    
+
     breaker := w.breakers.For(merchantID)
-    
+
     result, err := breaker.Execute(func() (interface{}, error) {
         return w.attemptDelivery(ctx, merchant, eventID, payload, /*attempt=*/1)
     })
-    
+
     if err != nil {
         // Either delivery failed or breaker is open.
         w.scheduleRetry(ctx, merchant, eventID, payload, /*attempt=*/1, err)
@@ -517,37 +526,37 @@ func (w *Worker) handleMessage(ctx context.Context, stream string, msg redis.XMe
         statusCode := result.(int)
         w.recordSuccess(ctx, merchant.ID, eventID, statusCode, /*attempt=*/1)
     }
-    
+
     w.ack(ctx, stream, msg.ID)
 }
 
 func (w *Worker) attemptDelivery(ctx context.Context, m *Merchant, eventID string, payload []byte, attempt int) (int, error) {
     sig := computeHMAC(m.WebhookSecret, payload)
-    
+
     req, _ := http.NewRequestWithContext(ctx, "POST", m.WebhookURL, bytes.NewReader(payload))
     req.Header.Set("Content-Type", "application/json")
     req.Header.Set("X-RRQ-Signature", "sha256="+sig)
     req.Header.Set("X-RRQ-Event-Id", eventID)
     req.Header.Set("X-RRQ-Delivery-Attempt", strconv.Itoa(attempt))
     req.Header.Set("User-Agent", "rrq-webhook/1.0")
-    
+
     resp, err := w.httpClient.Do(req)
     if err != nil {
         return 0, err  // network error or timeout
     }
     defer resp.Body.Close()
-    
+
     if resp.StatusCode < 200 || resp.StatusCode >= 300 {
         return resp.StatusCode, fmt.Errorf("non-2xx: %d", resp.StatusCode)
     }
-    
+
     return resp.StatusCode, nil
 }
 
 func (w *Worker) retryScheduler(ctx context.Context) error {
     ticker := time.NewTicker(5 * time.Second)
     defer ticker.Stop()
-    
+
     for {
         select {
         case <-ctx.Done():
@@ -576,10 +585,10 @@ func (w *Worker) scheduleRetry(ctx context.Context, m *Merchant, eventID string,
         w.routeToDLQ(ctx, /* ... */)
         return
     }
-    
+
     delaySeconds := rand.Float64() * math.Min(float64(capSeconds), math.Pow(2, float64(attempt-1)))
     nextRetry := time.Now().Add(time.Duration(delaySeconds * float64(time.Second)))
-    
+
     _, _ = w.db.Exec(ctx, `
         INSERT INTO webhook_deliveries (id, merchant_id, source_event_id, url, payload, signature,
                                         attempt_count, last_attempt_at, last_error, next_retry_at, status)
@@ -624,7 +633,7 @@ pub struct Worker {
 impl Worker {
     pub async fn run(self: Arc<Self>) -> Result<()> {
         let mut tasks = JoinSet::new();
-        
+
         for shard in &self.shard_assignments {
             let me = self.clone();
             let shard = *shard;
@@ -632,42 +641,42 @@ impl Worker {
                 me.consume_shard(shard).await
             });
         }
-        
+
         let me = self.clone();
         tasks.spawn(async move {
             me.retry_scheduler().await
         });
-        
+
         while let Some(result) = tasks.join_next().await {
             result??;
         }
         Ok(())
     }
-    
+
     async fn consume_shard(&self, shard: u8) -> Result<()> {
         let stream = format!("stream:notify-{}", shard);
         let consumer_id = format!("webhook-{}-{}", hostname(), shard);
-        
+
         // Ensure consumer group.
         let _ = self.redis.xgroup_create_mkstream(&stream, "webhook-workers", "$").await;
-        
+
         loop {
             let msgs: Vec<StreamMessage> = self.redis.xreadgroup_block(
                 "webhook-workers", &consumer_id, &[&stream], ">",
                 /*count=*/10, /*block_ms=*/2000,
             ).await?;
-            
+
             for msg in msgs {
                 self.handle_message(&stream, msg).await;
             }
         }
     }
-    
+
     async fn handle_message(&self, stream: &str, msg: StreamMessage) {
         let merchant_id = msg.field("merchant_id");
         let event_id = msg.field("event_id");
         let payload = msg.field_bytes("payload");
-        
+
         let merchant = match self.merchants.get(merchant_id).await {
             Ok(m) => m,
             Err(e) => {
@@ -676,9 +685,9 @@ impl Worker {
                 return;
             }
         };
-        
+
         let breaker = self.breakers.for_merchant(&merchant.id);
-        
+
         match breaker.call(|| self.attempt_delivery(&merchant, &event_id, &payload, 1)).await {
             Ok(status_code) => {
                 self.record_success(&merchant.id, event_id, status_code, 1).await;
@@ -690,7 +699,7 @@ impl Worker {
                 self.schedule_retry(&merchant, event_id, &payload, 1, &err.to_string()).await;
             }
         }
-        
+
         self.ack(stream, &msg.id).await;
     }
 }
@@ -754,58 +763,6 @@ Each delivery attempt goes through the stack: timeout enforcement → breaker ch
 
 ---
 
-## FAQ — the questions interviewers actually ask
-
-**Q: Walk me through how you guarantee per-merchant ordering.**
-
-The notify stream is partitioned into 16 shards. When the saga worker emits a webhook event, it computes `shard = hash(merchant_id) mod 16` and XADDs to `stream:notify-<shard>`. All of merchant M's events go to the same shard. Each shard is consumed by exactly one consumer at a time within the webhook-workers consumer group. So for any given merchant, all their events are processed serially by one consumer, in arrival order. Different merchants land on different shards and run in parallel. The number 16 is configurable — rule of thumb is 4x the number of worker replicas.
-
-**Q: What if a merchant's endpoint is slow — does that block other merchants?**
-
-No, because slowness is contained within a shard. If M1's endpoint takes 3 seconds per webhook and M1 is on shard 7, then shard 7's consumer is slow for M1. But shards 0-6 and 8-15 keep processing other merchants in parallel. The blast radius of one slow merchant is the other merchants that happen to hash to the same shard, which is `merchants/16` of them. With more shards, the blast radius shrinks at the cost of more consumer state. 16 is the chosen tradeoff.
-
-**Q: Why per-merchant circuit breakers instead of a global one?**
-
-A global breaker would mean one broken merchant trips deliveries for everyone. That's a denial-of-service vector — set up a merchant account, point the webhook at a black hole, watch RRQ stop sending webhooks to anyone else. Per-merchant isolates damage. Operationally it's also clearer: when you see "breaker open for m_X," you know exactly who has the problem.
-
-**Q: How do you handle the case where a merchant's endpoint succeeds but RRQ never gets the response?**
-
-The merchant's response is lost (network blip between merchant and us). From our side, the delivery looks like a timeout. We classify timeouts as retryable and retry. Some time later, we POST the same payload again with the same `event_id`. The merchant, who already processed `event_id` last time, recognizes the duplicate by `event_id` and no-ops. They return 200 to our retry; we record success; the world is consistent. This is the "at-least-once delivery + idempotent handler" pattern. We promise at-least-once; we require merchants to be idempotent. Documented in the API guide.
-
-**Q: How long can a delivery be pending before it moves to DLQ?**
-
-Two limits in parallel. First: 10 attempts. Second: 24 hours total (since first attempt). Whichever hits first triggers DLQ routing. The 24-hour limit exists because if a delivery has been retrying for a full day, the merchant's endpoint is probably dead, and the breaker has been flapping open/half-open the whole time. Better to surface it to humans.
-
-**Q: Why store webhook deliveries in Postgres instead of just using the stream for retries?**
-
-Two reasons. First, retries can span minutes to hours. Holding a Redis stream message unacked for that long isn't what streams are designed for; you'd be using a queue as a database. Second, retries need indexed queries: "find all pending deliveries with `next_retry_at <= NOW()` ordered by `next_retry_at`, limit 100." That's a database query pattern, not a stream pattern. So we ACK the stream message immediately, write the delivery state to Postgres, and let the scheduler loop poll Postgres for due retries.
-
-**Q: What's the cost of polling Postgres every 5 seconds?**
-
-The query is `SELECT ... WHERE status='pending' AND next_retry_at <= NOW() ORDER BY next_retry_at LIMIT 100`. With the `webhook_deliveries_pending_idx` partial index, this is an index scan over only-pending rows in next_retry_at order. Even with millions of historical delivered rows, this query touches only the few hundred rows that are actually pending and due. It's cheap. We measured it; the bottleneck is never this query.
-
-**Q: Why HMAC-SHA256 instead of asymmetric signatures (Ed25519, RSA)?**
-
-Three reasons. HMAC is faster to compute (no asymmetric crypto), simpler to implement in any merchant's language without crypto libraries (HMAC is built into stdlibs everywhere), and sufficient for the threat model. We're not trying to prevent a sophisticated attacker — we're trying to give merchants a way to verify "this webhook came from RRQ and the body wasn't modified." HMAC does that. Asymmetric signatures would let merchants verify with a public key without holding a shared secret, which would be nice, but the operational complexity isn't worth it for v1.
-
-**Q: What if the merchant's signing secret leaks?**
-
-The merchant can rotate it through the admin API. The system supports a 24-hour overlap window where webhooks are signed with both the old and new secret (both signatures in headers), so the merchant can roll out verification of the new secret without downtime. v1 doesn't implement rotation — it's noted as a v2 feature. For v1, secret leak requires support intervention.
-
-**Q: Can the webhook worker fall behind?**
-
-Yes. If a merchant's endpoint is slow and on a shard with many active merchants, that shard's consumer can develop lag. The metric `webhook_stream_lag{shard}` exposes per-shard lag. The mitigation is more workers and more shards — but that requires careful migration because changing the number of shards changes which merchant hashes to which shard. For v1 we picked 16 shards as a static configuration; resharding live is a v2 problem.
-
-**Q: What happens if I emit a webhook for a merchant that doesn't exist?**
-
-Shouldn't happen — every event we emit references a merchant_id that came from an accepted API request, so the merchant exists. But defensively: if the worker can't look up the merchant, the delivery goes to DLQ with reason `merchant_lookup_failed`. It's surfaced for operator attention because it indicates a bug somewhere upstream (event referencing a deleted merchant, possibly).
-
-**Q: How do you test this without a real merchant endpoint?**
-
-Integration tests use a small `httptest.Server` (Go) or `wiremock`-equivalent (Rust) that records received requests and can be configured to return arbitrary responses or sleep. The "merchant endpoint" is a `httptest.Server` instance we control completely — we can simulate 500s, timeouts, slow responses, partial responses, and assert exactly what the worker did. Production tests against real merchant endpoints aren't valuable; they're slow, flaky, and can't simulate the failure modes that matter.
-
----
-
 ## What this service depends on
 
 - **Saga Worker** — produces the notify-stream messages.
@@ -828,4 +785,4 @@ Integration tests use a small `httptest.Server` (Go) or `wiremock`-equivalent (R
 
 ---
 
-*Pass 2 of the architecture series. Last updated pre-implementation.*
+_Pass 2 of the architecture series. Last updated pre-implementation._

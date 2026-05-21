@@ -10,17 +10,17 @@
 
 ## What it does
 
-The API Gateway is the *only* synchronous component in the merchant's request path. Everything else in RRQ is asynchronous, and the gateway exists specifically to convert synchronous merchant requests into durable asynchronous work as quickly as possible.
+The API Gateway is the _only_ synchronous component in the merchant's request path. Everything else in RRQ is asynchronous, and the gateway exists specifically to convert synchronous merchant requests into durable asynchronous work as quickly as possible.
 
 It does five things, and only five:
 
 1. **Terminates HTTPS** from the merchant.
 2. **Authenticates** the request via JWT.
-3. **Validates** the request structure (well-formed JSON, required fields, syntactically valid wallet IDs and amounts). It does *not* validate business rules — that's the saga's job.
+3. **Validates** the request structure (well-formed JSON, required fields, syntactically valid wallet IDs and amounts). It does _not_ validate business rules — that's the saga's job.
 4. **Enforces idempotency** by atomic SETNX on the merchant's `Idempotency-Key`. First request with a given key wins; subsequent retries either see "in progress" or get the cached response.
 5. **Emits one event** (`JobRequested`) to the Redis job stream, then returns `202 Accepted` to the merchant.
 
-That's the entire job. The gateway does not touch Postgres in the request path. It does not wait for the saga. It does not check wallet balances. It does not score fraud. Every operation it skips is an operation that *cannot* contribute latency or coupled-failure risk to the merchant's request.
+That's the entire job. The gateway does not touch Postgres in the request path. It does not wait for the saga. It does not check wallet balances. It does not score fraud. Every operation it skips is an operation that _cannot_ contribute latency or coupled-failure risk to the merchant's request.
 
 The design tension behind the whole service is **speed vs. durability**. Speed: respond in under 50ms p99 so the merchant's API call feels fast. Durability: never lose an accepted request. Reconciling these is the whole game. The answer: the only durable write in the request path is the `XADD` to Redis Streams (with AOF `appendfsync everysec`), and after that the gateway considers its job done.
 
@@ -29,11 +29,13 @@ The design tension behind the whole service is **speed vs. durability**. Speed: 
 ## Inputs, outputs, guarantees
 
 **Inputs**
+
 - HTTPS request to `POST /v1/transfers`, `POST /v1/payouts`, `GET /v1/jobs/:id`, `GET /health`, `GET /ready`, `GET /metrics`.
 - JWT bearer token in `Authorization` header (HS256 signed with a shared platform secret).
 - `Idempotency-Key` header (required for POST endpoints; UUIDv4 from the merchant).
 
 **Outputs**
+
 - For a successful POST: `202 Accepted` with `{ "job_id": "...", "status": "pending", "_links": { "self": "/v1/jobs/..." } }`.
 - For a duplicate (in-flight): `409 Conflict` with the in-flight job_id.
 - For a duplicate (completed): the cached response from the first execution.
@@ -43,12 +45,14 @@ The design tension behind the whole service is **speed vs. durability**. Speed: 
 - Side effect: one `JobRequested` event in the Redis job stream.
 
 **Guarantees**
+
 - If `XADD` succeeds, the gateway returns 202. The system owns the work from that moment.
 - If `XADD` fails, the gateway returns 5xx and **no event has been emitted**. The merchant retries safely.
 - For any `(merchant_id, idempotency_key)` pair, exactly one `JobRequested` event is ever written to the stream, regardless of how many requests arrive with that key. (This upholds **I3** in [`../02-INVARIANTS.md`](../02-INVARIANTS.md).)
 - The gateway does not consult Postgres on the request path. Its availability is decoupled from the database.
 
 **Non-guarantees**
+
 - The gateway does not guarantee the saga will eventually succeed. It only guarantees that the saga will eventually run.
 - The gateway does not guarantee a webhook will be delivered. That's the webhook worker's job.
 - The gateway does not guarantee uniqueness of `Idempotency-Key` across merchants. Keys are scoped per-merchant; two merchants using the same UUID is fine.
@@ -93,7 +97,7 @@ Every step matters. Walk through it once slowly:
 
 **Step 1.** Merchant posts a transfer. The `Idempotency-Key` header is required; missing it → 400.
 
-**Step 2.** Parse JSON, validate fields exist, validate types, validate amount is positive, validate currency is one of the supported ISO 4217 codes, validate wallet IDs match the expected ULID format. *Does not* check that the wallets exist in the database. The saga's `Validate` step does that — duplicating the check at the gateway creates two sources of truth.
+**Step 2.** Parse JSON, validate fields exist, validate types, validate amount is positive, validate currency is one of the supported ISO 4217 codes, validate wallet IDs match the expected ULID format. _Does not_ check that the wallets exist in the database. The saga's `Validate` step does that — duplicating the check at the gateway creates two sources of truth.
 
 **Step 3.** Verify the JWT. Extract `merchant_id` from claims. Now we know which merchant this is.
 
@@ -106,9 +110,10 @@ Every step matters. Walk through it once slowly:
 **Step 7a.** Return `202 Accepted` with the `job_id`. After the response is sent, asynchronously update the idempotency cache: `SET idemp:m:K "{hash}:{json_response}" EX 86400`. This is fire-and-forget — if it fails, the cache is missing for this key, and the next retry will be treated as new. That's acceptable. The duplicate-prevention guarantee still holds because the `JobRequested` event already has the merchant's idempotency key embedded; downstream workers can dedupe if they ever see two.
 
 **Step 6b–6d (duplicate path).** `GET` returns the existing value. Three outcomes:
+
 - `"processing:{hash}"` where the hash matches the current request → another instance is still working on it → 409 Conflict.
 - `"{hash}:{response_json}"` where hash matches → return the cached response with appropriate status (probably 202 with the original job_id).
-- Hash *doesn't* match → the merchant reused a key for a different operation. Return 422 with a specific error code. (Some merchants don't do this intentionally; clear error messages help them.)
+- Hash _doesn't_ match → the merchant reused a key for a different operation. Return 422 with a specific error code. (Some merchants don't do this intentionally; clear error messages help them.)
 
 ### The idempotency check in code
 
@@ -222,7 +227,7 @@ Authentication succeeds (signature is valid), but the merchant's account status 
 - The gateway looks up the merchant's status from a **short-TTL cache** (e.g., Redis `merchant:m_M:status` with 60s TTL). If the cache is missing, it queries Postgres.
 - If status is not `active`, return `403 Forbidden` with code `MERCHANT_FROZEN`.
 
-This is one place where the gateway *does* touch Postgres-or-cache in the request path. It's necessary because we can't accept work from frozen merchants. The 60-second cache TTL bounds the time between a freeze and the gateway honoring it.
+This is one place where the gateway _does_ touch Postgres-or-cache in the request path. It's necessary because we can't accept work from frozen merchants. The 60-second cache TTL bounds the time between a freeze and the gateway honoring it.
 
 ---
 
@@ -444,7 +449,7 @@ async fn handle_transfer(
 }
 ```
 
-The Rust version's interesting property: the `IdempotencyContext` extension is *only* populated when SETNX succeeded. The handler can't accidentally release a claim it doesn't hold, because it doesn't have one in its extensions in the duplicate-response path. Compile-time guarantee, not a runtime check.
+The Rust version's interesting property: the `IdempotencyContext` extension is _only_ populated when SETNX succeeded. The handler can't accidentally release a claim it doesn't hold, because it doesn't have one in its extensions in the duplicate-response path. Compile-time guarantee, not a runtime check.
 
 ---
 
@@ -488,56 +493,6 @@ All tests use real Postgres and real Redis in `testcontainers`. No mocks — the
 
 ---
 
-## FAQ — the questions interviewers actually ask
-
-These are answers in your voice; tune the phrasing to feel natural to you.
-
-**Q: Why don't you just use a database row lock for idempotency instead of Redis?**
-
-Because the idempotency check is on the API gateway's hot path. Sub-millisecond latency matters there — every database round-trip is 5–10ms on a good day, 50ms on a bad one. Redis SETNX is a sub-millisecond op. We also don't want gateway availability coupled to database availability; if Postgres is slow, transfers slow down, but the *gateway* should stay responsive enough to return errors quickly rather than time out. Putting idempotency in Redis decouples those concerns.
-
-**Q: What happens if Redis loses the idempotency key (crash before AOF fsync)?**
-
-In the worst case, we accept a duplicate. The window is roughly 1 second (the AOF fsync interval). The downstream impact: the saga worker would process the same JobRequested twice. We mitigate by making the saga handlers idempotent too — the saga step writes to the ledger via `UNIQUE (saga_id, step_name)`, so the second execution gets a constraint violation and treats the step as already done. The idempotency at the API layer is the first line of defense; the saga's idempotent handlers are the second line. Belt and suspenders.
-
-**Q: Why return 202 instead of 200?**
-
-Because 200 implies "the operation completed successfully," and that's not what we mean. We mean "the operation has been durably accepted for processing." 202 Accepted is the HTTP semantic for exactly that. Returning 200 would be misleading; merchants who interpret it as "transfer complete" would be wrong, and then we'd have to explain that 200 doesn't mean what they think it means.
-
-**Q: Why hash the body? Can't you just compare bytes?**
-
-Two reasons. First, storing the full body in the idempotency cache value would be wasteful for large bulk payouts (thousands of recipients). The hash is fixed-size. Second, the body bytes aren't necessarily byte-identical across retries — clients sometimes reorder JSON fields or change whitespace. We hash the *canonical* form (sorted keys, no whitespace), which catches semantic duplicates while tolerating cosmetic differences.
-
-**Q: What about the body-hash being computed but the merchant could send malicious bodies that hash to the same value?**
-
-SHA-256 collisions aren't a practical concern — finding one is computationally infeasible. A merchant who could find a SHA-256 collision could break Bitcoin; that's not a threat we design for. If the threat model changes, we can switch to SHA-512 in one line of code.
-
-**Q: Why is rate limiting not in the gateway?**
-
-It probably should be, eventually. v1 has no per-merchant rate limiting because we want to keep the gateway thin and we don't have realistic load profiles yet. Adding it is a Tower/middleware layer that goes between auth and idempotency — the design accommodates it without changes to anything else. I'd add a token bucket per merchant_id with Redis as the bucket store. Real production system would have this from day one; v1's scope drops it intentionally.
-
-**Q: How does the gateway scale?**
-
-It's stateless. Add more replicas behind a load balancer. The only shared state is Redis (for idempotency) and the job stream (also Redis). Postgres is touched only for the merchant status cache miss, which is rare. So linear scaling up to whatever Redis can handle, which for our workload is a lot.
-
-**Q: What's the failure mode if a gateway pod is killed mid-request?**
-
-Three sub-cases. (1) Killed before SETNX: nothing happened, merchant retries. (2) Killed after SETNX but before XADD: the idempotency key sits at "processing" for up to 24 hours; subsequent retries see 409. Not great, but bounded — eventually the TTL clears it. (3) Killed after XADD but before 202: the merchant gets a connection error and retries; the second request sees the cached response from the first execution. Wait, no — the second request sees "processing:hash" because the response wasn't cached yet (caching happens after the response). So it returns 409. The merchant retries again; eventually the saga completes and the cache is populated. The merchant's experience is "a 409 for a few seconds, then it works." Could be smoother — a v2 improvement would be to have the saga worker write the response cache on completion, removing the gateway's responsibility entirely. v1 accepts the rough edge.
-
-**Q: Why JWT instead of API keys?**
-
-Because JWTs carry merchant-scoped claims (the merchant_id, the merchant's tier, feature flags) without requiring a database lookup on every request. API keys would require either a per-request lookup or a key-to-merchant cache, which we have for the merchant status anyway. JWT is the simpler architecture and the rotation story (issue short-lived tokens) is well-understood. v1 uses HS256 with a shared secret because that's the simplest; production would use RS256 with key rotation.
-
-**Q: Where's the OpenAPI spec?**
-
-In `docs/appendix/42-API-REFERENCE.md` (coming in Pass 4). The implementation should derive request validation from the spec rather than from handwritten validators — diverging from the spec is a category of bug to be designed out.
-
-**Q: Why no GraphQL?**
-
-Because payments APIs have a small, stable surface area where the cost of GraphQL's flexibility doesn't pay back. Two endpoints, well-defined request/response shapes. REST is correct here.
-
----
-
 ## What this service depends on
 
 - **Redis** — both the idempotency cache and the job stream. If Redis is fully down, the gateway returns 503. The merchant retries.
@@ -560,4 +515,4 @@ Because payments APIs have a small, stable surface area where the cost of GraphQ
 
 ---
 
-*Pass 2 of the architecture series. Last updated pre-implementation.*
+_Pass 2 of the architecture series. Last updated pre-implementation._
