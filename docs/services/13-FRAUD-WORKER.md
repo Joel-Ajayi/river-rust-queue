@@ -4,15 +4,15 @@
 >
 > **Reading time.** ~20 minutes.
 >
-> **Prerequisites.** Read [`11-SAGA-WORKER.md`](11-SAGA-WORKER.md). The fraud worker consumes events the saga worker produces.
+> **Prerequisites.** Read [`11-SAGA-WORKER.md`](11-SAGA-WORKER.md). The fraud worker joins `stream:jobs` with an independent `fraud-workers` consumer group — the same stream the API Gateway populates and the saga worker consumes.
 
 ---
 
 ## What it does
 
-The Fraud Worker is a **detective control**, not a preventative one. It watches the stream of completed transfers and looks for patterns that suggest abuse — primarily velocity, the pattern where one wallet originates many transfers in a short window. When a threshold is exceeded, it freezes the offending wallet automatically. An operator can then investigate, decide whether the activity is legitimate, and unfreeze.
+The Fraud Worker is a **detective control**, not a preventative one. It watches the stream of transfer requests and looks for patterns that suggest abuse — primarily velocity, the pattern where one wallet originates many transfers in a short window. When a threshold is exceeded, it freezes the offending wallet automatically. An operator can then investigate, decide whether the activity is legitimate, and unfreeze.
 
-The word "detective" matters. The fraud worker runs _after_ transfers complete, not before — it doesn't gate transfers. A preventative fraud system would sit in the request path, scoring each transfer before allowing it to proceed; that's a much harder system (latency-critical, needs synchronous model evaluation) and is deliberately out of scope for v1.
+The word "detective" matters. The fraud worker does not gate transfers — it reads the same `JobRequested` events from `stream:jobs` as the saga worker (via the independent `fraud-workers` consumer group) and scores requests without blocking them. A preventative fraud system would sit in the request path, scoring each transfer before allowing it to proceed; that's a much harder system (latency-critical, needs synchronous model evaluation) and is deliberately out of scope for v1. Reading `JobRequested` rather than completed-transfer events means the velocity count includes all attempts — even those that later fail validation — which is actually a stronger fraud signal.
 
 What v1 _does_ solve is the technically interesting part: **per-wallet event ordering under horizontal scaling**. Velocity is a stateful computation over a stream of events for a specific wallet. The events must be processed in order — out-of-order processing produces incorrect counts and false signals. But the system has many wallets, and we want to process different wallets in parallel for throughput. The reconciliation between "per-wallet ordering" and "horizontal parallelism" is the design problem at the heart of this service.
 
@@ -24,8 +24,7 @@ The Webhook Worker solves a similar problem with stream partitioning (16 shards 
 
 **Inputs**
 
-- Events from `stream:jobs` consumed by the `fraud-workers` consumer group. The fraud worker joins the same job stream as the saga worker but as a _different_ consumer group — both groups receive every message independently.
-- (Reading the same stream means we consume `JobRequested` events, but most fraud signals are computed from completed events; we filter for relevant types.)
+- `JobRequested` events from `stream:jobs`, consumed by the `fraud-workers` consumer group. The fraud worker joins the same job stream as the saga worker but as a _different_ consumer group — both groups receive every message independently. Non-transfer job types (e.g. bulk payout orchestration messages) are filtered out by the dispatcher.
 - Wallet status from Postgres (to check whether a wallet is already frozen).
 
 **Outputs**
@@ -178,7 +177,7 @@ The actual velocity check uses Redis sorted sets, scored by timestamp:
 
 ```
 ZADD   velocity:wallet:W  <timestamp_ms>  <event_id>
-ZREMRANGEBYSCORE  velocity:wallet:W  0  <timestamp_ms - window_ms>
+ZREMRANGEBYSCORE  velocity:wallet:W_ID  0  <timestamp_ms - window_ms>
 ZCARD  velocity:wallet:W
 ```
 
@@ -209,7 +208,7 @@ Additional rules could include "100 transfers in 10 minutes" or "sudden geograph
 
 A wallet `wal_X` has been very active recently. Its 50th transfer in 60 seconds completes.
 
-1. **Saga Worker emits.** The completed transfer's saga writes `TransferCompleted` event. (Note: in v1, the fraud worker actually listens for `JobRequested` because it wants to count _all_ attempts including failed ones — pick one consistent strategy; this doc uses `TransferCompleted` for clarity.)
+1. **API Gateway emits.** A transfer request from `wal_X` arrives; the API Gateway writes a `JobRequested` event to `stream:jobs`. The event embeds `job_id`, `merchant_id`, and the transfer payload including `from_wallet: wal_X`.
 
 2. **Outer consumer reads.** Fraud worker's outer consumer task calls `XREADGROUP fraud-workers <consumer-id> COUNT 10 BLOCK 2000 STREAMS stream:jobs >`. Receives the event.
 
@@ -286,18 +285,17 @@ This is "fail-open" behavior — a bug skips fraud detection for one event rathe
 
 Hypothetical: somehow the sorted set has spurious entries (e.g., due to a Redis bug or operational issue). The count is inflated.
 
-The recovery: per-wallet tasks rebuild the sorted set from the event log on first event after a configured rebuild interval. Specifically, the task on every Nth event (or every N seconds, configurable) does:
+The recovery: per-wallet tasks rebuild the sorted set from `saga_state` on first event after a configured rebuild interval. `JobRequested` events are not persisted to the Postgres event store (the API Gateway never writes to Postgres), so the rebuild uses `saga_state`, which the Saga Worker inserts for every job it picks up. Specifically, the task on every Nth event (or every N seconds, configurable) does:
 
 ```
 DEL velocity:wallet:W
-SELECT event_id, occurred_at FROM events
-  WHERE aggregate_id = W
-    AND event_type IN ('transfer.completed', 'transfer.requested')
-    AND occurred_at > NOW() - INTERVAL '60 seconds'
-For each row: ZADD velocity:wallet:W <ts_ms> <event_id>
+SELECT job_id, created_at FROM saga_state
+  WHERE state_data->>'from_wallet' = W
+    AND created_at > NOW() - INTERVAL '60 seconds'
+For each row: ZADD velocity:wallet:W <created_at_ms> <job_id>
 ```
 
-This is expensive (a Postgres query), so we don't do it on every event. But periodic rebuilds catch drift. The event log is always the source of truth; the Redis structure is a cache.
+This is expensive (a Postgres query), so we don't do it on every event. But periodic rebuilds catch drift. `saga_state` is the nearest durable source of truth for transfer requests; the Redis sorted set is a cache of that data.
 
 ### F4: Outer consumer overwhelmed by dispatch
 

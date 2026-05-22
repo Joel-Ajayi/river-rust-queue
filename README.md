@@ -71,15 +71,44 @@ how they're validated, see [`docs/02-INVARIANTS.md`](docs/02-INVARIANTS.md).
 
 ```mermaid
 graph TD
-   merchant["Merchant System"] -->|HTTPS request| gateway["API Gateway<br/>(idempotency, auth, validation)"]
-   gateway -->|XADD append job event| jobStream["Job Stream(Redis Streams)<br/>consumer-group: saga-workers<br/>consumer-group: fraud-workers"]
-   jobStream --> sagaWorker["Saga Worker<br/>(orchestrator)"]
-   jobStream --> fraudWorker["Fraud Worker<br/>(per-wallet ordering)"]
-   sagaWorker -->| INSERT - events, ledger, saga_state  | eventStore["Event Store + Ledger<br/>PostgreSQL<br/>source of truth, append-only"]
-   fraudWorker -->|INSERT - events, freeze decisions| eventStore
-   eventStore -->|XADD notify event| notifyStream["Notify Stream<br/>Redis, sharded by merchant_id"]
-   notifyStream --> webhookWorker["Webhook Worker<br/>(per-merchant ordering, retry, breaker)"]
-   webhookWorker -->|HTTPS| merchantEndpoint["Merchant Endpoint"]
+    merchant["Merchant System"]
+    gateway["API Gateway<br/>JWT auth · SETNX idempotency (NX EX 86400) · structure validation<br/>returns 202 Accepted after XADD succeeds · never touches Postgres in hot path"]
+    redisState["Redis — shared state<br/>idempotency cache (SETNX / GET / DEL)<br/>Redlock per wallet (SET NX PX 5000)<br/>velocity sorted sets · circuit breaker state"]
+    jobStream["Job Stream — Redis Streams<br/>stream:jobs<br/>consumer-group: saga-workers<br/>consumer-group: fraud-workers"]
+    notifyStream["Notify Stream — Redis Streams<br/>stream:notify-{0..15}<br/>sharded by hash(merchant_id) mod 16<br/>consumer-group: webhook-workers"]
+    sagaWorker["Saga Worker<br/>Validate → AcquireLock → Debit → Credit → Complete<br/>Redlock on wallet pairs (sorted IDs) · XAUTOCLAIM crash recovery<br/>idempotent steps: UNIQUE(saga_id, step_name) · compensation saga on failure"]
+    fraudWorker["Fraud Worker — detective control (non-blocking)<br/>reads JobRequested events · does not gate transfers<br/>two-level dispatch: outer consumer + lazy per-wallet goroutines/tasks<br/>Lua: ZADD · ZREMRANGEBYSCORE · ZCARD (sliding-window velocity)<br/>auto-freeze wallet when threshold exceeded"]
+    webhookWorker["Webhook Worker<br/>per-merchant FIFO ordering (one consumer per shard)<br/>HMAC-SHA256 signed payloads · exponential backoff with full jitter<br/>circuit breaker per merchant · DLQ on retry exhaustion (10 attempts)"]
+    postgres["PostgreSQL — append-only source of truth<br/>events · ledger_entries · saga_state<br/>wallets · webhook_deliveries · dlq_entries · merchants"]
+    merchantEndpoint["Merchant Endpoint"]
+    reconciliation["Reconciliation — nightly CronJob<br/>replays event log per wallet (streaming cursor, O(1) memory)<br/>derived balance vs. ledger_entries SUM<br/>emits ReconciliationAlert on any divergence"]
+    adminCLI["Admin CLI (rrq)<br/>dlq inspect / replay · saga abort · wallet freeze / unfreeze<br/>circuit reset · stream lag · reconcile trigger · event search"]
+
+    merchant -->|"HTTPS POST /v1/transfers + Idempotency-Key"| gateway
+    gateway -->|"SETNX idemp:{merchant}:{key} NX EX 86400"| redisState
+    gateway -->|"XADD stream:jobs * (JobRequested event)"| jobStream
+    gateway -.->|"merchant status check (60s Redis cache · Postgres fallback)"| postgres
+
+    jobStream -->|"XREADGROUP saga-workers<br/>XAUTOCLAIM on startup (reclaim crashed-worker messages)"| sagaWorker
+    jobStream -->|"XREADGROUP fraud-workers"| fraudWorker
+
+    sagaWorker -->|"SET NX lock:wallet:W PX 5000 (Redlock) · DEL on complete/compensate"| redisState
+    sagaWorker -->|"INSERT events · ledger_entries · saga_state (per-step tx)<br/>SELECT saga_state FOR UPDATE (prevent concurrent execution)"| postgres
+    sagaWorker -->|"XADD stream:notify-N (N = hash(merchant_id) mod 16)"| notifyStream
+
+    fraudWorker -->|"Lua: ZADD · ZREMRANGEBYSCORE · ZCARD<br/>velocity:wallet:{id} sorted set"| redisState
+    fraudWorker -->|"UPDATE wallets SET status=frozen WHERE status=active<br/>INSERT events (wallet.frozen)"| postgres
+
+    notifyStream -->|"XREADGROUP webhook-workers (one consumer per shard)"| webhookWorker
+    webhookWorker -->|"GET / SET breaker:{merchant_id}"| redisState
+    webhookWorker -->|"INSERT webhook_deliveries · events · dlq_entries<br/>SELECT FOR UPDATE SKIP LOCKED (retry scheduler)"| postgres
+    webhookWorker -->|"HTTPS POST X-RRQ-Signature: sha256=...<br/>X-RRQ-Event-Id for merchant dedup · 10s timeout"| merchantEndpoint
+
+    postgres -->|"SELECT events · ledger_entries (streaming cursor, read-only)"| reconciliation
+    reconciliation -->|"INSERT ReconciliationCompleted · ReconciliationAlert"| postgres
+
+    adminCLI -->|"SELECT · UPDATE · INSERT operator.action audit events"| postgres
+    adminCLI -->|"XINFO stream lag · GET circuit breaker state"| redisState
 ```
 
 Six services, three stateful backends. Every arrow is intentional; every

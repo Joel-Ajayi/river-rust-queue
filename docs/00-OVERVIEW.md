@@ -105,17 +105,17 @@ These seven ideas, composed, are RRQ. Everything else is a working-out of the co
 ```mermaid
 graph TD
   merchant["Merchant System"] -->|HTTPS request| gateway["API Gateway<br/>(idempotency, auth, validation)"]
-  gateway -->|XADD append job event| jobStream["Job Stream<br/>Redis Streams<br/>consumer-group: saga-workers<br/>consumer-group: fraud-workers"]
+  gateway -->|XADD JobRequested| jobStream["Job Stream<br/>Redis Streams<br/>consumer-group: saga-workers<br/>consumer-group: fraud-workers"]
   jobStream --> sagaWorker["Saga Worker<br/>(orchestrator)"]
   jobStream --> fraudWorker["Fraud Worker<br/>(per-wallet ordering)"]
   sagaWorker -->|INSERT events, ledger, saga_state| eventStore["Event Store + Ledger<br/>PostgreSQL<br/>source of truth, append-only"]
   fraudWorker -->|INSERT events, freeze decisions| eventStore
-  eventStore -->|XADD notify event| notifyStream["Notify Stream<br/>Redis, sharded by merchant_id"]
+  sagaWorker -->|XADD notify event| notifyStream["Notify Stream<br/>Redis, sharded by merchant_id"]
   notifyStream --> webhookWorker["Webhook Worker<br/>(per-merchant ordering, retry, breaker)"]
   webhookWorker -->|HTTPS| merchantEndpoint["Merchant Endpoint"]
 
   reconciliation["Reconciliation<br/>(nightly batch)"] -.->|reads and compares| eventStore
-  adminCli["Admin CLI"] -.->|reads DLQ, lag, breaker state| jobStream
+  adminCli["Admin CLI"] -.->|reads lag, breaker state| jobStream
   adminCli -.->|replays DLQ, freezes wallets| eventStore
 ```
 
@@ -257,7 +257,7 @@ Detailed docs in `services/`. One paragraph each here for orientation.
 
 **Webhook Worker.** Delivers signed notifications to merchants. Consumes a stream that is _partitioned by merchant_id_ so per-merchant ordering is preserved while different merchants run in parallel. Implements exponential backoff with full jitter. Has a per-merchant circuit breaker so one offline merchant doesn't waste resources on doomed retries. Routes terminally failed deliveries to the DLQ. ([→ `12-WEBHOOK-WORKER.md`](services/12-WEBHOOK-WORKER.md))
 
-**Fraud Worker.** Detective control: watches `TransferCompleted` events for velocity anomalies (N transfers from wallet W in window T) and freezes suspect wallets. Per-wallet event ordering is required for correctness, achieved by a two-level dispatch: one outer consumer per worker, lazily-spawned per-wallet tasks for the inner serial processing. ([→ `13-FRAUD-WORKER.md`](services/13-FRAUD-WORKER.md))
+**Fraud Worker.** Detective control: watches `JobRequested` events from the job stream (via the independent `fraud-workers` consumer group) for velocity anomalies (N transfer attempts from wallet W in window T) and freezes suspect wallets. Does not gate transfers. Per-wallet event ordering is required for correctness, achieved by a two-level dispatch: one outer consumer per worker, lazily-spawned per-wallet tasks for the inner serial processing. ([→ `13-FRAUD-WORKER.md`](services/13-FRAUD-WORKER.md))
 
 **Reconciliation.** Scheduled nightly batch. Replays the event log for the previous day, computes derived balances, compares to the ledger. Any discrepancy is a `ReconciliationAlert` event — the system never silently corrects, because divergence between events and ledger is by definition a bug. CPU-bound and parallelizable; the headline benchmark for the Go-vs-Rust comparison. ([→ `14-RECONCILIATION.md`](services/14-RECONCILIATION.md))
 
@@ -267,11 +267,13 @@ Detailed docs in `services/`. One paragraph each here for orientation.
 
 **Postgres** holds the event store, the ledger, the saga state table, the webhook delivery records, the DLQ. It is the source of truth. If Postgres loses data, the system has lost data. Treated with corresponding care: synchronous replication in production, AOF-style durability settings, indexed for the specific query patterns the system needs.
 
-**Redis** holds three different things, and confusing them is a source of bugs:
+**Redis** holds five different things, and confusing them is a source of bugs:
 
-- _Streams._ The job stream and the notify stream — used as a transport for events between services. Persisted with AOF (`appendfsync everysec`) so a crash loses at most ~1 second of in-flight messages. Anything that absolutely must not be lost goes to Postgres first; Redis is the conveyor belt, not the storage room.
+- _Streams._ The job stream (`stream:jobs`) and the partitioned notify stream (`stream:notify-{0..15}`) — used as a transport for events between services. Persisted with AOF (`appendfsync everysec`) so a crash loses at most ~1 second of in-flight messages. Anything that absolutely must not be lost goes to Postgres first; Redis is the conveyor belt, not the storage room.
 - _Idempotency cache._ `idemp:{merchant_id}:{key}` keys with 24-hour TTL. Hot path; latency-critical.
 - _Distributed locks._ Redlock keys with millisecond TTLs, held only for the duration of a saga's wallet-mutating section.
+- _Velocity sorted sets._ `velocity:wallet:{id}` sorted sets used by the Fraud Worker to compute sliding-window transfer counts. Rebuilt periodically from `saga_state`.
+- _Circuit breaker state._ `breaker:{merchant_id}` keys tracking per-merchant webhook delivery health (closed / open / half-open).
 
 ## What "correct" means here
 

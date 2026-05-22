@@ -790,9 +790,9 @@ Tests are organized by which invariant they validate. Each must pass in both imp
 
 ## What depends on this service
 
-- **Webhook Worker** — consumes notify-stream messages this worker produces.
-- **Fraud Worker** — consumes `TransferCompleted` events this worker writes to the event store (via Redis Streams).
-- **Reconciliation** — replays the events this worker writes.
+- **Webhook Worker** — consumes notify-stream messages (`stream:notify-{shard}`) this worker produces.
+- **Fraud Worker** — joins `stream:jobs` with its own `fraud-workers` consumer group; receives the same `JobRequested` events independently and filters for fraud-relevant types.
+- **Reconciliation** — replays the `events` and `ledger_entries` this worker writes to Postgres.
 
 ---
 
