@@ -1,4 +1,4 @@
-# 10 — API Gateway
+# 10: API Gateway
 
 > **What this is.** The service document for the API Gateway. Explains exactly what it does, exactly how it does it, and exactly what an interviewer is likely to ask you about it.
 >
@@ -12,17 +12,41 @@
 
 The API Gateway is the _only_ synchronous component in the merchant's request path. Everything else in RRQ is asynchronous, and the gateway exists specifically to convert synchronous merchant requests into durable asynchronous work as quickly as possible.
 
-It does five things, and only five:
+It does five things, and only five (with TLS already terminated by Kong at the edge, see below):
 
-1. **Terminates HTTPS** from the merchant.
-2. **Authenticates** the request via JWT.
-3. **Validates** the request structure (well-formed JSON, required fields, syntactically valid wallet IDs and amounts). It does _not_ validate business rules — that's the saga's job.
+1. **Receives** the forwarded request from Kong.
+2. **Authenticates** the request via full JWT verification (Kong did only a coarse signature check).
+3. **Validates** the request structure (well-formed JSON, required fields, syntactically valid wallet IDs and amounts). It does _not_ validate business rules, that's the saga's job.
 4. **Enforces idempotency** by atomic SETNX on the merchant's `Idempotency-Key`. First request with a given key wins; subsequent retries either see "in progress" or get the cached response.
 5. **Emits one event** (`JobRequested`) to the Redis job stream, then returns `202 Accepted` to the merchant.
 
 That's the entire job. The gateway does not touch Postgres in the request path. It does not wait for the saga. It does not check wallet balances. It does not score fraud. Every operation it skips is an operation that _cannot_ contribute latency or coupled-failure risk to the merchant's request.
 
 The design tension behind the whole service is **speed vs. durability**. Speed: respond in under 50ms p99 so the merchant's API call feels fast. Durability: never lose an accepted request. Reconciling these is the whole game. The answer: the only durable write in the request path is the `XADD` to Redis Streams (with AOF `appendfsync everysec`), and after that the gateway considers its job done.
+
+---
+
+## The edge: Kong in front
+
+The gateway does not sit on the raw internet. **Kong** is the edge gateway in front of it, and the split of responsibilities is deliberate:
+
+```mermaid
+graph LR
+    M["Merchant"] -->|"HTTPS"| K["Kong (edge)<br/>TLS termination<br/>coarse JWT signature check<br/>per-merchant rate limiting"]
+    K -->|"plain HTTP, /v1, + tier claim"| G["API Gateway<br/>full JWT verify<br/>SETNX idempotency<br/>XADD JobRequested"]
+    G -->|"202 Accepted"| K
+    K -->|"202 / 429"| M
+```
+
+| Concern | Owner | Why |
+| --- | --- | --- |
+| TLS termination | Kong | Generic edge work; no reason to hand-roll it. |
+| Rate limiting (per `merchant_id`/`tier`) | Kong | Token bucket at the edge protects everything behind it. Returns `429` before a request ever reaches the gateway. |
+| Coarse JWT signature check | Kong | Reject obviously-bad tokens early. |
+| **Full JWT verification, claims extraction** | **API Gateway** | The gateway is the trust boundary for business identity. |
+| **Idempotency claim (`SETNX`) + `XADD`** | **API Gateway** | The correctness-critical part. No off-the-shelf gateway does this; it is the reason the custom gateway exists. |
+
+So everything below this section describes the **API Gateway**, the piece behind Kong. Kong is real infrastructure but it is not where the interesting correctness work lives, which is exactly why it is delegated to an off-the-shelf component.
 
 ---
 
@@ -97,7 +121,7 @@ Every step matters. Walk through it once slowly:
 
 **Step 1.** Merchant posts a transfer. The `Idempotency-Key` header is required; missing it → 400.
 
-**Step 2.** Parse JSON, validate fields exist, validate types, validate amount is positive, validate currency is one of the supported ISO 4217 codes, validate wallet IDs match the expected ULID format. _Does not_ check that the wallets exist in the database. The saga's `Validate` step does that — duplicating the check at the gateway creates two sources of truth.
+**Step 2.** Parse JSON, validate fields exist, validate types, validate amount is positive, validate currency is one of the supported ISO 4217 codes, validate wallet IDs match the expected ULID format. _Does not_ check that the wallets exist in the database. The saga's `Validate` step does that, duplicating the check at the gateway creates two sources of truth.
 
 **Step 3.** Verify the JWT. Extract `merchant_id` from claims. Now we know which merchant this is.
 
@@ -105,9 +129,9 @@ Every step matters. Walk through it once slowly:
 
 **Step 5.** The critical operation: `SET idemp:{merchant_id}:{Idempotency-Key} "processing:{body_hash}" NX EX 86400`. This is atomic at Redis. Exactly one request can win this race; all others see `nil` from `SET` and know the key exists.
 
-**Step 6a (new key path).** `XADD stream:jobs * ` with the event payload. This is the **durability boundary** — once this succeeds, the system owns the work. If `XADD` fails (Redis unavailable), we return 503 immediately and do NOT cache the idempotency key as "processing." If we did, the next retry would see "in progress" forever. Instead, we explicitly `DEL idemp:m:K` before returning the error, so the merchant's retry can try again cleanly.
+**Step 6a (new key path).** `XADD stream:jobs * ` with the event payload. This is the **durability boundary**, once this succeeds, the system owns the work. If `XADD` fails (Redis unavailable), we return 503 immediately and do NOT cache the idempotency key as "processing." If we did, the next retry would see "in progress" forever. Instead, we explicitly `DEL idemp:m:K` before returning the error, so the merchant's retry can try again cleanly.
 
-**Step 7a.** Return `202 Accepted` with the `job_id`. After the response is sent, asynchronously update the idempotency cache: `SET idemp:m:K "{hash}:{json_response}" EX 86400`. This is fire-and-forget — if it fails, the cache is missing for this key, and the next retry will be treated as new. That's acceptable. The duplicate-prevention guarantee still holds because the `JobRequested` event already has the merchant's idempotency key embedded; downstream workers can dedupe if they ever see two.
+**Step 7a.** Return `202 Accepted` with the `job_id`. After the response is sent, asynchronously update the idempotency cache: `SET idemp:m:K "{hash}:{json_response}" EX 86400`. This is fire-and-forget, if it fails, the cache is missing for this key, and the next retry will be treated as new. That's acceptable. The duplicate-prevention guarantee still holds because the `JobRequested` event already has the merchant's idempotency key embedded; downstream workers can dedupe if they ever see two.
 
 **Step 6b–6d (duplicate path).** `GET` returns the existing value. Three outcomes:
 
@@ -143,7 +167,7 @@ The combination of `NX` (set if not exists) and `EX` (TTL) is what makes this at
 
 ### Why these specific TTLs
 
-- **24 hours (idempotency cache TTL).** Long enough to cover any realistic merchant retry window. Network blips that justify retrying typically resolve in minutes; even pathological retry policies don't extend past hours. After 24 hours, the same key is treated as new — documented in the merchant-facing API.
+- **24 hours (idempotency cache TTL).** Long enough to cover any realistic merchant retry window. Network blips that justify retrying typically resolve in minutes; even pathological retry policies don't extend past hours. After 24 hours, the same key is treated as new, documented in the merchant-facing API.
 - **No TTL on the stream entry.** Streams have their own retention policy (managed separately). The job stream keeps messages for hours, plenty to survive worker pickup and ACK.
 
 ---
@@ -174,7 +198,7 @@ Note: by step 8, the merchant has their response. Steps 9 and 10 happen entirely
 The most catastrophic failure case. Sequence:
 
 1. Steps 1–5 of the happy path complete. The idempotency key has been set to `"processing:body_hash"`.
-2. `XADD` returns an error — Redis is unreachable, or the AOF write failed, or whatever.
+2. `XADD` returns an error, Redis is unreachable, or the AOF write failed, or whatever.
 3. **Critical:** before returning 5xx to the merchant, the gateway calls `DEL idemp:m_M:8e3f...` to undo the idempotency claim.
 4. Gateway returns `503 Service Unavailable`.
 5. Merchant retries (with the same key, since they got a 5xx).
@@ -200,7 +224,7 @@ Both merchant request handlers can be entirely unaware of each other; Redis's at
 
 ### F3: Different body, same idempotency key
 
-The "merchant bug" case — they reused a key but the payload differs.
+The "merchant bug" case, they reused a key but the payload differs.
 
 1. Request A: transfer 5000 NGN with key K. SETNX succeeds, XADD, 202.
 2. Request B: transfer 10000 NGN with key K (different body, same key).
@@ -239,7 +263,7 @@ Skeletons are for comprehension, not for copying. The shape communicates the arc
 // Package gateway implements the merchant-facing HTTP API.
 //
 // Invariants upheld here:
-//   I3 (at-most-once execution per idempotency key) — via idempotencyMiddleware.
+//   I3 (at-most-once execution per idempotency key), via idempotencyMiddleware.
 //
 // Invariants NOT enforced here (deferred to saga worker):
 //   I1 (conservation of value), I2 (no negative balances).
@@ -259,7 +283,7 @@ type MerchantLookup interface {
 }
 
 // Handler for POST /v1/transfers. Note this is the *handler*, not the
-// full pipeline — the middleware chain (auth, idempotency) wraps it.
+// full pipeline, the middleware chain (auth, idempotency) wraps it.
 func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
     var req TransferRequest
     if err := decodeAndValidate(r.Body, &req); err != nil {
@@ -375,7 +399,7 @@ The Rust version uses Tower middleware layers for the same pipeline:
 //! API Gateway HTTP service.
 //!
 //! Invariants upheld here:
-//!   I3 (at-most-once execution per idempotency key) — via IdempotencyLayer.
+//!   I3 (at-most-once execution per idempotency key), via IdempotencyLayer.
 //!
 //! The middleware stack, from outer to inner:
 //!   TraceLayer -> AuthLayer -> IdempotencyLayer -> route handlers
@@ -455,49 +479,49 @@ The Rust version's interesting property: the `IdempotencyContext` extension is _
 
 ## Test plan
 
-Tests are organized by which invariant they validate. Each must pass in both implementations before the service is considered done.
+Tests are organized by which invariant they validate. Each must pass in the Go implementation before the service is considered done, and in the Rust comparison implementation in the Rust comparison once it is built.
 
 ### Validates I3 (at-most-once execution)
 
-- **`TestIdempotency_FirstRequest`** — single request, assert 202, assert exactly 1 message in stream, assert idempotency cache populated.
-- **`TestIdempotency_SequentialDuplicates`** — fire 10 sequential requests with the same key; assert all 10 return identical `job_id`, exactly 1 message in stream.
-- **`TestIdempotency_ConcurrentDuplicates`** — fire 100 concurrent requests with the same key; assert exactly 1 returns 202, others return 409 (some) and 202-with-cached-response (some). Exactly 1 message in stream.
-- **`TestIdempotency_DifferentBodySameKey`** — first request with key K body X, second with K body Y; assert second returns 422.
-- **`TestIdempotency_ReleaseOnPublishFailure`** — mock the publisher to return error after SETNX succeeds; assert idempotency key is deleted; assert retry with same key is processed as new.
+- **`TestIdempotency_FirstRequest`**, single request, assert 202, assert exactly 1 message in stream, assert idempotency cache populated.
+- **`TestIdempotency_SequentialDuplicates`**, fire 10 sequential requests with the same key; assert all 10 return identical `job_id`, exactly 1 message in stream.
+- **`TestIdempotency_ConcurrentDuplicates`**, fire 100 concurrent requests with the same key; assert exactly 1 returns 202, others return 409 (some) and 202-with-cached-response (some). Exactly 1 message in stream.
+- **`TestIdempotency_DifferentBodySameKey`**, first request with key K body X, second with K body Y; assert second returns 422.
+- **`TestIdempotency_ReleaseOnPublishFailure`**, mock the publisher to return error after SETNX succeeds; assert idempotency key is deleted; assert retry with same key is processed as new.
 
 ### Validates I3 boundaries (TTL, scoping)
 
-- **`TestIdempotency_TTLExpiry`** — fast-forward Redis time past 24h; assert same key is treated as new.
-- **`TestIdempotency_PerMerchantScope`** — two merchants with the same key value; assert both succeed (different cache entries).
+- **`TestIdempotency_TTLExpiry`**, fast-forward Redis time past 24h; assert same key is treated as new.
+- **`TestIdempotency_PerMerchantScope`**, two merchants with the same key value; assert both succeed (different cache entries).
 
 ### Validates authentication
 
-- **`TestAuth_MissingToken`** — no Authorization header; 401.
-- **`TestAuth_InvalidSignature`** — token with bad signature; 401.
-- **`TestAuth_ExpiredToken`** — expired exp claim; 401.
-- **`TestAuth_FrozenMerchant`** — valid token, merchant status=frozen; 403.
+- **`TestAuth_MissingToken`**, no Authorization header; 401.
+- **`TestAuth_InvalidSignature`**, token with bad signature; 401.
+- **`TestAuth_ExpiredToken`**, expired exp claim; 401.
+- **`TestAuth_FrozenMerchant`**, valid token, merchant status=frozen; 403.
 
 ### Validates validation
 
-- **`TestValidation_MissingFields`** — body missing `from_wallet`; 422 with specific field error.
-- **`TestValidation_NegativeAmount`** — `amount: -100`; 422.
-- **`TestValidation_InvalidCurrency`** — `currency: "XYZ"`; 422.
-- **`TestValidation_AmountTooLarge`** — `amount: 1e18`; 422 (overflow protection).
+- **`TestValidation_MissingFields`**, body missing `from_wallet`; 422 with specific field error.
+- **`TestValidation_NegativeAmount`**, `amount: -100`; 422.
+- **`TestValidation_InvalidCurrency`**, `currency: "XYZ"`; 422.
+- **`TestValidation_AmountTooLarge`**, `amount: 1e18`; 422 (overflow protection).
 
 ### Validates observability
 
-- **`TestObservability_TraceHeaders`** — every request emits a span with `merchant_id`, `endpoint`, `idempotency_key` attributes.
-- **`TestObservability_Metrics`** — `gateway_requests_total{status=...}` counter increments on every response.
+- **`TestObservability_TraceHeaders`**, every request emits a span with `merchant_id`, `endpoint`, `idempotency_key` attributes.
+- **`TestObservability_Metrics`**, `gateway_requests_total{status=...}` counter increments on every response.
 
-All tests use real Postgres and real Redis in `testcontainers`. No mocks — the boundary between "unit test" and "integration test" is unprincipled and produces tests that don't catch real bugs.
+All tests use real Postgres and real Redis in `testcontainers`. No mocks, the boundary between "unit test" and "integration test" is unprincipled and produces tests that don't catch real bugs.
 
 ---
 
 ## What this service depends on
 
-- **Redis** — both the idempotency cache and the job stream. If Redis is fully down, the gateway returns 503. The merchant retries.
-- **Postgres (rarely)** — only on merchant-status cache miss. Loss of Postgres means the cache eventually goes stale; we serve from cache for 60s past staleness as a degradation strategy. After that, return 503.
-- **JWT signing key** — read at startup from environment. Rotated via deploy.
+- **Redis**, both the idempotency cache and the job stream. If Redis is fully down, the gateway returns 503. The merchant retries.
+- **Postgres (rarely)**, only on merchant-status cache miss. Loss of Postgres means the cache eventually goes stale; we serve from cache for 60s past staleness as a degradation strategy. After that, return 503.
+- **JWT signing key**, read at startup from environment. Rotated via deploy.
 
 ## What depends on this service
 
@@ -511,7 +535,7 @@ All tests use real Postgres and real Redis in `testcontainers`. No mocks — the
 
 - The service that consumes this service's output → [`11-SAGA-WORKER.md`](11-SAGA-WORKER.md)
 - The deep mechanics of idempotency → [`../deep-dives/20-IDEMPOTENCY.md`](../deep-dives/20-IDEMPOTENCY.md)
-- The merchant-facing API contract → [`../appendix/42-API-REFERENCE.md`](../appendix/42-API-REFERENCE.md)
+- The merchant-facing API contract → [`../appendices/42-API-REFERENCE.md`](../appendices/42-API-REFERENCE.md)
 
 ---
 

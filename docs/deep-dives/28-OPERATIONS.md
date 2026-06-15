@@ -1,10 +1,10 @@
-# 28 — Operations
+# 28: Operations
 
 > **What this is.** The deep dive on running RRQ in production on Kubernetes. Schema migrations on a live system, backup and restore of stateful sets, rolling deploys with graceful shutdown, alerting runbooks, retention policies.
 >
 > **Reading time.** ~20 minutes.
 >
-> **Prerequisites.** [`../deferred/32-KUBERNETES.md`](../deferred/32-KUBERNETES.md) (the K8s deployment shape).
+> **Prerequisites.** [`29-KUBERNETES.md`](29-KUBERNETES.md) (the K8s deployment shape).
 
 ---
 
@@ -55,7 +55,7 @@ These need careful sequencing. The classic pattern is "expand and contract":
 1. Deploy application code that *writes to new only* and *reads from new only*.
 2. Drop the old column.
 
-This takes multiple deploys but causes no downtime. The window of "both columns active" is when the system is most vulnerable to bugs — you have two sources of truth and they can disagree if backfill has gaps. Tests must cover this.
+This takes multiple deploys but causes no downtime. The window of "both columns active" is when the system is most vulnerable to bugs, you have two sources of truth and they can disagree if backfill has gaps. Tests must cover this.
 
 For RRQ specifically: most schema changes are additive (new event types, new optional payload fields, new indexes). The category 2 path is rarely needed.
 
@@ -117,13 +117,13 @@ The event store is the source of truth. Losing it loses everything. Backup strat
 
 ### What gets backed up
 
-- **Postgres**: continuous WAL archiving + daily full backups. Tools: pgBackRest, wal-g, Barman. For v1 on K8s, wal-g is the simplest.
+- **Postgres**: continuous WAL archiving + daily full backups. Tools: pgBackRest, wal-g, Barman. On K8s, wal-g is the simplest.
 - **Redis**: AOF persistence to the StatefulSet's PV. Streams and stream consumer state survive Redis restarts. Daily snapshot of the AOF file to cold storage (S3, GCS, OCI Object Storage) for the case where the PV is lost.
 
 ### What does NOT get backed up
 
 - Application service pods. They're stateless; on loss, K8s reschedules them.
-- Observability data (Jaeger traces, Prometheus metrics). Loss of these is annoying but not catastrophic — historical traces and metrics are operational data, not business data.
+- Observability data (Jaeger traces, Prometheus metrics). Loss of these is annoying but not catastrophic, historical traces and metrics are operational data, not business data.
 - The dashboard. Same reasoning.
 
 ### Backup frequencies and retention
@@ -142,14 +142,14 @@ Every operational system needs to test its restore process. The risk otherwise: 
 
 The discipline: **quarterly restore drill into a staging cluster**. Take the latest production backup. Restore to staging. Verify reconciliation runs cleanly (no discrepancies). Document the time it took.
 
-For RRQ v1, this drill is a manual checklist in `docs/runbooks/restore-drill.md` (to be created during implementation).
+For RRQ, this drill is a manual checklist in `docs/runbooks/restore-drill.md` (to be created during implementation).
 
 ### RTO and RPO targets
 
-- **RPO (Recovery Point Objective)**: how much data are we willing to lose? With continuous WAL archiving, RPO is "the last committed transaction" — effectively zero for committed transactions.
+- **RPO (Recovery Point Objective)**: how much data are we willing to lose? With continuous WAL archiving, RPO is "the last committed transaction", effectively zero for committed transactions.
 - **RTO (Recovery Time Objective)**: how long does restoration take? Target: 1 hour for full restore from backup. Includes provisioning a new Postgres instance, restoring WAL up to point-in-time, verifying integrity, switching application traffic.
 
-1-hour RTO is realistic for a v1 system on K8s. Larger production systems target much tighter (single-digit minutes). The mechanism: hot standby replicas that can be promoted instantly. v1 doesn't have replicas because cost; v2 would.
+1-hour RTO is realistic for a system of this size on K8s. Larger production systems target much tighter (single-digit minutes). The mechanism: hot standby replicas that can be promoted instantly. RRQ doesn't run replicas because of cost; that is a known gap.
 
 ---
 
@@ -168,7 +168,7 @@ When you deploy a new version of the saga worker:
 7. K8s sees the pod exit cleanly within `terminationGracePeriodSeconds` (60s). Pod removed.
 8. New pods take over the consumer group's pending messages via `XAUTOCLAIM` after 60s of idle.
 
-Without the preStop + SIGUSR1 dance, K8s would SIGKILL pods mid-step. The saga would be left unacked; another worker would reclaim it after the XAUTOCLAIM threshold. Correct, but disruptive — every deploy would trigger a wave of XAUTOCLAIM events and saga resumes. The graceful shutdown avoids the wave.
+Without the preStop + SIGUSR1 dance, K8s would SIGKILL pods mid-step. The saga would be left unacked; another worker would reclaim it after the XAUTOCLAIM threshold. Correct, but disruptive, every deploy would trigger a wave of XAUTOCLAIM events and saga resumes. The graceful shutdown avoids the wave.
 
 ### Maximum surge and unavailable settings
 
@@ -190,7 +190,7 @@ This is the subtle one. If the migration changes the schema in an incompatible w
 
 The discipline for RRQ: **schema changes are always backward-compatible**. New columns are nullable; new tables exist independently; old behaviors don't break. If a change genuinely cannot be made backward-compatible, use the expand-and-contract pattern described above.
 
-This discipline is what makes rolling deploys safe. Violating it means scheduling a maintenance window, which is a v1-acceptable but v2-undesirable pattern.
+This discipline is what makes rolling deploys safe. Violating it means scheduling a maintenance window, which RRQ treats as a last resort.
 
 ---
 
@@ -258,7 +258,7 @@ Alerts exist to wake humans up. Every alert needs a corresponding runbook tellin
 **Runbook steps:**
 1. Check current saga worker replica count (Dashboard → Services → Saga Worker).
 2. Check HPA status. Is it scaling up? Has it hit max replicas?
-3. If at max replicas, the bottleneck is downstream — Postgres, Redis, or actual saga work.
+3. If at max replicas, the bottleneck is downstream, Postgres, Redis, or actual saga work.
 4. Check Postgres metrics for slow queries.
 5. Check if any specific saga is hung (Dashboard → Sagas → Stuck).
 6. Remediate by increasing maxReplicas in the HPA spec (requires a deploy) or by addressing the bottleneck.
@@ -298,8 +298,8 @@ How long does data stay around?
 
 | Data | Retention | Rationale |
 | --- | --- | --- |
-| `events` (the event store) | Forever (v1); archived after 7 years (v2) | Source of truth; required for compliance |
-| `ledger_entries` | Forever (v1); archived with events | Audit/regulatory |
+| `events` (the event store) | Kept indefinitely; cold-archived after 7 years | Source of truth; required for compliance |
+| `ledger_entries` | Kept indefinitely; archived with events | Audit/regulatory |
 | `saga_state` (terminal sagas) | 90 days then archived | Operational history; not source of truth |
 | `webhook_deliveries` (delivered) | 30 days | Operational history; events have the canonical record |
 | `webhook_deliveries` (DLQ-ed) | Until resolved or explicitly purged | These need human action |
@@ -321,7 +321,7 @@ The Postgres cleanup is *not* destructive to source-of-truth data. It only delet
 
 How big should the cluster be?
 
-For v1's target (1,000 TPS):
+For RRQ's target (1,000 TPS):
 
 - **Saga workers**: 2-4 replicas, 0.5 CPU + 512MB each.
 - **API Gateway**: 2-3 replicas, 0.5 CPU + 256MB each.
@@ -364,7 +364,7 @@ Without these in place, you're deploying a system you can't operate. The checkli
 
 ## Where to read next
 
-- The K8s deployment design → [`../deferred/32-KUBERNETES.md`](../deferred/32-KUBERNETES.md)
+- The K8s deployment design → [`29-KUBERNETES.md`](29-KUBERNETES.md)
 - The observability stack → [`26-OBSERVABILITY.md`](26-OBSERVABILITY.md)
 - The admin dashboard that drives many of these operations → [`../services/15-ADMIN-DASHBOARD.md`](../services/15-ADMIN-DASHBOARD.md)
 

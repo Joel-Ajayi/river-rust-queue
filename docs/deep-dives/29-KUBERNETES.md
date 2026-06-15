@@ -1,22 +1,18 @@
-# 32 — Kubernetes Deployment
+# 29: Kubernetes Deployment
 
-> **What this is.** The deployment design RRQ would use if running on Kubernetes. v1 doesn't deploy to K8s (we use Fly.io for simplicity); this doc describes the design so manifests in `/k8s/` make sense.
+> **What this is.** How RRQ deploys: the Kubernetes design, the reasoning behind each piece, and the manifests in `/k8s/`.
 >
 > **Reading time.** ~12 minutes.
 >
-> **Status.** Manifests exist as documentation; not deployed. See [`../../STATUS.md`](../../STATUS.md).
+> **Status.** Manifests designed; not yet applied to a cluster. See [`../../STATUS.md`](../../STATUS.md).
 
 ---
 
-## Why not Kubernetes in v1
+## Why Kubernetes
 
-Two reasons:
+RRQ deploys to Kubernetes. The system's shape maps cleanly onto Kubernetes primitives: a set of independently scaled stateless workers (saga, webhook, fraud) in front of shared Postgres and Redis, a batch reconciliation job, and an edge that needs TLS, routing, and rate limiting. That becomes a `Deployment` per worker, a `CronJob` for reconciliation, an `HorizontalPodAutoscaler` keyed on Redis Stream lag, and an edge gateway for north-south traffic.
 
-**Operational complexity.** Running a real Kubernetes cluster — even via managed services like GKE or EKS — requires understanding nodes, networking, RBAC, ingress, secrets, observability sidecars, image registries, deploy pipelines. Each is its own learning curve. For a v1 project measured in weeks, the complexity overhead is dispropotionate.
-
-**Demonstration parity.** Fly.io deploys directly from Docker images with one command, supports observability natively, and offers PostgreSQL and Redis as managed services. For demonstrating that RRQ works end-to-end (which is the v1 deliverable), Fly.io provides everything K8s would, with vastly less setup.
-
-The Kubernetes design exists because a reviewer might ask "how would this run at scale?" and the answer should be more substantive than "I'd figure it out." This doc plus the `/k8s/` manifests is the answer.
+The edge is **Kong**, sitting in front of the custom API Gateway. Kong handles TLS termination, a coarse JWT signature check, and per-merchant rate limiting; it then routes to the API Gateway service, which keeps the idempotency claim and the durable hand-off to Redis Streams. Everything below is the topology the `/k8s/` manifests describe.
 
 ---
 
@@ -26,30 +22,56 @@ Each RRQ service runs as a Kubernetes `Deployment`:
 
 ```
 Deployment           Replicas  Purpose
-api-gateway           3        HTTP frontend; behind Service+Ingress
+kong                  2        edge gateway; TLS, JWT pre-check, rate limiting
+api-gateway           3        HTTP frontend; behind Kong
 saga-worker           2        consumes job stream
 webhook-worker        2        consumes notify streams (handles all 16 shards)
 fraud-worker          1        consumes job stream as separate group
 recon-worker          1        runs as CronJob, not Deployment (one-shot)
-admin-cli             N/A      ad-hoc binary; not deployed continuously
+admin-dashboard       1        web UI; behind Service+Ingress (low-traffic)
 ```
 
 Plus stateful dependencies:
-- Postgres (StatefulSet, single replica in v1 design; production uses managed Postgres)
-- Redis (StatefulSet, single replica in v1 design; production uses managed Redis)
+- Postgres (StatefulSet, single replica in-cluster; a managed Postgres is the production-grade option)
+- Redis (StatefulSet, single replica in-cluster; a managed Redis is the production-grade option)
 - Jaeger, Prometheus, Grafana (separate deployments for observability)
 
-The api-gateway has 3 replicas for redundancy and load. Workers have 2 replicas each (workers are stateless; replicas split consumer group load). Reconciliation runs as a CronJob at 01:00 UTC. Admin CLI is a binary you run, not a service.
+The api-gateway has 3 replicas for redundancy and load. Workers have 2 replicas each (workers are stateless; replicas split consumer group load). Reconciliation runs as a CronJob at 01:00 UTC. The Admin Dashboard runs as its own single-replica Deployment behind a Service and Ingress, not as a binary you run ad hoc.
+
+```mermaid
+graph TD
+    internet(["Internet"]) -->|HTTPS| ingress["Ingress + Kong<br/>(TLS, JWT precheck, rate limit)"]
+    ingress -->|/v1| gw["api-gateway x3"]
+    ingress -->|/admin| dash["admin-dashboard x1"]
+    gw -->|XADD| redis[("Redis<br/>StatefulSet<br/>streams, locks, cache")]
+    redis --> saga["saga-worker x2"]
+    redis --> fraud["fraud-worker x1"]
+    redis --> webhook["webhook-worker x2"]
+    saga --> pg[("Postgres<br/>StatefulSet<br/>source of truth")]
+    fraud --> pg
+    webhook --> pg
+    dash --> pg
+    dash --> redis
+    cron["recon-worker<br/>(CronJob 01:00 UTC)"] -->|reads/compares| pg
+    webhook -->|HTTPS| ext(["Merchant endpoints"])
+
+    subgraph observability
+      otel["OTel Collector"] --> jaeger["Jaeger"]
+      otel --> prom["Prometheus"] --> graf["Grafana"]
+    end
+    gw -.->|traces/metrics| otel
+    saga -.-> otel
+```
 
 ---
 
-## Health probes — liveness and readiness
+## Health probes, liveness and readiness
 
 Every Deployment specifies two probes:
 
-**Liveness probe** — "is the pod alive?" If it fails repeatedly, K8s kills and restarts the pod.
+**Liveness probe**, "is the pod alive?" If it fails repeatedly, K8s kills and restarts the pod.
 
-**Readiness probe** — "is the pod ready for traffic?" If it fails, K8s removes the pod from the load balancer pool but doesn't restart.
+**Readiness probe**, "is the pod ready for traffic?" If it fails, K8s removes the pod from the load balancer pool but doesn't restart.
 
 A common mistake: using the same probe for both. Bad because:
 - If readiness is too aggressive, pods get removed from rotation unnecessarily (e.g., during a slow start-up).
@@ -58,12 +80,12 @@ A common mistake: using the same probe for both. Bad because:
 RRQ's probe design:
 
 **API Gateway:**
-- Liveness: `GET /health` — returns 200 if the process is alive. Doesn't check downstream dependencies.
-- Readiness: `GET /ready` — returns 200 only if Redis and Postgres connections are healthy. Returns 503 otherwise (so K8s drains the pod until it recovers).
+- Liveness: `GET /health`, returns 200 if the process is alive. Doesn't check downstream dependencies.
+- Readiness: `GET /ready`, returns 200 only if Redis and Postgres connections are healthy. Returns 503 otherwise (so K8s drains the pod until it recovers).
 
 **Saga Worker, Webhook Worker, Fraud Worker:**
 - Liveness: an internal heartbeat. The consumer loop updates a timestamp every iteration; the probe checks the timestamp is recent (< 30s old). Stuck workers (e.g., deadlock) eventually fail liveness and are restarted.
-- Readiness: Redis and Postgres connections plus consumer-lag check. If consumer lag is critically high (worker is overwhelmed), readiness fails to slow new message claims. (Actually, this is subtle — readiness doesn't directly affect Redis Streams consumer group membership. The pod stays in the group regardless of readiness. Use lag as a metric/alert, not a readiness signal. This is a real distinction.)
+- Readiness: Redis and Postgres connections plus consumer-lag check. If consumer lag is critically high (worker is overwhelmed), readiness fails to slow new message claims. (Actually, this is subtle, readiness doesn't directly affect Redis Streams consumer group membership. The pod stays in the group regardless of readiness. Use lag as a metric/alert, not a readiness signal. This is a real distinction.)
 
 **Reconciliation:** CronJob; no probes. Runs once, exits.
 
@@ -84,7 +106,7 @@ readinessProbe:
 
 ---
 
-## Graceful shutdown — preStop and terminationGracePeriod
+## Graceful shutdown, preStop and terminationGracePeriod
 
 When K8s wants to shut down a pod (rolling update, scale-down, eviction):
 
@@ -112,7 +134,7 @@ spec:
 
 The application catches SIGUSR1 (using it as "begin shutdown" signal), stops the main loop, finishes any in-flight saga step, exits. The 60-second grace period accommodates the longest expected single step plus margin.
 
-Without this pattern, K8s would SIGKILL pods that are mid-saga, leaving messages unacked (eventually XAUTOCLAIM picks them up — correct, but more disruption than necessary).
+Without this pattern, K8s would SIGKILL pods that are mid-saga, leaving messages unacked (eventually XAUTOCLAIM picks them up, correct, but more disruption than necessary).
 
 ---
 
@@ -178,9 +200,9 @@ For RRQ:
 - Fraud Worker: variable; depends on active wallet count (each active wallet has a task with channel buffer).
 - Reconciliation: high CPU during run (the work is CPU-bound); high memory if streams aren't used carefully.
 
-The numbers above are starting points. v1 benchmarks should inform v2's actual production sizing.
+The numbers above are starting points. Benchmarks should inform actual production sizing.
 
-Without resource specifications, benchmarks are meaningless — pods compete for resources unpredictably, and one node's pods affect another's throughput. The K8s deployment requires explicit sizing.
+Without resource specifications, benchmarks are meaningless, pods compete for resources unpredictably, and one node's pods affect another's throughput. The K8s deployment requires explicit sizing.
 
 ---
 
@@ -207,20 +229,19 @@ type: Opaque
 stringData:
   postgres_password: "${POSTGRES_PASSWORD}"  # injected at apply time
   jwt_secret: "${JWT_SECRET}"
-  fx_provider_api_key: "${FX_API_KEY}"      # for v2 FX
 ```
 
 Deployments reference these via environment variables. Pods get the config injected at startup.
 
-The secrets are managed externally (via Vault, AWS Secrets Manager, Sealed Secrets, External Secrets Operator). v1 design uses `External Secrets Operator` so secrets in K8s are synced from a real secret store; raw secrets are never in the manifest YAML.
+The secrets are managed externally (via Vault, AWS Secrets Manager, Sealed Secrets, External Secrets Operator). The design uses `External Secrets Operator` so secrets in K8s are synced from a real secret store; raw secrets are never in the manifest YAML.
 
 ---
 
-## Networking — Services and Ingress
+## Networking, Services and Ingress
 
 **Internal services** are exposed via ClusterIP Services. Other pods address them by DNS name: `api-gateway.rrq.svc.cluster.local`.
 
-**External traffic** (merchants reaching the API) hits an Ingress, typically backed by an Ingress Controller (Traefik, nginx-ingress, or cloud-provider-managed):
+**External traffic** (merchants reaching the API) hits **Kong** at the edge. Kong terminates TLS, does a coarse JWT signature check, applies per-merchant rate limiting, and routes `/v1` to the `api-gateway` Service. Kong is configured through the Kong Ingress Controller:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -229,8 +250,9 @@ metadata:
   name: rrq-api
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
+    konghq.com/plugins: rrq-rate-limit,rrq-jwt
 spec:
-  ingressClassName: traefik
+  ingressClassName: kong
   rules:
   - host: api.rrq.example
     http:
@@ -248,7 +270,7 @@ spec:
     secretName: rrq-tls-cert
 ```
 
-TLS termination is at the Ingress. The Ingress controller obtains certificates via cert-manager + Let's Encrypt. Internal traffic between services is unencrypted in v1 (see Linkerd / mTLS in [`33-MTLS.md`](33-MTLS.md) for v2 hardening).
+TLS termination is at Kong, which obtains certificates via cert-manager + Let's Encrypt. The custom API Gateway still owns the parts Kong cannot: the idempotency claim (atomic `SETNX`) and the durable `XADD` to Redis Streams. Internal traffic stays within the cluster network.
 
 ---
 
@@ -282,7 +304,7 @@ spec:
           restartPolicy: OnFailure
 ```
 
-`concurrencyPolicy: Forbid` is critical: it prevents overlapping reconciliation runs. If yesterday's run is somehow still going when today's would start, K8s defers today's. Without this, two concurrent reconciliation passes could compete for the advisory lock and one would simply fail loudly — wasted work.
+`concurrencyPolicy: Forbid` is critical: it prevents overlapping reconciliation runs. If yesterday's run is somehow still going when today's would start, K8s defers today's. Without this, two concurrent reconciliation passes could compete for the advisory lock and one would simply fail loudly, wasted work.
 
 `restartPolicy: OnFailure` retries a failed run. If the run keeps failing, the failed jobs accumulate (visible via `kubectl get jobs`) and operators investigate.
 
@@ -292,20 +314,20 @@ spec:
 
 Postgres and Redis run as StatefulSets. The distinguishing feature: stable pod names (`postgres-0`, `redis-0`) and stable persistent volumes (don't get reshuffled between pods on restart).
 
-For production, you'd typically *not* run Postgres in-cluster — you'd use a managed service (RDS, Cloud SQL, AlloyDB). The complexity of running databases in K8s is real; managed services handle it better.
+For production, you'd typically *not* run Postgres in-cluster, you'd use a managed service (RDS, Cloud SQL, AlloyDB). The complexity of running databases in K8s is real; managed services handle it better.
 
 For development/staging, in-cluster Postgres works. The StatefulSet spec includes:
 - PVC template (each pod gets its own persistent volume).
 - Init container for first-time setup (migrations).
 - Connection pool sidecar (PgBouncer) for production-grade connection management.
 
-For v2, the design assumes managed Postgres in production, in-cluster for dev/staging.
+The design assumes managed Postgres in production and in-cluster Postgres for dev/staging.
 
 ---
 
 ## A note on operational maturity
 
-The K8s design above describes a "do it right" deployment. The reality of an early-stage system is more pragmatic — you might run a single Postgres on a single VM, you might skip the HPA initially, you might not have cert-manager set up. That's fine.
+The design above describes a "do it right" deployment. The reality of an early-stage system is more pragmatic, you might run a single Postgres on a single VM, you might skip the HPA initially, you might not have cert-manager set up. That's fine; the manifests support starting small and growing into the full shape.
 
 The design document exists to show:
 
@@ -313,16 +335,16 @@ The design document exists to show:
 2. Each component justified by its role (probes for health, HPA for elasticity, CronJob for batch, etc.).
 3. What you'd add as the system matures.
 
-A reviewer asking "how does this scale?" gets a real answer pointing to the manifests and explaining the moving parts. v1 doesn't run on K8s, but the design is ready.
+A reviewer asking "how does this scale?" gets a real answer pointing to the manifests and explaining the moving parts.
 
 ---
 
 ## Where to read next
 
-- The mTLS design that complements this → [`33-MTLS.md`](33-MTLS.md)
+- The operations playbook that runs on top of this → [`28-OPERATIONS.md`](28-OPERATIONS.md)
 - The actual manifests → [`/k8s/`](../../k8s/) (in the repo)
 - Kubernetes Patterns book by Roland Huss and Bilgin Ibryam for systemic background
 
 ---
 
-*Pass 4 of the architecture series. Deferred feature; v1 deploys to Fly.io, not Kubernetes.*
+*Pass 4 of the architecture series. The deployment target for RRQ.*

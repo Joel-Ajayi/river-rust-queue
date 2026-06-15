@@ -1,6 +1,6 @@
-# 22 — Ordering
+# 22: Ordering
 
-> **What this is.** The deep dive on ordering guarantees in RRQ. The system has three distinct ordering problems — per-wallet, per-merchant, per-saga — and each is solved by a different mechanism. This doc explains why one-size-fits-all doesn't work and what each mechanism gives up to gain its specific guarantee.
+> **What this is.** The deep dive on ordering guarantees in RRQ. The system has three distinct ordering problems, per-wallet, per-merchant, per-saga, and each is solved by a different mechanism. This doc explains why one-size-fits-all doesn't work and what each mechanism gives up to gain its specific guarantee.
 >
 > **Reading time.** ~20 minutes.
 >
@@ -10,7 +10,7 @@
 
 ## Why ordering is hard
 
-Ordering in distributed systems is hard because the obvious property — "events happen in some order, just preserve it" — is wrong from the start. There is no single "order" in which events happen. Two events on different machines have no inherent temporal relationship; their clocks disagree, their messages arrive at different speeds, and the very notion of "simultaneity" breaks down at network scale.
+Ordering in distributed systems is hard because the obvious property, "events happen in some order, just preserve it", is wrong from the start. There is no single "order" in which events happen. Two events on different machines have no inherent temporal relationship; their clocks disagree, their messages arrive at different speeds, and the very notion of "simultaneity" breaks down at network scale.
 
 What distributed systems can offer is **ordering relative to some scope**. RRQ defines three scopes that matter:
 
@@ -18,7 +18,7 @@ What distributed systems can offer is **ordering relative to some scope**. RRQ d
 - **Per merchant** (sequential): notifications to one merchant must arrive in the order events occurred from their perspective.
 - **Per wallet** (causal): events affecting one wallet must be processed in their causal order, especially for stateful detection.
 
-These are *not* the same problem. A solution for one isn't automatically a solution for another. Trying to solve all three with one mechanism — a single global serial consumer, say — would either fail to scale or fail to preserve the orderings that actually matter.
+These are *not* the same problem. A solution for one isn't automatically a solution for another. Trying to solve all three with one mechanism, a single global serial consumer, say, would either fail to scale or fail to preserve the orderings that actually matter.
 
 This doc walks through each scope, the mechanism that solves it, and the alternatives that don't.
 
@@ -46,11 +46,11 @@ The lock mechanism is Redlock, an algorithm published by Salvatore Sanfilippo (R
 4. If not, the client releases whatever partial locks it acquired and retries with backoff.
 5. To release the lock, the client runs a Lua script on each node that deletes the key *only if* the value matches the token. This prevents accidentally releasing a lock acquired by someone else (after our TTL expired, another client's token replaced ours).
 
-The "majority of N independent nodes" is what makes the algorithm robust to single-node failure. With N=5 nodes, the algorithm tolerates 2 nodes failing without losing the lock's safety property.
+The "majority of N independent nodes" is what makes the algorithm tolerant of single-node failure. With N=5 nodes, the algorithm tolerates 2 nodes failing without losing the lock's safety property.
 
-**Why not a single-node SETNX?** With one Redis node, if the node dies and another takes over (via failover), the lock state can be lost or inconsistent — two clients could each believe they hold the lock. Single-node SETNX is sufficient for non-critical advisory locking but not for protecting financial state.
+**Why not a single-node SETNX?** With one Redis node, if the node dies and another takes over (via failover), the lock state can be lost or inconsistent, two clients could each believe they hold the lock. Single-node SETNX is sufficient for non-critical advisory locking but not for protecting financial state.
 
-**v1 deploys on a single Redis node.** This is a documented gap: production Redlock requires 3+ independent nodes. The algorithm is implemented correctly so it scales to multi-node trivially when needed; only the deployment changes. The trade-off in v1: development simplicity over production-grade lock safety.
+**RRQ deploys on a single Redis node.** This is a documented gap: production Redlock requires 3+ independent nodes. The algorithm is implemented correctly so it scales to multi-node trivially when needed; only the deployment changes. The trade-off: operational simplicity over production-grade lock safety.
 
 ### Why locks specifically, not transactions
 
@@ -60,7 +60,7 @@ The problem: the saga spans many database transactions. Its scope is longer than
 
 You could hack around this with Postgres advisory locks (which can span transactions on a single session), but you'd still need to keep the session open across the whole saga. And advisory locks are local to one Postgres instance, so if you ever scale to multiple Postgres replicas or shards, the advisory lock doesn't extend across them. Redlock does, by design.
 
-The deeper answer: **a saga isn't a database operation, it's a process.** Locks that span the saga's scope have to live outside the database. Redis is the natural choice for that — it's the place where "ephemeral coordination state" already lives in the system.
+The deeper answer: **a saga isn't a database operation, it's a process.** Locks that span the saga's scope have to live outside the database. Redis is the natural choice for that, it's the place where "ephemeral coordination state" already lives in the system.
 
 ### The deadlock problem and lexicographic sorting
 
@@ -71,7 +71,7 @@ If two sagas need locks on the same two wallets, in different orders, you can de
 
 Neither can proceed. Classic deadlock.
 
-The fix: **lock IDs in a consistent order across all sagas.** If both sagas always lock W1 first, then W2, they can't deadlock — one of them gets to W1 first, the other waits, but neither holds something the first needs.
+The fix: **lock IDs in a consistent order across all sagas.** If both sagas always lock W1 first, then W2, they can't deadlock, one of them gets to W1 first, the other waits, but neither holds something the first needs.
 
 The order is lexicographic on the wallet IDs (strings sorted as bytes). For Saga A with wallets `[W2, W1]` and Saga B with wallets `[W1, W2]`, both compute the sorted order `[W1, W2]` and lock W1 first. Deadlock impossible.
 
@@ -79,14 +79,14 @@ This is one of those tiny details that's invisible when it works and catastrophi
 
 ### What if the lock TTL expires mid-saga?
 
-Realistic scenario: saga is running normally, but the wallet-mutating section takes longer than expected — maybe Postgres had a brief slowdown. The lock TTL expires. Another saga acquires the lock. Now two sagas are operating on the same wallet concurrently, exactly the situation locking was supposed to prevent.
+Realistic scenario: saga is running normally, but the wallet-mutating section takes longer than expected, maybe Postgres had a brief slowdown. The lock TTL expires. Another saga acquires the lock. Now two sagas are operating on the same wallet concurrently, exactly the situation locking was supposed to prevent.
 
 Two defenses:
 
 1. **The TTL is set comfortably above the longest expected duration.** RRQ uses 5 seconds; the mutating section is normally < 500ms. The expected case is the lock has plenty of headroom.
 2. **The compensating-credit / debit pattern is idempotent.** Even if two sagas did concurrent work, the `UNIQUE(saga_id, step_name)` constraint on `ledger_entries` prevents double-writes. The worst-case effect of TTL expiry is two sagas both *trying* to advance, and both eventually realize "I no longer hold the lock" via fencing tokens (see below).
 
-**Fencing tokens** are a more robust solution still. Each lock acquisition increments a monotonic counter (the fencing token). When the saga writes to the ledger, it includes the token. The database can refuse writes from stale tokens. RRQ doesn't implement fencing tokens in v1 — the TTL-plus-idempotency combo is sufficient at our scale — but it's a known v2 enhancement. The trade-off: fencing tokens add per-write overhead; the TTL approach is simpler and works for most workloads.
+**Fencing tokens** are a stronger solution still. Each lock acquisition increments a monotonic counter (the fencing token). When the saga writes to the ledger, it includes the token. The database can refuse writes from stale tokens. RRQ doesn't implement fencing tokens, the TTL-plus-idempotency combo is sufficient at our scale; they're a known enhancement if it ever isn't. The trade-off: fencing tokens add per-write overhead; the TTL approach is simpler and works for most workloads.
 
 The detailed treatment of locking, including the formal proof sketch and Martin Kleppmann's critique of the Redlock algorithm, lives in [`23-LOCKING.md`](23-LOCKING.md).
 
@@ -96,7 +96,7 @@ The detailed treatment of locking, including the formal proof sketch and Martin 
 
 ### The problem
 
-A merchant builds a state machine on top of webhooks: they receive `transfer.requested`, then `transfer.completed` (or `transfer.failed`), then maybe `webhook.delivered`. If these arrive out of order — `transfer.completed` before `transfer.requested` — the merchant's state machine breaks. Either they handle "completed for an unknown transfer" defensively (and they often don't), or their database ends up in an inconsistent state.
+A merchant builds a state machine on top of webhooks: they receive `transfer.requested`, then `transfer.completed` (or `transfer.failed`), then maybe `webhook.delivered`. If these arrive out of order, `transfer.completed` before `transfer.requested`, the merchant's state machine breaks. Either they handle "completed for an unknown transfer" defensively (and they often don't), or their database ends up in an inconsistent state.
 
 The system has to guarantee that for a given merchant, webhooks are *attempted* in the order their source events occurred. Cross-merchant order doesn't matter; each merchant only sees their own webhooks anyway.
 
@@ -106,11 +106,11 @@ The naive solution: one consumer, one stream, one merchant at a time. Process ev
 
 This trivially gives ordering. It also gives terrible throughput. One slow merchant blocks every other merchant. A merchant with a 5-second-response endpoint blocks the entire system for 5 seconds per webhook.
 
-You need parallelism across merchants. But naive parallelism — a consumer group with N consumers all reading from one stream — destroys ordering. Two consumers can each grab a message for merchant M, and process them concurrently, in either order.
+You need parallelism across merchants. But naive parallelism, a consumer group with N consumers all reading from one stream, destroys ordering. Two consumers can each grab a message for merchant M, and process them concurrently, in either order.
 
 ### The partitioning approach
 
-The fix: partition the stream by merchant_id. Compute `shard = hash(merchant_id) mod N` (N is typically 16) and write to `stream:notify-<shard>`. Each shard is consumed by exactly one consumer at a time within the `webhook-workers` consumer group — Redis Streams enforces this for normal stream consumption (one message goes to one consumer in the group).
+The fix: partition the stream by merchant_id. Compute `shard = hash(merchant_id) mod N` (N is typically 16) and write to `stream:notify-<shard>`. Each shard is consumed by exactly one consumer at a time within the `webhook-workers` consumer group, Redis Streams enforces this for normal stream consumption (one message goes to one consumer in the group).
 
 Result: all of merchant M's events go to the same shard, consumed by one consumer, in arrival order. Different merchants land on (potentially) different shards and run in parallel.
 
@@ -132,7 +132,7 @@ Result: all of merchant M's events go to the same shard, consumed by one consume
        └─────────┘    └─────────┘    └─────────┘
 ```
 
-The number of shards is fixed at startup (configuration). 16 is a reasonable default for the throughput levels RRQ targets — rule of thumb is 4× the number of worker replicas, so 4 workers handle 16 shards = 4 shards each.
+The number of shards is fixed at startup (configuration). 16 is a reasonable default for the throughput levels RRQ targets, rule of thumb is 4× the number of worker replicas, so 4 workers handle 16 shards = 4 shards each.
 
 ### Why this works
 
@@ -146,11 +146,11 @@ So M's events are processed serially. Order preserved.
 
 **Load imbalance.** Sixteen shards distribute *number of merchants* evenly across shards (via hash uniformity), but they don't distribute *load* evenly. A merchant with 1000 events/sec and a merchant with 1 event/day each contribute one slot to their shard. The slot is the same; the load isn't. A shard with a hot merchant becomes the bottleneck; other shards are idle.
 
-For RRQ's scale, this is fine. We have a small number of merchants generating most traffic, and we'll have 4 workers with 4 shards each. The worst case is "one merchant generates all the traffic on one shard" — and that's still a single slow consumer, which is the baseline we started from.
+For RRQ's scale, this is fine. We have a small number of merchants generating most traffic, and we'll have 4 workers with 4 shards each. The worst case is "one merchant generates all the traffic on one shard", and that's still a single slow consumer, which is the baseline we started from.
 
-For very large scale, you'd address this with more shards (smaller granularity) or shard-rebalancing strategies. v1 doesn't need either.
+For very large scale, you'd address this with more shards (smaller granularity) or shard-rebalancing strategies. RRQ doesn't need either at its target scale.
 
-**Resharding is hard.** If you ever decide to change the shard count (16 → 32), you change which merchant hashes to which shard. Mid-flight, some events are in the old shard scheme and some in the new. You either drain the stream completely before changing (downtime) or use a more complex rebalancing scheme. RRQ v1 doesn't reshard; the count is fixed.
+**Resharding is hard.** If you ever decide to change the shard count (16 → 32), you change which merchant hashes to which shard. Mid-flight, some events are in the old shard scheme and some in the new. You either drain the stream completely before changing (downtime) or use a more complex rebalancing scheme. RRQ doesn't reshard; the count is fixed.
 
 ### Why not by merchant directly?
 
@@ -166,13 +166,13 @@ Hash-partitioning gives you a fixed, small set of streams (16) regardless of mer
 
 ### The problem
 
-The fraud worker needs to process events for wallet W in causal order. A velocity computation over a sliding window is stateful — out-of-order events would give wrong counts.
+The fraud worker needs to process events for wallet W in causal order. A velocity computation over a sliding window is stateful, out-of-order events would give wrong counts.
 
 This is shaped like the webhook problem (per-key ordering with parallelism), but with one crucial difference: **wallet cardinality is much higher than merchant cardinality**, and load skew is much worse.
 
 A merchant has typically a handful to dozens of wallets, all serving their transactions. A merchant's primary funding wallet might generate 1000 events/sec while most of their wallets generate one event per week. With merchants there are maybe thousands of active accounts at a given moment; with wallets there are tens of thousands to millions.
 
-If you partition by wallet_id the same way you partition by merchant_id, the hot wallets all hash to single shards and bottleneck those shards. Adding more shards doesn't help — the hot wallet still hashes to one. You'd need *adaptive* partitioning (rebalance shards based on load), which is significantly more complex than fixed partitioning.
+If you partition by wallet_id the same way you partition by merchant_id, the hot wallets all hash to single shards and bottleneck those shards. Adding more shards doesn't help, the hot wallet still hashes to one. You'd need *adaptive* partitioning (rebalance shards based on load), which is significantly more complex than fixed partitioning.
 
 ### The dispatch approach
 
@@ -208,9 +208,9 @@ The alternative: don't partition at the stream level. Instead, every fraud worke
 The properties:
 
 - **Per-wallet ordering preserved.** Each wallet has one task draining its in-process channel. Within the task, processing is strictly serial. So events for W1 are processed in their dispatch order.
-- **Parallelism across wallets.** Different wallets have different tasks running concurrently. The scheduling is the language runtime's (Go's scheduler, Tokio's executor) — both are highly tuned for this kind of "many small tasks" workload.
+- **Parallelism across wallets.** Different wallets have different tasks running concurrently. The scheduling is the language runtime's (Go's scheduler, Tokio's executor), both are highly tuned for this kind of "many small tasks" workload.
 - **No static partitioning.** Tasks are spawned lazily when a wallet's first event arrives. No pre-allocation; no configuration of "max wallets."
-- **Load follows demand.** Hot wallets have busy tasks; cold wallets have idle tasks. Idle tasks exit after a timeout (5 minutes in v1) to reclaim resources.
+- **Load follows demand.** Hot wallets have busy tasks; cold wallets have idle tasks. Idle tasks exit after a timeout (5 minutes) to reclaim resources.
 
 ### Why not just partition?
 
@@ -243,13 +243,13 @@ Cross-wallet parallelism comes from different wallets having different tasks; th
 
 If we ACK before processing: a worker crash between ACK and processing loses the event. The next worker won't see it (it's already ACKed); only reconciliation can catch the gap.
 
-If we ACK after processing: the outer consumer has to wait for the wallet task to confirm. This serializes the outer consumer to the slowest wallet task, killing throughput. Plus the coordination is non-trivial — you need a back-channel from task to dispatcher.
+If we ACK after processing: the outer consumer has to wait for the wallet task to confirm. This serializes the outer consumer to the slowest wallet task, killing throughput. Plus the coordination is non-trivial, you need a back-channel from task to dispatcher.
 
 RRQ takes the first option (ACK before processing) and accepts the small loss window for fraud (a detective control, where missing a few events doesn't break anything fundamentally). This is documented in [`../services/13-FRAUD-WORKER.md`](../services/13-FRAUD-WORKER.md) and the system's STATUS.
 
 For a stronger guarantee (say, in a hypothetical future critical-fraud variant), you'd choose the second option and accept the throughput cost.
 
-**Task lifecycle management.** Tasks are spawned per wallet; they consume memory (goroutine stack ~2KB, channel buffer ~13KB). For millions of total wallets, you'd run out of memory if every wallet ever seen had a permanent task. The mitigation is the idle timeout — tasks exit after 5 minutes of inactivity, freeing memory. Active task count is bounded by "currently busy wallets," which is much smaller.
+**Task lifecycle management.** Tasks are spawned per wallet; they consume memory (goroutine stack ~2KB, channel buffer ~13KB). For millions of total wallets, you'd run out of memory if every wallet ever seen had a permanent task. The mitigation is the idle timeout, tasks exit after 5 minutes of inactivity, freeing memory. Active task count is bounded by "currently busy wallets," which is much smaller.
 
 **Coordination overhead within a worker.** The dispatcher's `map[WalletID]chan Event` is accessed on every event. RRQ uses `sync.RWMutex` with a fast-path read-lock and slow-path write-lock-with-double-check (in Go) or `DashMap` (lock-free concurrent map, in Rust). At scale, this contention is measurable but not blocking.
 
@@ -257,7 +257,7 @@ For a stronger guarantee (say, in a hypothetical future critical-fraud variant),
 
 Some readers will recognize this as the standard pattern in actor systems (Akka, Erlang/OTP, Orleans). Actor systems treat the "per-actor mailbox + serial processing" as the unit of computation; RRQ does the same without the framework.
 
-The choice not to use an actor framework: RRQ doesn't need actor *supervision*, *location transparency*, or *distributed actor placement* — features that justify the complexity of a framework. We need the *single-writer-per-key* pattern, which is a small dedicated implementation, not a framework. Smaller dependency surface, less to learn, easier to debug.
+The choice not to use an actor framework: RRQ doesn't need actor *supervision*, *location transparency*, or *distributed actor placement*, features that justify the complexity of a framework. We need the *single-writer-per-key* pattern, which is a small dedicated implementation, not a framework. Smaller dependency surface, less to learn, easier to debug.
 
 If we were building a much larger system with many such patterns, the calculus would shift. For RRQ's scope, in-language primitives win.
 
@@ -275,9 +275,9 @@ The three ordering problems and their solutions:
 
 Each is the right tool for its problem. None of them generalizes well to the others:
 
-- **Locks across all of a merchant's webhook deliveries?** Wasteful — the deliveries are independent operations; only the order matters, not exclusion.
-- **Partitioning per saga?** Doesn't make sense — sagas are short-lived; you can't statically partition them.
-- **In-process dispatch for wallet locking?** Doesn't work across workers — if Saga A on Worker 1 and Saga B on Worker 2 both touch wallet W, an in-process map on either worker doesn't see the other.
+- **Locks across all of a merchant's webhook deliveries?** Wasteful, the deliveries are independent operations; only the order matters, not exclusion.
+- **Partitioning per saga?** Doesn't make sense, sagas are short-lived; you can't statically partition them.
+- **In-process dispatch for wallet locking?** Doesn't work across workers, if Saga A on Worker 1 and Saga B on Worker 2 both touch wallet W, an in-process map on either worker doesn't see the other.
 
 The lesson: **specific ordering guarantees come from specific mechanisms.** The naive impulse to find one elegant primitive that solves all of them produces a system that solves none well. RRQ's three mechanisms are the right answer because they each solve their own problem at the right level of abstraction.
 
@@ -285,13 +285,13 @@ The lesson: **specific ordering guarantees come from specific mechanisms.** The 
 
 ## What about global ordering?
 
-RRQ deliberately doesn't guarantee any global ordering. Across merchants, across wallets, across sagas — events are not strictly ordered. Two unrelated transfers may appear in the event log in either order, regardless of wall-clock time.
+RRQ deliberately doesn't guarantee any global ordering. Across merchants, across wallets, across sagas, events are not strictly ordered. Two unrelated transfers may appear in the event log in either order, regardless of wall-clock time.
 
-This is *intentional*. Global ordering would require a single sequencing point that every operation passes through, serializing the entire system on one resource. The cost — throughput cap and single point of failure — far exceeds the value, because no correctness property in RRQ depends on global ordering.
+This is *intentional*. Global ordering would require a single sequencing point that every operation passes through, serializing the entire system on one resource. The cost, throughput cap and single point of failure, far exceeds the value, because no correctness property in RRQ depends on global ordering.
 
 The properties that need ordering get it (per-saga, per-merchant, per-wallet); everything else is free to happen in any order. This is the difference between "ordered enough to be correct" and "ordered for the sake of ordering."
 
-Some systems do need global ordering — financial markets with strict price-time priority, for instance. Those systems pay the throughput cost. RRQ doesn't, and shouldn't.
+Some systems do need global ordering, financial markets with strict price-time priority, for instance. Those systems pay the throughput cost. RRQ doesn't, and shouldn't.
 
 ---
 
@@ -299,7 +299,7 @@ Some systems do need global ordering — financial markets with strict price-tim
 
 A small but important note: within the event store, events have a monotonic `id` (BIGSERIAL). This gives a *global* sequence number for all events, just by virtue of being assigned at INSERT.
 
-This is *not* a global ordering guarantee in the strict sense — two events with adjacent IDs might have been "concurrent" in any reasonable definition (their saga executions overlapped in real time). But the ID does give a useful property: **within the event store, replay is deterministic by ID order**. Reconciliation reads events by ID; it gets a consistent picture each time.
+This is *not* a global ordering guarantee in the strict sense, two events with adjacent IDs might have been "concurrent" in any reasonable definition (their saga executions overlapped in real time). But the ID does give a useful property: **within the event store, replay is deterministic by ID order**. Reconciliation reads events by ID; it gets a consistent picture each time.
 
 The monotonic ID is also what makes per-wallet ordering verifiable. Reconciliation queries `WHERE aggregate_id = W ORDER BY id ASC` and gets W's events in the order they were committed. As long as the writer respected per-wallet locking, this order is also the causal order. If the order is wrong (e.g., a credit appears before its paired debit), that's a bug, and reconciliation surfaces it.
 
@@ -313,7 +313,7 @@ In academic distributed systems literature, a fancier approach to ordering uses 
 
 RRQ doesn't use any of this. The single-writer-per-key pattern (Redlock for sagas, dispatch tasks for fraud, partitions for webhooks) sidesteps the need for vector clocks entirely. As long as one writer at a time is mutating a given key, you don't need fancy merge logic.
 
-The price: you can't write to the same key in parallel. For RRQ's workload, this is fine — wallets are typically modified one transfer at a time, not in concurrent batches. For workloads where parallel writes to the same key are essential (high-write-rate counters, distributed inventory), vector clocks become relevant.
+The price: you can't write to the same key in parallel. For RRQ's workload, this is fine, wallets are typically modified one transfer at a time, not in concurrent batches. For workloads where parallel writes to the same key are essential (high-write-rate counters, distributed inventory), vector clocks become relevant.
 
 It's worth knowing they exist; it's also worth knowing that for systems shaped like RRQ, you don't need them.
 
@@ -349,7 +349,7 @@ Even with all three mechanisms correct, ordering bugs can hide in places that ar
 
 **Reconciliation against a moving target.** If reconciliation runs while sagas are completing, it might see an event without its paired ledger entry (transaction not committed yet on the ledger side). The safety margin (60-second window cutoff) addresses this. Without it, the reconciliation would produce false positives every night.
 
-**The merchant's clock.** Merchants timestamp things on their end. If they timestamp a request at 14:23 and submit it to RRQ at 14:25, RRQ's `occurred_at` is 14:25 but the merchant thinks the request "happened" at 14:23. This is fine — the timestamps are for logging — but it can confuse cross-system debugging.
+**The merchant's clock.** Merchants timestamp things on their end. If they timestamp a request at 14:23 and submit it to RRQ at 14:25, RRQ's `occurred_at` is 14:25 but the merchant thinks the request "happened" at 14:23. This is fine, the timestamps are for logging, but it can confuse cross-system debugging.
 
 ---
 

@@ -1,4 +1,4 @@
-# 42 — API Reference
+# 42: API Reference
 
 > **What this is.** Reference for the merchant-facing HTTP API. Endpoints, request/response shapes, error codes, authentication.
 >
@@ -24,12 +24,12 @@ All endpoints (except `/health`) require an `Authorization` header carrying a JW
 Authorization: Bearer <jwt>
 ```
 
-The JWT is HS256-signed (v1) with the platform secret. Tokens are issued out of band (the merchant registration / management API, out of scope for v1).
+The JWT is HS256-signed (v1) with the platform secret. Tokens are issued by `POST /v1/auth/token` (below), which exchanges a merchant's API key for a short-lived JWT. Merchant registration itself, creating the merchant and its API key, is an operator action through the Admin Dashboard, not a public endpoint (see [`../services/16-MERCHANT-WALLET-LIFECYCLE.md`](../services/16-MERCHANT-WALLET-LIFECYCLE.md)).
 
 The JWT claims include:
-- `sub` — the merchant_id
-- `iat`, `exp` — issued at, expires at (typically 1 hour validity)
-- `tier` — merchant tier (basic, premium, etc.; for rate-limit decisions in v2)
+- `sub`, the merchant_id
+- `iat`, `exp`, issued at, expires at (typically 1 hour validity)
+- `tier`, merchant tier (carried to the edge for Kong's rate-limit decisions)
 
 A missing or invalid JWT returns 401:
 
@@ -42,9 +42,41 @@ A missing or invalid JWT returns 401:
 
 ---
 
+## `POST /v1/auth/token`
+
+Exchange an API key for a short-lived JWT. This is the one endpoint that takes the raw API key rather than a JWT.
+
+**Request:**
+```http
+POST /v1/auth/token HTTP/1.1
+Authorization: Bearer <api_key>
+```
+
+**Successful response:**
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "token": "<jwt>",
+  "expires_in": 3600
+}
+```
+
+The server looks up the merchant by `api_key_hash`, bcrypt-compares the provided key, and on a match signs a JWT with claims `{sub, iat, exp = iat + 3600, tier}`. The merchant uses the returned token on all subsequent requests and exchanges the API key again for a fresh token before expiry. See [`../services/16-MERCHANT-WALLET-LIFECYCLE.md`](../services/16-MERCHANT-WALLET-LIFECYCLE.md) for the full flow.
+
+**Errors:**
+
+| Status | Code | When |
+| --- | --- | --- |
+| 401 | `INVALID_API_KEY` | API key missing or does not match any merchant |
+| 403 | `MERCHANT_FROZEN` | Merchant account is not active |
+
+---
+
 ## Idempotency
 
-All POST endpoints require an `Idempotency-Key` header. The merchant generates this (typically UUIDv4):
+The work-submitting POST endpoints (`/v1/transfers`, `/v1/payouts`) require an `Idempotency-Key` header. The merchant generates this (typically UUIDv4):
 
 ```
 Idempotency-Key: 8e3f1c4a-9b2d-4f81-a7c5-d3b6e9f2a1c0
@@ -81,7 +113,7 @@ Content-Type: application/json
 | `from_wallet` | string | yes | ULID with `wal_` prefix; merchant must own. |
 | `to_wallet` | string | yes | ULID with `wal_` prefix. |
 | `amount` | integer | yes | In the smallest currency unit. Positive. |
-| `currency` | string | yes | ISO 4217. Must match both wallets' currencies in v1. |
+| `currency` | string | yes | ISO 4217. Must match both wallets' currencies. |
 | `reference` | string | no | Merchant-supplied. Stored in the saga. |
 
 **Successful response:**
@@ -267,6 +299,29 @@ The `/v1/jobs/{id}` endpoint is the **strongly consistent read** path. Merchants
 
 ---
 
+## List and read endpoints
+
+These read endpoints let a merchant inspect its own wallets, ledger, transfers, and webhook deliveries. They sit alongside the lifecycle work in [`../services/16-MERCHANT-WALLET-LIFECYCLE.md`](../services/16-MERCHANT-WALLET-LIFECYCLE.md).
+
+| Method | Path | Returns |
+| --- | --- | --- |
+| GET | `/v1/wallets` | Wallets owned by this merchant, with current balance |
+| GET | `/v1/wallets/{id}` | One wallet's details and balance |
+| GET | `/v1/wallets/{id}/ledger?from=&to=` | Ledger entries in a time window |
+| GET | `/v1/transfers?from=&to=&status=` | Transfers in a window, optionally filtered |
+| GET | `/v1/webhooks?from=&to=` | Webhook delivery attempts to this merchant |
+
+All are scoped to the calling merchant (the JWT's `sub` claim); a merchant cannot read another merchant's data (404, not 403, to avoid leaking existence). All are paginated via a `?cursor=` parameter, where the cursor is a base64-encoded `(last_seen_id, ordering)` so pagination stays stable as new rows are inserted.
+
+These reads come from the projection tables (`wallet_balance_cache`, `ledger_entries`, `webhook_deliveries`) and are eventually consistent. For a strongly consistent check of a single job, use `GET /v1/jobs/{id}` above.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 401 | `UNAUTHORIZED` | JWT missing/invalid/expired |
+| 404 | `NOT_FOUND` | Resource does not exist or belongs to another merchant |
+
+---
+
 ## Webhooks (outbound)
 
 When events occur, RRQ POSTs to the merchant's configured webhook URL with the signed payload.
@@ -339,16 +394,14 @@ The events delivered as webhooks (subset of the internal event types):
 | `transfer.failed` | A single transfer failed |
 | `bulk_payout.completed` | All sub-transfers in a bulk payout have terminated (some may have failed individually) |
 | `wallet.frozen` | A wallet was frozen (rare; informational) |
-| `dispute.initiated` | (v2) A chargeback was initiated against the merchant |
-| `dispute.resolved` | (v2) A chargeback was resolved |
+| `dispute.initiated` | A chargeback was initiated against the merchant (designed, not yet built) |
+| `dispute.resolved` | A chargeback was resolved (designed, not yet built) |
 
 ---
 
 ## Rate limiting
 
-v1 does not enforce per-merchant rate limits. The system can be overwhelmed by a single merchant submitting at very high rates.
-
-v2 will implement token-bucket rate limiting per merchant_id, exposed in headers:
+Per-merchant rate limiting is handled by **Kong** at the edge, in front of the API Gateway, not by the API Gateway itself (see [`../deep-dives/29-KUBERNETES.md`](../deep-dives/29-KUBERNETES.md)). Kong applies a token bucket per `merchant_id` and exposes the standard headers:
 
 ```http
 X-RateLimit-Limit: 1000
@@ -356,7 +409,7 @@ X-RateLimit-Remaining: 947
 X-RateLimit-Reset: 1715520000
 ```
 
-Exceeding the rate limit returns 429 Too Many Requests with `Retry-After` header.
+Exceeding the rate limit returns 429 Too Many Requests with a `Retry-After` header. The API Gateway itself enforces no rate limits; that concern lives entirely at the edge.
 
 ---
 
@@ -374,7 +427,7 @@ Not part of the merchant API; used by infrastructure.
 
 ## Versioning policy
 
-v1 paths (`/v1/*`) remain stable. Breaking changes go to a new version path (`/v2/*`). The old version is supported for at least 12 months after the new version is announced.
+The API is versioned in the URL path. `/v1/*` is the current and stable surface. Any future breaking change would be introduced under a new path prefix so existing `/v1` clients keep working; the path prefix is an API-evolution mechanism, not a product roadmap.
 
 Non-breaking additions (new optional fields, new error codes) can happen within a version. Clients should ignore unknown fields.
 

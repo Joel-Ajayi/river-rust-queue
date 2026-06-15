@@ -1,4 +1,4 @@
-# 24 — Resilience
+# 24: Resilience
 
 > **What this is.** The deep dive on resilience patterns in RRQ: circuit breakers, exponential backoff with jitter, and dead letter queues. Each addresses a different failure mode; together they form the system's defense against external dependency unreliability.
 >
@@ -32,7 +32,7 @@ This is the thundering herd. Retries make recovery harder, not easier.
 
 The standard fix is **exponential backoff**: each retry waits longer than the previous. After the first failure, wait 1 second. After the second, 2 seconds. After the third, 4. After the Nth, `base * 2^(N-1)`, capped at some maximum.
 
-Exponential backoff alone is *better* than no backoff, but it has a subtle problem: the retries are still correlated. All 1,000 webhooks that failed at the same moment retry at the same intervals — 1s, 2s, 4s — and hit the merchant in simultaneous bursts. The herd is slower but still herd-shaped.
+Exponential backoff alone is *better* than no backoff, but it has a subtle problem: the retries are still correlated. All 1,000 webhooks that failed at the same moment retry at the same intervals, 1s, 2s, 4s, and hit the merchant in simultaneous bursts. The herd is slower but still herd-shaped.
 
 ### Why jitter
 
@@ -83,9 +83,9 @@ The choices `base = 1s`, `cap = 5min`, `max_attempts = 10` are calibration, not 
 
 - **Base = 1s.** A merchant whose endpoint had a transient blip deserves a fast first retry. Too long and routine flakes feel slow; too short and the herd doesn't disperse. 1 second is a working compromise.
 - **Cap = 5min.** A long-broken endpoint shouldn't have its retry interval grow unboundedly. 5 minutes is short enough that recovery is detected within reasonable time; long enough that we're not hammering.
-- **Max attempts = 10.** Bounded by the total retry budget. With the formulas above, 10 attempts span ~45 minutes — enough for most transient failures to resolve, not so long that the DLQ never receives anything.
+- **Max attempts = 10.** Bounded by the total retry budget. With the formulas above, 10 attempts span ~45 minutes, enough for most transient failures to resolve, not so long that the DLQ never receives anything.
 
-A production deployment might tune these per-merchant — premium merchants get more attempts, free-tier merchants get fewer. v1 uses one set of values for all merchants.
+A production deployment might tune these per-merchant, premium merchants get more attempts, free-tier merchants get fewer. RRQ uses one set of values for all merchants.
 
 ### Implementation details
 
@@ -150,7 +150,7 @@ A circuit breaker has three states:
 
 **Half-Open**: one trial request is allowed through. If it succeeds, the breaker transitions back to **Closed** (the endpoint has recovered). If it fails, back to **Open** (cooldown restarts).
 
-The state names are confusing — "Closed" means "working normally" and "Open" means "tripped" — because they come from electrical engineering, where a closed circuit conducts and an open circuit doesn't. Software engineers get used to it.
+The state names are confusing, "Closed" means "working normally" and "Open" means "tripped", because they come from electrical engineering, where a closed circuit conducts and an open circuit doesn't. Software engineers get used to it.
 
 ### Why this works
 
@@ -174,7 +174,7 @@ Both are configuration. Production tuning depends on observed merchant endpoint 
 
 The circuit breaker is keyed *per merchant*, not globally. A failing merchant trips their own breaker without affecting other merchants.
 
-If the breaker were global, one broken merchant could effectively DoS the system — webhook delivery would halt for everyone while the global breaker was tripped. That's a denial-of-service vector and an operational disaster.
+If the breaker were global, one broken merchant could effectively DoS the system, webhook delivery would halt for everyone while the global breaker was tripped. That's a denial-of-service vector and an operational disaster.
 
 Per-merchant scoping isolates damage. The state is stored in Redis with keys like `breaker:webhook:m_X`. Reading the state on each delivery is a single Redis GET; updating is a single SET. Negligible overhead per request.
 
@@ -235,7 +235,7 @@ For these terminal failures, the system needs a destination that:
 - Allows replay if the cause is fixed.
 - Allows resolution-without-replay if the message is no longer relevant.
 
-The DLQ — dead letter queue — is that destination.
+The DLQ, dead letter queue, is that destination.
 
 ### What lands in the DLQ
 
@@ -267,7 +267,7 @@ dlq_entries:
   resolution_note TEXT
 ```
 
-The `original_payload` is the most important field. It includes everything needed to reproduce the failed work: the merchant_id, the URL, the signed payload, the headers — for a webhook. The saga_id, the failed step, the saga state — for a saga.
+The `original_payload` is the most important field. It includes everything needed to reproduce the failed work: the merchant_id, the URL, the signed payload, the headers, for a webhook. The saga_id, the failed step, the saga state, for a saga.
 
 The `status` field tracks the lifecycle: an entry starts as `open`, transitions to `replayed` if an operator replays it (with the new job_id recorded), or to `resolved` if an operator decides no action is needed (with a note).
 
@@ -277,8 +277,8 @@ The DLQ is operational, not high-throughput. The reads are: "show me all open en
 
 A Redis stream would optimize for the wrong access pattern. A Postgres table with appropriate indexes is the right fit:
 
-- `dlq_entries(status, created_at)` — operator queries.
-- `dlq_entries(source, status)` — filter by saga vs webhook.
+- `dlq_entries(status, created_at)`, operator queries.
+- `dlq_entries(source, status)`, filter by saga vs webhook.
 
 The DLQ also benefits from being transactional. When the operator replays an entry, the replay marks the entry as `replayed` *and* enqueues the new work in one atomic operation. With Postgres that's a single transaction; with a Redis stream it would be more delicate.
 
@@ -286,8 +286,8 @@ The DLQ also benefits from being transactional. When the operator replays an ent
 
 Replay re-creates the failed work as a fresh job:
 
-1. Operator runs `rrq dlq replay dlq_entry_id`.
-2. The CLI reads the entry, validates that status is `open`, and presents the original payload for confirmation.
+1. Operator clicks replay on the DLQ entry in the Admin Dashboard.
+2. The dashboard reads the entry, validates that status is `open`, and presents the original payload for confirmation.
 3. On confirmation: generate a new job_id, with idempotency key derived from the entry ID (`dlq-replay-<entry_id>`).
 4. Re-emit the original payload to the appropriate stream (job stream for saga failures, notify stream for webhook failures).
 5. Update the entry: `status='replayed'`, `replayed_at=NOW()`, `replayed_job_id=<new>`.
@@ -297,10 +297,10 @@ The replay's idempotency key prevents accidental double-replay. If the same entr
 
 ### The resolve flow
 
-Sometimes an entry shouldn't be replayed. The merchant has decommissioned the endpoint, the relevance window has passed, the operator has made an out-of-band decision. The CLI's `resolve` command marks the entry without replaying:
+Sometimes an entry shouldn't be replayed. The merchant has decommissioned the endpoint, the relevance window has passed, the operator has made an out-of-band decision. The dashboard's resolve action marks the entry without replaying:
 
 ```
-rrq dlq resolve dlq_entry_id --note "merchant endpoint decommissioned 2026-05-20"
+resolve dlq_entry_id  note: "merchant endpoint decommissioned 2026-05-20"
 ```
 
 The entry transitions to `status='resolved'`. The note explains why. Future operators reviewing the DLQ history see the disposition.
@@ -317,7 +317,7 @@ Concrete practices:
 - Daily report (cron-driven): list of open DLQ entries by age, grouped by source. Sent to ops channel.
 - SLO: open DLQ entries older than 7 days are an incident.
 
-These practices are not part of the code — they're operational discipline. v1's docs describe them; production deployment implements them.
+These practices are not part of the code, they're operational discipline. The docs describe them; the deployment implements them.
 
 ---
 
@@ -369,15 +369,15 @@ RRQ doesn't do this for webhooks because:
 
 - Merchants generally have one endpoint, not redundant ones.
 - The bandwidth cost matters.
-- The deduplication burden falls on the merchant — they receive double traffic and must drop duplicates.
+- The deduplication burden falls on the merchant, they receive double traffic and must drop duplicates.
 
-For internal service-to-service calls (where we control both ends and the endpoints are redundant), speculative retry is a reasonable optimization. v1 doesn't have any such cases.
+For internal service-to-service calls (where we control both ends and the endpoints are redundant), speculative retry is a reasonable optimization. RRQ doesn't have any such cases.
 
 ---
 
 ## What about timeouts?
 
-Every HTTP request from the webhook worker has a hard timeout (10 seconds). This is technically a resilience pattern too — without it, a hanging connection would tie up a worker thread indefinitely.
+Every HTTP request from the webhook worker has a hard timeout (10 seconds). This is technically a resilience pattern too, without it, a hanging connection would tie up a worker thread indefinitely.
 
 The timeout is set at the request level (not the connection level): if the merchant's endpoint responds with headers but stops streaming the body, the connection is closed after 10 seconds total. This protects against slowloris-style attacks and slow-but-not-broken endpoints.
 
@@ -393,13 +393,13 @@ The patterns above describe retries for *network-flavored* failures: timeouts, 5
 
 **Authentication failures (401, 403).** Not retryable. The merchant's webhook secret has changed (or the system's signing is wrong). Move to DLQ immediately. Operator action required.
 
-**Payload-shape failures (400).** Not retryable. The payload format is wrong; retrying with the same payload will fail the same way. Move to DLQ. (Note: 400 from a merchant's endpoint is unusual — usually they accept any payload and ignore unknown fields.)
+**Payload-shape failures (400).** Not retryable. The payload format is wrong; retrying with the same payload will fail the same way. Move to DLQ. (Note: 400 from a merchant's endpoint is unusual, usually they accept any payload and ignore unknown fields.)
 
 **Rate limit failures (429).** Retryable, but with extra respect: use the `Retry-After` header if present, otherwise default backoff.
 
 **Redirects (3xx).** Don't follow automatically. Webhooks are POST to a specific URL; following a redirect could land at an unrelated endpoint.
 
-The classifier — which errors are retryable, which terminal — is a small module the webhook worker uses to decide what to do with each response. Getting the classifier right is part of the implementation work.
+The classifier, which errors are retryable, which terminal, is a small module the webhook worker uses to decide what to do with each response. Getting the classifier right is part of the implementation work.
 
 ---
 
@@ -417,16 +417,16 @@ What RRQ's test suite does:
 
 **Replay.** Integration test that replays a DLQ entry against a now-healthy endpoint. Verify success.
 
-**Chaos.** Use turmoil (Rust) to simulate network partitions during retry scheduling. Verify the system recovers gracefully when the partition heals.
+**Chaos.** Use turmoil (Rust comparison) to simulate network partitions during retry scheduling. Verify the system recovers gracefully when the partition heals.
 
-The tests exercise the patterns, not the patterns' theoretical properties. Whether the breaker actually saves resources at scale, whether the DLQ surfaces the right work to operators, whether the jitter prevents thundering herd in production — these are operational questions, not unit-test questions. The patterns are textbook; the practical value is measured in production.
+The tests exercise the patterns, not the patterns' theoretical properties. Whether the breaker actually saves resources at scale, whether the DLQ surfaces the right work to operators, whether the jitter prevents thundering herd in production, these are operational questions, not unit-test questions. The patterns are textbook; the practical value is measured in production.
 
 ---
 
 ## Where to read next
 
 - The webhook worker that implements these patterns → [`../services/12-WEBHOOK-WORKER.md`](../services/12-WEBHOOK-WORKER.md)
-- The admin CLI for operating the DLQ → [`../services/15-ADMIN-CLI.md`](../services/15-ADMIN-CLI.md)
+- The Admin Dashboard for operating the DLQ → [`../services/15-ADMIN-DASHBOARD.md`](../services/15-ADMIN-DASHBOARD.md)
 - AWS's analysis of backoff strategies: <https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/>
 - Martin Fowler's circuit breaker write-up: <https://martinfowler.com/bliki/CircuitBreaker.html>
 

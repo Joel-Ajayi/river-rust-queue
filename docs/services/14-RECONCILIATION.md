@@ -1,6 +1,6 @@
-# 14 — Reconciliation
+# 14: Reconciliation
 
-> **What this is.** The service document for the Reconciliation batch job. Smaller scope than the consumers but architecturally crucial — it's the system's only out-of-band verification that the data is consistent with itself.
+> **What this is.** The service document for the Reconciliation batch job. Smaller scope than the consumers but architecturally crucial, it's the system's only out-of-band verification that the data is consistent with itself.
 >
 > **Reading time.** ~15 minutes.
 >
@@ -12,13 +12,13 @@
 
 Reconciliation answers one question: **do the ledger entries agree with the event log?**
 
-Every saga, when it succeeds, writes two things in the same database transaction: an event to the event log (`DebitApplied`, `CreditApplied`, etc.) and a ledger entry. They should always agree. If they ever don't, the system has a bug, and the bug is the kind that silently loses or creates money. Reconciliation runs nightly on a Kubernetes CronJob (manifest documented in [`../deferred/32-KUBERNETES.md`](../deferred/32-KUBERNETES.md); v1 uses a simple cron container), replays the event log for the previous 24 hours, computes derived balances, compares them to the ledger, and emits a `ReconciliationAlert` for any wallet where the two diverge.
+Every saga, when it succeeds, writes two things in the same database transaction: an event to the event log (`DebitApplied`, `CreditApplied`, etc.) and a ledger entry. They should always agree. If they ever don't, the system has a bug, and the bug is the kind that silently loses or creates money. Reconciliation runs nightly on a Kubernetes CronJob (manifest documented in [`../deep-dives/29-KUBERNETES.md`](../deep-dives/29-KUBERNETES.md)), replays the event log for the previous 24 hours, computes derived balances, compares them to the ledger, and emits a `ReconciliationAlert` for any wallet where the two diverge.
 
 A few things make this service interesting:
 
-- **It's the only CPU-bound service in the system.** Replaying a million events involves iterating, decoding, accumulating — pure compute. This is where the Go-vs-Rust comparison says something meaningful, because HTTP throughput benchmarks tend to saturate the network before the runtime matters but reconciliation does not.
+- **It's the only CPU-bound service in the system.** Replaying a million events involves iterating, decoding, accumulating, pure compute. This is where the Go-vs-Rust comparison says something meaningful, because HTTP throughput benchmarks tend to saturate the network before the runtime matters but reconciliation does not.
 - **It's the only service with no real-time pressure.** It runs once a day; if it takes 30 seconds or 5 minutes, the choice doesn't materially affect operations. The runtime is interesting _as a benchmark_, not as an SLO.
-- **It's the system's safety net.** Every other service has subtle ways it could write data inconsistently — a bug in the saga state machine, a transaction that committed events but lost ledger writes, a race during compensation. Reconciliation catches all of these out of band. Without it, those bugs would be invisible until somebody manually noticed.
+- **It's the system's safety net.** Every other service has subtle ways it could write data inconsistently, a bug in the saga state machine, a transaction that committed events but lost ledger writes, a race during compensation. Reconciliation catches all of these out of band. Without it, those bugs would be invisible until somebody manually noticed.
 
 The service is also small. About 200 lines of code in either language, no consumer loop, no concurrency primitives. The interest is entirely in _what it computes_ and _how it parallelizes the computation_.
 
@@ -42,14 +42,14 @@ The service is also small. About 200 lines of code in either language, no consum
 
 **Guarantees**
 
-- **Idempotent.** Running reconciliation twice for the same window produces the same alerts. The events it writes (`ReconciliationCompleted`, `ReconciliationAlert`) are keyed by run_id, but rerunning the same window with a new run_id is safe — alerts are de-duplicated by `(run_id, wallet_id)` at insert.
+- **Idempotent.** Running reconciliation twice for the same window produces the same alerts. The events it writes (`ReconciliationCompleted`, `ReconciliationAlert`) are keyed by run_id, but rerunning the same window with a new run_id is safe, alerts are de-duplicated by `(run_id, wallet_id)` at insert.
 - **Read-only over operational data.** Reconciliation does not modify wallets, ledger entries, or saga state. It only writes its own alert events. It cannot break the system; the worst it can do is fail to run.
 - **Complete over the window.** Every wallet that had activity in the window is checked. No sampling, no shortcuts.
 
 **Non-guarantees**
 
-- **Not real-time.** Discrepancies introduced today may not be detected until tomorrow's run. A v2 deployment that needs faster detection would run reconciliation more frequently, or add inline integrity checks.
-- **Doesn't fix discrepancies.** If a discrepancy is found, reconciliation only reports it. An operator must investigate and decide what to do. Auto-correction is a deliberate non-feature — the failure mode of an incorrect auto-correction is worse than the failure mode of a discrepancy waiting for review.
+- **Not real-time.** Discrepancies introduced today may not be detected until tomorrow's run. Faster detection would mean running reconciliation more frequently, or adding inline integrity checks; that is a known tradeoff, not built.
+- **Doesn't fix discrepancies.** If a discrepancy is found, reconciliation only reports it. An operator must investigate and decide what to do. Auto-correction is a deliberate non-feature, the failure mode of an incorrect auto-correction is worse than the failure mode of a discrepancy waiting for review.
 
 ---
 
@@ -66,9 +66,9 @@ For a given window `[start, end]`:
 
 The chronological replay matters: a wallet's balance at time T is the sum of all signed amounts in events up to T, applied in order. Out-of-order application would give the wrong answer for any check that depends on intermediate state (e.g., balance must remain ≥ 0 at all times).
 
-In practice, for our event types and our ledger structure, the event-derived balance and the ledger balance are _both_ derived from "sum of signed amounts," so for most wallets the check is just two SUMs that should match. The interesting cases are where they don't — typically because:
+In practice, for our event types and our ledger structure, the event-derived balance and the ledger balance are _both_ derived from "sum of signed amounts," so for most wallets the check is just two SUMs that should match. The interesting cases are where they don't, typically because:
 
-- An event was written but the ledger entry wasn't (a transaction that committed events but the ledger insert was lost — would indicate a transactional bug).
+- An event was written but the ledger entry wasn't (a transaction that committed events but the ledger insert was lost, would indicate a transactional bug).
 - A ledger entry exists for a step that produced no event (impossible by design, but worth checking).
 - An amount in an event doesn't match the corresponding ledger entry's amount (would indicate a data-integrity bug in writes).
 
@@ -108,7 +108,7 @@ fn reconcile_window(start: Timestamp, end: Timestamp) -> Report:
 
 A few details:
 
-- **The `parallel_for` is where the runtime comparison lives.** In Rust, `rayon::par_iter()` over the wallets. In Go, a fixed-size worker pool sized to `runtime.NumCPU()`. Both are conceptually doing the same thing — fan out the per-wallet computation across all CPU cores.
+- **The `parallel_for` is where the runtime comparison lives.** In Rust, `rayon::par_iter()` over the wallets. In Go, a fixed-size worker pool sized to `runtime.NumCPU()`. Both are conceptually doing the same thing, fan out the per-wallet computation across all CPU cores.
 - **Events are ordered by `id`, not `occurred_at`.** The `id` column is a monotonic `BIGSERIAL`; `occurred_at` is a wall-clock timestamp that can drift slightly. For ordering events within a single wallet's history, `id` is authoritative. (See `02-INVARIANTS.md` I4.)
 - **`< end`, not `<= end`.** Half-open intervals avoid double-counting events at the exact boundary if reconciliation runs are themselves chained.
 - **The whole thing is in one read-only Postgres session.** Reconciliation reads a lot of data; it does not need a transaction, just a long-lived connection.
@@ -133,11 +133,24 @@ A few details:
 }
 ```
 
-This event lands in the `events` table like any other, and it's also surfaced through the Admin CLI (`rrq reconcile alerts --last 7d`).
+This event lands in the `events` table like any other, and it's also surfaced in the Admin Dashboard's reconciliation view (recent discrepancies, filterable by time window).
 
 ---
 
 ## Happy path walk-through
+
+```mermaid
+flowchart TD
+    cron(["CronJob fires 01:00 UTC"]) --> lock{"acquire advisory lock?"}
+    lock -->|no| abort["abort: a run is in progress"]
+    lock -->|yes| stream["stream events for the window<br/>(per-wallet cursor, O(1) memory)"]
+    stream --> derive["derive balance per wallet<br/>= SUM(ledger amounts) from events"]
+    derive --> compare{"derived == ledger_entries SUM?"}
+    compare -->|match| ok["no discrepancy"]
+    compare -->|diverge| alert["emit ReconciliationAlert<br/>(wallet, derived, ledger, delta)"]
+    ok --> done["emit ReconciliationCompleted, release lock"]
+    alert --> done
+```
 
 Suppose at 01:00 UTC, the CronJob fires for window `[2026-05-11T00:00:00Z, 2026-05-12T00:00:00Z]`.
 
@@ -213,7 +226,7 @@ The output is for operators. The same data is also in the `ReconciliationAlert` 
 
 What would an operator do?
 
-1. Investigate which saga produced the discrepancy. The ledger has an extra 50 kobo — either a credit happened without a corresponding event, or an event existed for a debit that no ledger entry matched.
+1. Investigate which saga produced the discrepancy. The ledger has an extra 50 kobo, either a credit happened without a corresponding event, or an event existed for a debit that no ledger entry matched.
 2. Query `ledger_entries` directly: which entries exist for this wallet that don't have a corresponding event?
 3. Find the bug. Most likely a recent code change.
 4. Decide whether to manually correct (insert an adjustment event documenting the correction), or revert the bug and let the next reconciliation see whether the issue persists.
@@ -226,11 +239,11 @@ The system does _not_ auto-correct. The discrepancy stays in the data until an o
 
 ### F1: Reconciliation runs while sagas are in progress at window boundary
 
-The window is `[T1, T2]`. At exactly T2, a saga is in the middle of committing — it has written `DebitApplied` to events but the ledger row hasn't been inserted yet. Reconciliation reads events at T2: includes the DebitApplied. Reads ledger at T2: does not include the matching debit entry. Sees a discrepancy.
+The window is `[T1, T2]`. At exactly T2, a saga is in the middle of committing, it has written `DebitApplied` to events but the ledger row hasn't been inserted yet. Reconciliation reads events at T2: includes the DebitApplied. Reads ledger at T2: does not include the matching debit entry. Sees a discrepancy.
 
 This is a false positive. Mitigation: reconciliation runs with a **safety margin**, querying events and ledger up to `T2 - 60 seconds`. Any saga that committed within the safety margin has had 60 seconds for the transaction to be visible to both queries. With our saga step times measured in milliseconds, 60 seconds is plenty.
 
-The safety margin is a tunable. v1 uses 60 seconds.
+The safety margin is a tunable. RRQ uses 60 seconds.
 
 ### F2: Postgres reaches connection limit during run
 
@@ -248,15 +261,15 @@ Mitigation: per-wallet event iteration is a streaming cursor, not a `Vec<Event>`
 
 If the container crashes (OOM, network issue, whatever) mid-run, the report is incomplete. No `ReconciliationCompleted` event is written; no alerts are written. The next run starts from scratch.
 
-Because reconciliation is idempotent (running it again for the same window produces the same answers), crash recovery is trivial. Just rerun. v1 doesn't bother with incremental progress because the run is fast enough that restarting is cheap.
+Because reconciliation is idempotent (running it again for the same window produces the same answers), crash recovery is trivial. Just rerun. RRQ doesn't bother with incremental progress because the run is fast enough that restarting is cheap.
 
 ### F5: Two reconciliation runs overlap
 
 Possible if a manual run is triggered while the nightly cron is in progress, or if a cron run takes longer than 24 hours.
 
-For the Kubernetes CronJob, `concurrencyPolicy: Forbid` prevents this — the scheduler refuses to start a new run while one is in progress. v1 documents this requirement in the K8s manifest.
+For the Kubernetes CronJob, `concurrencyPolicy: Forbid` prevents this, the scheduler refuses to start a new run while one is in progress. The requirement is captured in the K8s manifest.
 
-For manual runs, the CLI command checks an advisory lock in Postgres before starting: `SELECT pg_try_advisory_lock(...)`. If the lock is held, the new run aborts with an error message. Operator can wait or check what's running.
+For manual runs triggered from the Admin Dashboard, the run checks an advisory lock in Postgres before starting: `SELECT pg_try_advisory_lock(...)`. If the lock is held, the new run aborts with an error message. Operator can wait or check what's running.
 
 ---
 
@@ -269,7 +282,7 @@ The Go version uses a worker pool sized to `runtime.NumCPU()`.
 //
 // Invariants verified here:
 //   I1 (conservation of value), I4 (per-wallet ordering),
-//   I6 (immutable history — implicit: only reads are performed on events).
+//   I6 (immutable history, implicit: only reads are performed on events).
 
 type Runner struct {
     db             *pgxpool.Pool
@@ -292,7 +305,7 @@ func (r *Runner) Run(ctx context.Context, windowStart, windowEnd time.Time) (*Re
     // Apply safety margin to window end.
     cutoff := windowEnd.Add(-time.Duration(r.safetyMarginSec) * time.Second)
 
-    // Acquire advisory lock — prevents concurrent runs.
+    // Acquire advisory lock, prevents concurrent runs.
     locked, err := r.acquireLock(ctx)
     if err != nil || !locked {
         return nil, fmt.Errorf("could not acquire reconciliation lock")
@@ -462,7 +475,7 @@ impl Runner {
         let run_id = Ulid::new().to_string();
         let cutoff = window_end - chrono::Duration::from_std(self.safety_margin)?;
 
-        // Advisory lock — prevents concurrent runs.
+        // Advisory lock, prevents concurrent runs.
         let _lock = self.acquire_lock().await?;
 
         let wallets = self.find_affected_wallets(window_start, window_end).await?;
@@ -487,7 +500,7 @@ impl Runner {
                                 // Each thread blocks on its own queries.
                                 // For Rust, we use a sync sqlx connection per thread,
                                 // or push the async into a small runtime per thread.
-                                // Implementation detail — abbreviated here.
+                                // Implementation detail, abbreviated here.
                                 check_wallet_sync(&db, wallet_id, cutoff).ok().flatten()
                             })
                             .collect()
@@ -545,7 +558,7 @@ fn derive_balance(db: &PgPool, wallet_id: &str, cutoff: DateTime<Utc>) -> Result
 - **GC pressure.** Go's GC handles short-lived per-goroutine allocations well, but a high-throughput batch like this can push it into more frequent collections. The p99 latency of individual wallet checks may show GC pause spikes in Go but not Rust.
 - **Parallelism efficiency.** Rayon's work-stealing scheduler tends to keep all cores at 100% utilization better than a fixed-size Go worker pool. For embarrassingly parallel work like this, Rayon wins by a measurable margin.
 
-This is exactly the benchmark scenario where the comparison says something. Scenario F in `docs/appendix/43-BENCHMARK-METHODOLOGY.md` is specifically this run, measured.
+This is exactly the benchmark scenario where the comparison says something. Scenario F in `docs/appendices/43-BENCHMARK-METHODOLOGY.md` is specifically this run, measured.
 
 ---
 
@@ -553,29 +566,29 @@ This is exactly the benchmark scenario where the comparison says something. Scen
 
 ### Validates I1 (conservation of value)
 
-- **`TestReconciliation_FindsKnownDiscrepancy`** — manually insert a ledger entry without a matching event; run reconciliation; assert exactly one alert for that wallet.
-- **`TestReconciliation_FindsKnownEventWithoutLedger`** — manually insert an event without a matching ledger entry; assert alert.
-- **`TestReconciliation_HealthySystemHasNoAlerts`** — seed 1000 valid transfers; run reconciliation; assert zero alerts.
+- **`TestReconciliation_FindsKnownDiscrepancy`**, manually insert a ledger entry without a matching event; run reconciliation; assert exactly one alert for that wallet.
+- **`TestReconciliation_FindsKnownEventWithoutLedger`**, manually insert an event without a matching ledger entry; assert alert.
+- **`TestReconciliation_HealthySystemHasNoAlerts`**, seed 1000 valid transfers; run reconciliation; assert zero alerts.
 
 ### Validates idempotency
 
-- **`TestReconciliation_RerunSameWindow`** — run reconciliation; run again with same window (new run_id); assert second run produces the same alerts as the first.
-- **`TestReconciliation_ParallelRunsBlocked`** — try to start two reconciliation runs concurrently; assert second one aborts on advisory lock.
+- **`TestReconciliation_RerunSameWindow`**, run reconciliation; run again with same window (new run_id); assert second run produces the same alerts as the first.
+- **`TestReconciliation_ParallelRunsBlocked`**, try to start two reconciliation runs concurrently; assert second one aborts on advisory lock.
 
 ### Validates safety margin
 
-- **`TestReconciliation_SafetyMarginAvoidsBoundaryFalsePositive`** — start a saga right at window end; finish it inside the safety margin; assert no false positive (the saga's effects are entirely outside the cutoff).
+- **`TestReconciliation_SafetyMarginAvoidsBoundaryFalsePositive`**, start a saga right at window end; finish it inside the safety margin; assert no false positive (the saga's effects are entirely outside the cutoff).
 
 ### Validates correctness at scale
 
-- **`TestReconciliation_LargeDataset`** — seed 100,000 events across 1,000 wallets; run reconciliation; assert correctness and measure duration. Used as a smoke test, not a benchmark.
+- **`TestReconciliation_LargeDataset`**, seed 100,000 events across 1,000 wallets; run reconciliation; assert correctness and measure duration. Used as a smoke test, not a benchmark.
 
 ### Benchmarks (scenario F)
 
 Run as part of `make bench`:
 
 - Seed 1,000,000 events across 10,000 wallets with known correctness.
-- Time reconciliation for both Go and Rust implementations.
+- Time reconciliation for the Go implementation (and for the Rust comparison implementation once the Rust comparison is built).
 - Report: total duration, CPU utilization, peak memory, events scanned per second.
 
 The benchmark is the published comparison number for the reconciliation service.
@@ -584,19 +597,19 @@ The benchmark is the published comparison number for the reconciliation service.
 
 ## What this service depends on
 
-- **Postgres** — heavy reads. Events, ledger_entries, wallets.
-- **Kubernetes CronJob** (or simple cron container) — schedules the run.
+- **Postgres**, heavy reads. Events, ledger_entries, wallets.
+- **Kubernetes CronJob** (or simple cron container), schedules the run.
 
 ## What depends on this service
 
-- **Operators** — read the report, investigate alerts, decide actions.
-- **Monitoring** — `reconciliation_discrepancies_total` is the most important business-level metric in the system.
+- **Operators**, read the report, investigate alerts, decide actions.
+- **Monitoring**, `reconciliation_discrepancies_total` is the most important business-level metric in the system.
 
 ---
 
 ## Where to read next
 
-- The operator tooling that surfaces alerts → [`15-ADMIN-CLI.md`](15-ADMIN-CLI.md)
+- The operator tooling that surfaces alerts → [`15-ADMIN-DASHBOARD.md`](15-ADMIN-DASHBOARD.md)
 - The event store design that makes this verification possible → [`../deep-dives/25-EVENT-STORE.md`](../deep-dives/25-EVENT-STORE.md)
 
 ---

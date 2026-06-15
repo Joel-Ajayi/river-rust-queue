@@ -1,4 +1,4 @@
-# 15 — Admin Dashboard
+# 15: Admin Dashboard
 
 > **What this is.** The service document for the Admin Dashboard. Replaces what was originally designed as a CLI. The dashboard is the operator's interface to the rest of the system *and* the demo/test surface for the project.
 >
@@ -17,9 +17,9 @@ It serves two audiences:
 1. **Operators (in production).** People running RRQ on behalf of a deployment. They use it for incident response, routine ops, merchant onboarding.
 2. **Demo viewers (during evaluation).** Reviewers and interviewers exploring what RRQ does. They use it to drive transfers, observe behavior, see the system in motion.
 
-These overlap heavily. The same actions an operator uses to recover from incidents (replay a DLQ entry) are useful for demo (show what DLQ replay looks like). Same code, same surface, same data — but with authentication gating it from public access.
+These overlap heavily. The same actions an operator uses to recover from incidents (replay a DLQ entry) are useful for demo (show what DLQ replay looks like). Same code, same surface, same data, but with authentication gating it from public access.
 
-The dashboard is **not the test suite**. Automated unit and integration tests run via `go test` and `cargo test` in CI on every commit. The dashboard is for *manual* exercise of the system — exploratory testing, demos, ops. Both layers exist for different reasons.
+The dashboard is **not the test suite**. Automated unit and integration tests run via `go test` in CI on every commit (and `cargo test` once the Rust comparison is built). The dashboard is for *manual* exercise of the system, exploratory testing, demos, ops. Both layers exist for different reasons.
 
 ---
 
@@ -41,7 +41,7 @@ Functional surface, organized by what an operator/demo viewer wants to do:
 - View wallet details: balance, recent ledger entries, status, audit history.
 - Freeze / unfreeze wallet (with reason).
 - Close wallet (requires zero balance).
-- **Seed wallet** (dev/staging only — disabled in production via feature flag).
+- **Seed wallet** (dev/staging only, disabled in production via feature flag).
 
 ### Transfer operations
 - Submit a transfer (single).
@@ -60,7 +60,7 @@ Functional surface, organized by what an operator/demo viewer wants to do:
 - View recent webhook deliveries (per merchant).
 - View circuit breaker state per merchant.
 - Force-reset a breaker.
-- Mock merchant endpoint configuration — toggle to return 200/500/timeout (used in demos to show retry/breaker behavior).
+- Mock merchant endpoint configuration, toggle to return 200/500/timeout (used in demos to show retry/breaker behavior).
 
 ### DLQ operations
 - List open DLQ entries.
@@ -89,7 +89,7 @@ Functional surface, organized by what an operator/demo viewer wants to do:
   - Trigger a fraud freeze.
   - Drive a reconciliation discrepancy and observe detection.
 
-The demo controls are the project's strongest interview asset. A reviewer clicks "Trigger fraud freeze," watches 51 transfers complete, sees the wallet freeze, sees the next transfer rejected — that's a memorable thirty seconds of demo.
+The demo controls are the project's strongest interview asset. A reviewer clicks "Trigger fraud freeze," watches 51 transfers complete, sees the wallet freeze, sees the next transfer rejected, that's a memorable thirty seconds of demo.
 
 ---
 
@@ -101,7 +101,7 @@ The dashboard is structured as:
 ┌────────────────────────────────┐
 │        Web Frontend            │
 │  (React/Svelte/whatever you    │
-│   choose — single-page app)    │
+│   choose, single-page app)    │
 └──────────────┬─────────────────┘
                │ HTTPS (REST)
                ▼
@@ -118,9 +118,9 @@ The dashboard is structured as:
                     (via shared DB; no RPC)
 ```
 
-The frontend is a single-page app. The backend is a small HTTP server (one of the languages — picking the one you're faster in for the implementation work).
+The frontend is a single-page app. The backend is a small HTTP server (one of the languages, picking the one you're faster in for the implementation work).
 
-**The backend uses the same database and Redis as the rest of the system**, not a separate one. It's not "calling into" services; it's reading and writing the same shared state. This works because RRQ is event-driven — the saga worker doesn't need to know the dashboard exists; it just reads from streams and writes to the database.
+**The backend uses the same database and Redis as the rest of the system**, not a separate one. It's not "calling into" services; it's reading and writing the same shared state. This works because RRQ is event-driven, the saga worker doesn't need to know the dashboard exists; it just reads from streams and writes to the database.
 
 For mutating operations (freeze a wallet, replay a DLQ entry), the dashboard:
 1. Validates the operator's permission for this action.
@@ -128,20 +128,15 @@ For mutating operations (freeze a wallet, replay a DLQ entry), the dashboard:
 3. Writes an audit event (`operator.action`) in the same transaction.
 4. If the operation needs propagation (e.g., DLQ replay enqueues a new job), writes to the appropriate stream.
 
-This is structurally the same as what the original CLI would have done — same database, same effects, same audit trail. Different interface only.
+This is structurally the same as what the original CLI would have done, same database, same effects, same audit trail. Different interface only.
 
 ---
 
 ## Authentication and authorization
 
-**v1: simple auth.** A single operator account (or a small fixed list) with username/password. Authenticated session via JWT cookie. No SSO, no multi-tenant operator accounts.
+**Simple auth.** A single operator account (or a small fixed list) with username/password. Authenticated session via JWT cookie. No SSO, no multi-tenant operator accounts.
 
-For a production deployment, this would be unacceptable. v2 would add:
-- SSO integration (Google OAuth, GitHub OAuth, Okta, etc.).
-- Role-based permissions (some operators can read but not write; some can read everything but only write to their assigned merchants).
-- 2FA for destructive operations.
-
-For v1 in development/staging environments and for demo purposes, the simple auth is sufficient. The discipline is to ensure the dashboard is *never* exposed publicly without auth in front of it.
+This is deliberately minimal, and a hardened production deployment would want more: SSO integration (Google OAuth, GitHub OAuth, Okta), role-based permissions (some operators read but don't write; some write only to their assigned merchants), and 2FA for destructive operations. Those are out of scope here. For development, staging, and demos, the simple auth is sufficient. The discipline is to ensure the dashboard is *never* exposed publicly without auth in front of it.
 
 The dashboard's authentication layer is the first line of defense. Beyond that, every mutating action requires confirmation (a prompt or modal asking "are you sure?"), and audit events make every operator action visible after the fact.
 
@@ -168,7 +163,7 @@ Every mutating action writes an `operator.action` event. Same shape regardless o
 }
 ```
 
-These events land in the `events` table like any other. Reconciliation reads them. Audit queries can filter for them. There's no separate "audit log" — the system's event log is the audit log.
+These events land in the `events` table like any other. Reconciliation reads them. Audit queries can filter for them. There's no separate "audit log", the system's event log is the audit log.
 
 The audit trail is what makes operator actions reversible-in-principle. Every action has an inverse (freeze ↔ unfreeze, replay ↔ resolve, etc.), and every action is recorded with full context. Mistakes can be undone; their history is visible.
 
@@ -202,13 +197,13 @@ The dashboard has a section called "Scenarios" that drives specific demonstratio
 
 Concrete scenarios to implement:
 
-- **"Happy path transfer"** — single transfer, completes cleanly, webhook delivered.
-- **"Failed saga"** — transfer where destination wallet is frozen; saga compensates.
-- **"Worker crash recovery"** — kill the saga worker mid-saga; show replacement resumes.
-- **"Webhook breaker"** — merchant endpoint returns 500s; show breaker opening and cooling.
-- **"Bulk payout"** — 50 sub-transfers, some succeed, some fail.
-- **"Fraud freeze"** — 51 transfers in 60 seconds from one wallet; wallet freezes; next transfer rejected.
-- **"Reconciliation alert"** — inject a known discrepancy; trigger reconciliation; show alert detection.
+- **"Happy path transfer"**, single transfer, completes cleanly, webhook delivered.
+- **"Failed saga"**, transfer where destination wallet is frozen; saga compensates.
+- **"Worker crash recovery"**, kill the saga worker mid-saga; show replacement resumes.
+- **"Webhook breaker"**, merchant endpoint returns 500s; show breaker opening and cooling.
+- **"Bulk payout"**, 50 sub-transfers, some succeed, some fail.
+- **"Fraud freeze"**, 51 transfers in 60 seconds from one wallet; wallet freezes; next transfer rejected.
+- **"Reconciliation alert"**, inject a known discrepancy; trigger reconciliation; show alert detection.
 
 These scenarios are the project's elevator pitch in interactive form. A reviewer who clicks through all seven understands what RRQ does in fifteen minutes.
 
@@ -248,7 +243,7 @@ spec:
         - containerPort: 8080
 ```
 
-The dashboard's Ingress is behind the cluster's authentication layer. In production, that means SSO; in v1, it means the simple auth described above.
+The dashboard's Ingress is behind the cluster's authentication layer, which here means the simple auth described above.
 
 **Technology choice for the frontend.** Pick what you can ship fastest. The point isn't to demonstrate frontend skills; it's to have a working operator UI. Reasonable options:
 - **React + Vite + Tailwind**: industry-standard, lots of examples.
@@ -257,7 +252,7 @@ The dashboard's Ingress is behind the cluster's authentication layer. In product
 
 For RRQ specifically, HTMX is probably the right answer. Operator dashboards don't need rich client-side interactivity; they need fast page loads and clear data display. HTMX delivers that with minimal JS. But pick what you're fastest in.
 
-**Backend choice.** The dashboard backend can be either Go or Rust. It doesn't have to match either of the dual implementations (which build the same services in both languages). The dashboard is one piece; pick one language. Probably whichever has the better web framework story for your needs.
+**Backend choice.** The dashboard backend can be either Go or Rust. It doesn't have to match the service implementation (Go first, with Rust as a comparison study). The dashboard is one piece; pick one language. Probably whichever has the better web framework story for your needs.
 
 ---
 
@@ -265,25 +260,26 @@ For RRQ specifically, HTMX is probably the right answer. Operator dashboards don
 
 Tests for the dashboard itself, separate from the service tests:
 
-- **`TestAuth_LoginFlow`** — submit valid credentials; receive JWT cookie; subsequent requests authenticated.
-- **`TestAuth_InvalidCredentials`** — 401.
-- **`TestAuth_ExpiredToken`** — 401, with redirect to login.
-- **`TestRBAC_OperatorActionsRequireAuth`** — unauthenticated POST to mutating endpoint; 401.
-- **`TestAudit_EveryMutationWritesEvent`** — for each mutating action, run it; assert `operator.action` event written with correct context.
-- **`TestAudit_ReadActionsDoNotWriteEvents`** — for each read action, run it; assert no audit event written.
-- **`TestSeeding_ProdFlagDisabled`** — in prod config, seed endpoint returns 403.
-- **`TestSeeding_DevFlagEnabled`** — in dev config, seed endpoint succeeds, audit event written.
-- **`TestScenario_HappyPathTransfer`** — invoke happy-path scenario; assert all expected state transitions happened.
-- **`TestScenario_FraudFreeze`** — invoke fraud freeze scenario; assert wallet frozen after threshold.
+- **`TestAuth_LoginFlow`**, submit valid credentials; receive JWT cookie; subsequent requests authenticated.
+- **`TestAuth_InvalidCredentials`**, 401.
+- **`TestAuth_ExpiredToken`**, 401, with redirect to login.
+- **`TestRBAC_OperatorActionsRequireAuth`**, unauthenticated POST to mutating endpoint; 401.
+- **`TestAudit_EveryMutationWritesEvent`**, for each mutating action, run it; assert `operator.action` event written with correct context.
+- **`TestAudit_ReadActionsDoNotWriteEvents`**, for each read action, run it; assert no audit event written.
+- **`TestSeeding_ProdFlagDisabled`**, in prod config, seed endpoint returns 403.
+- **`TestSeeding_DevFlagEnabled`**, in dev config, seed endpoint succeeds, audit event written.
+- **`TestScenario_HappyPathTransfer`**, invoke happy-path scenario; assert all expected state transitions happened.
+- **`TestScenario_FraudFreeze`**, invoke fraud freeze scenario; assert wallet frozen after threshold.
 
-The scenario tests are valuable because they're integration tests in disguise — exercising the system end-to-end through the same actions a demo would.
+The scenario tests are valuable because they're integration tests in disguise, exercising the system end-to-end through the same actions a demo would.
 
 ---
 
 ## Where to read next
 
 - The merchant/wallet flows the dashboard drives → [`16-MERCHANT-WALLET-LIFECYCLE.md`](16-MERCHANT-WALLET-LIFECYCLE.md)
-- The funding model the dashboard implements → [`../appendix/44-FUNDING-MODEL.md`](../appendix/44-FUNDING-MODEL.md)
+- The simulator that drives traffic and triggers the demo scenarios → [`17-SIMULATION-HARNESS.md`](17-SIMULATION-HARNESS.md)
+- The funding model the dashboard implements → [`16-MERCHANT-WALLET-LIFECYCLE.md`](16-MERCHANT-WALLET-LIFECYCLE.md) (Funding)
 - The operations docs for things the dashboard helps with → [`../deep-dives/28-OPERATIONS.md`](../deep-dives/28-OPERATIONS.md)
 
 ---

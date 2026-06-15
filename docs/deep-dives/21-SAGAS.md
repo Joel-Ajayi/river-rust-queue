@@ -1,4 +1,4 @@
-# 21 — Sagas
+# 21: Sagas
 
 > **What this is.** The deep dive on sagas: where the pattern comes from, the formal model behind it, why it's the right answer for cross-service transactions, and the implementation subtleties that catch first-time builders out. The most important deep-dive in the set.
 >
@@ -16,7 +16,7 @@ The saga pattern was formally introduced in a 1987 paper by Hector Garcia-Molina
 
 Their answer: break the long transaction into a sequence of smaller transactions, each of which can commit independently. Pair each one with a **compensating transaction** that semantically undoes it. If the sequence fails partway through, run the compensations for the steps that did complete, in reverse. The result is not the strong ACID guarantees of a single transaction, but a weaker property they called **semantic atomicity**: either the whole logical operation succeeds, or the system ends up in a state that's equivalent to having never started.
 
-Garcia-Molina and Salem were writing about database operations spanning hours within a single DBMS. The pattern transfers cleanly to distributed systems where the "long-lived" aspect is not duration but *scope* — operations that cross transaction boundaries because they cross machine boundaries. RRQ's Transfer saga takes milliseconds in wall time, but it crosses the boundary between "wallet A's database write" and "wallet B's database write" (and "external API call" in a fuller system), and that crossing is what makes the saga pattern necessary.
+Garcia-Molina and Salem were writing about database operations spanning hours within a single DBMS. The pattern transfers cleanly to distributed systems where the "long-lived" aspect is not duration but *scope*, operations that cross transaction boundaries because they cross machine boundaries. RRQ's Transfer saga takes milliseconds in wall time, but it crosses the boundary between "wallet A's database write" and "wallet B's database write" (and "external API call" in a fuller system), and that crossing is what makes the saga pattern necessary.
 
 If you want one piece of context for an interview, it's this: **a saga is what you build when you cannot use a database transaction.** Every saga design decision flows from that constraint. If you could use a transaction, you would. You can't, so you build a saga.
 
@@ -42,13 +42,13 @@ The saga makes it to step k, which fails. Compensations for steps 1 through k-1 
 
 Three properties matter:
 
-1. **Each `Tᵢ` is itself a real transaction** — atomic, durable, isolated within its own scope. If `Tᵢ` is "insert a row into the ledger," that insert either commits or doesn't; there's no half-state.
-2. **Each `Cᵢ` is the semantic inverse of `Tᵢ`** — running `Tᵢ` followed by `Cᵢ` (with nothing in between) leaves the system in its pre-`Tᵢ` state, or in a state equivalent to it.
-3. **Compensations are pure undoes, not retries.** If `Tᵢ` failed, you don't run `Cᵢ`. You run `Cᵢ₋₁, Cᵢ₋₂, ..., C₁` — the compensations for the steps that *succeeded*.
+1. **Each `Tᵢ` is itself a real transaction**, atomic, durable, isolated within its own scope. If `Tᵢ` is "insert a row into the ledger," that insert either commits or doesn't; there's no half-state.
+2. **Each `Cᵢ` is the semantic inverse of `Tᵢ`**, running `Tᵢ` followed by `Cᵢ` (with nothing in between) leaves the system in its pre-`Tᵢ` state, or in a state equivalent to it.
+3. **Compensations are pure undoes, not retries.** If `Tᵢ` failed, you don't run `Cᵢ`. You run `Cᵢ₋₁, Cᵢ₋₂, ..., C₁`, the compensations for the steps that *succeeded*.
 
-The word "semantically" in property 2 is doing work. A real undo might not literally reverse the steps. If `T₃` was "send a confirmation email," `C₃` can't unsend the email — it can only send a follow-up "previous email was sent in error" message. The compensation is the *best available semantic restoration*, not a magic time-reversal.
+The word "semantically" in property 2 is doing work. A real undo might not literally reverse the steps. If `T₃` was "send a confirmation email," `C₃` can't unsend the email, it can only send a follow-up "previous email was sent in error" message. The compensation is the *best available semantic restoration*, not a magic time-reversal.
 
-This matters for RRQ. A `Debit` step is straightforwardly reversible: insert a compensating Credit, and the wallet balance is restored. But a hypothetical `NotifyMerchant` step is not — once we've POSTed to the merchant, we can't un-POST. The system has to be designed so genuinely-irreversible operations are *last* (after which compensation is no longer needed) or are guarded by reversible state changes earlier in the saga.
+This matters for RRQ. A `Debit` step is straightforwardly reversible: insert a compensating Credit, and the wallet balance is restored. But a hypothetical `NotifyMerchant` step is not, once we've POSTed to the merchant, we can't un-POST. The system has to be designed so genuinely-irreversible operations are *last* (after which compensation is no longer needed) or are guarded by reversible state changes earlier in the saga.
 
 In RRQ's Transfer saga, the steps are ordered specifically so that the only genuinely-irreversible operation (`Notify`) is the last one, after the saga has reached a terminal state. By the time we notify, there's nothing left to compensate.
 
@@ -85,19 +85,19 @@ The 1987 paper assumed a single coordinator. The distributed-systems community l
                      └──────────┘  ◀── CreditFailed ── (back to Service A for compensation)
 ```
 
-The choice between them is real and consequential. Choreography is championed in some microservices literature on the grounds of decoupling — no service "knows about" the saga; each just reacts to events. Orchestration is championed in others on the grounds of clarity — the saga's logic lives in one place where you can read it.
+The choice between them is real and consequential. Choreography is championed in some microservices literature on the grounds of decoupling, no service "knows about" the saga; each just reacts to events. Orchestration is championed in others on the grounds of clarity, the saga's logic lives in one place where you can read it.
 
 **RRQ uses orchestration**, deliberately, for three reasons:
 
-1. **Saga steps in RRQ have inter-step data dependencies.** The Redlock acquired in step 2 must be released by code that knows it's the same logical saga and has the lock token. In choreography this is awkward — the token has to be carried in events. In orchestration the token is just a local variable.
+1. **Saga steps in RRQ have inter-step data dependencies.** The Redlock acquired in step 2 must be released by code that knows it's the same logical saga and has the lock token. In choreography this is awkward, the token has to be carried in events. In orchestration the token is just a local variable.
 
 2. **The failure path is fundamentally different from the success path.** With orchestration, "on failure, run compensations" is a single method on the orchestrator. With choreography, every service has to listen for failure events from every later service and decide whether to compensate. The wiring is fragile and grows quadratically with steps.
 
 3. **Sagas in RRQ are conceptually one thing.** A Transfer saga is "move money from A to B." That's an atomic logical operation. Putting its definition in one place matches how we think about it. Choreography distributes the definition across many services and makes "what does this saga do?" a much harder question to answer.
 
-The tradeoff: orchestration creates a service (the Saga Worker) that has significant logic and becomes a target for being too big. We mitigate by keeping the orchestrator's job narrow — it executes step machines, persists state, handles compensation. The actual *work* of each step (the ledger insert, the lock acquisition) is delegated. The orchestrator is a coordinator, not a god class.
+The tradeoff: orchestration creates a service (the Saga Worker) that has significant logic and becomes a target for being too big. We mitigate by keeping the orchestrator's job narrow, it executes step machines, persists state, handles compensation. The actual *work* of each step (the ledger insert, the lock acquisition) is delegated. The orchestrator is a coordinator, not a god class.
 
-**A senior engineer's answer to "orchestration or choreography?" is "it depends — what's your dependency structure?"** If your steps are independent (each service does its thing and emits an event, downstream services just react), choreography is fine. If your steps need shared state, careful ordering, or significant inter-step logic, orchestration wins. RRQ has the latter, so orchestration. The answer that signals junior thinking is "I prefer choreography because it's more loosely coupled" — that's a pattern preference, not a design analysis.
+**A senior engineer's answer to "orchestration or choreography?" is "it depends, what's your dependency structure?"** If your steps are independent (each service does its thing and emits an event, downstream services just react), choreography is fine. If your steps need shared state, careful ordering, or significant inter-step logic, orchestration wins. RRQ has the latter, so orchestration. The answer that signals junior thinking is "I prefer choreography because it's more loosely coupled", that's a pattern preference, not a design analysis.
 
 ---
 
@@ -109,7 +109,7 @@ A state machine in a saga serves two purposes:
 
 1. **Programmatic clarity.** Code that reads "if in state Debited, do Credit next" is easier to maintain than code that infers next-step from a sequence of database queries.
 
-2. **Crash recovery semantics.** When a replacement worker reads `saga_state.current_state = 'Debited'`, it knows *exactly* what has been done and what hasn't. The replacement doesn't need to query "did the debit happen?" — the state row already answers.
+2. **Crash recovery semantics.** When a replacement worker reads `saga_state.current_state = 'Debited'`, it knows *exactly* what has been done and what hasn't. The replacement doesn't need to query "did the debit happen?", the state row already answers.
 
 The second is the load-bearing one. The state row is a **promise to the future**: it asserts that the corresponding work has been done and is durable. Specifically:
 
@@ -128,7 +128,7 @@ The second is the load-bearing one. The state row is a **promise to the future**
 
 The state row and the corresponding event/ledger writes are **committed in the same database transaction**. This is the single most important implementation detail of the saga, and it's worth restating: when you commit the transition from `Locked → Debited`, the `INSERT INTO ledger_entries`, the `INSERT INTO events (debit_applied)`, and the `UPDATE saga_state SET current_state = 'Debited'` all commit together or all roll back together.
 
-If they didn't — if the saga state could be updated independently of the work it asserts — then crash recovery would be impossible. Imagine a crash between "ledger insert committed" and "state row updated." The state row says `Locked` but the ledger has the debit. A replacement worker, reading `Locked`, would re-run the debit and insert a duplicate. The transactional bundling makes this case impossible.
+If they didn't, if the saga state could be updated independently of the work it asserts, then crash recovery would be impossible. Imagine a crash between "ledger insert committed" and "state row updated." The state row says `Locked` but the ledger has the debit. A replacement worker, reading `Locked`, would re-run the debit and insert a duplicate. The transactional bundling makes this case impossible.
 
 This is also why the `UNIQUE(saga_id, step_name)` constraint exists on `ledger_entries`. Even if the bundling were somehow broken, the constraint catches the duplicate insert. Belt and suspenders.
 
@@ -136,7 +136,7 @@ This is also why the `UNIQUE(saga_id, step_name)` constraint exists on `ledger_e
 
 ## Crash recovery, the hard part, in painful detail
 
-The high-level story of crash recovery — "replacement worker reads saga_state, resumes at the right step" — hides a lot of important nuance. Here's the full picture.
+The high-level story of crash recovery, "replacement worker reads saga_state, resumes at the right step", hides a lot of important nuance. Here's the full picture.
 
 ### The lifecycle of a stream message
 
@@ -147,7 +147,7 @@ A `JobRequested` event lives in the Redis Streams `stream:jobs`. Its lifecycle:
 3. **Processed** by the worker (saga execution).
 4. **Acknowledged** via `XACK`. Removed from the pending list.
 
-Between steps 2 and 4, the message is "claimed but not acknowledged." If the worker crashes here, the message stays in the pending list of the dead consumer. It's not redelivered automatically — Redis Streams trusts that consumers ACK things they've processed.
+Between steps 2 and 4, the message is "claimed but not acknowledged." If the worker crashes here, the message stays in the pending list of the dead consumer. It's not redelivered automatically, Redis Streams trusts that consumers ACK things they've processed.
 
 The mechanism for recovering messages from dead consumers is `XPENDING` (list pending messages, with idle time) and `XCLAIM` / `XAUTOCLAIM` (transfer ownership). RRQ uses `XAUTOCLAIM`:
 
@@ -177,7 +177,7 @@ When `XAUTOCLAIM` returns a reclaimed message, the replacement worker's processi
 4. **If not found:** the previous worker crashed *before* even inserting the saga_state row. Treat as fresh, go to fresh-message step 3.
 5. ACK.
 
-The "look up existing saga_state" step is critical. Without it, a reclaimed message would be processed from scratch, re-running steps that already succeeded. The idempotency constraints would catch the duplicates and produce `Done` outcomes — *correct* behavior, but wasteful, and it muddles the audit trail.
+The "look up existing saga_state" step is critical. Without it, a reclaimed message would be processed from scratch, re-running steps that already succeeded. The idempotency constraints would catch the duplicates and produce `Done` outcomes, *correct* behavior, but wasteful, and it muddles the audit trail.
 
 In code, the orchestrator's entry point handles both cases:
 
@@ -245,9 +245,9 @@ The replacement worker has to re-acquire the lock before proceeding. But should 
 **Argument for "re-validate":** during the lock gap, another saga could have completed and changed the wallet's balance, status, or relationship to other wallets. Specifically:
 - A different saga could have debited the source wallet, leaving insufficient balance for the resuming saga's pending step.
 - The fraud worker could have frozen the destination wallet.
-- An operator could have manually frozen the source wallet via the CLI.
+- An operator could have manually frozen the source wallet via the Admin Dashboard.
 
-In these cases, the original validation result is **stale**. Proceeding without rechecking could violate invariants — e.g., debit a wallet that should have been frozen, or credit a wallet that should be closed.
+In these cases, the original validation result is **stale**. Proceeding without rechecking could violate invariants, e.g., debit a wallet that should have been frozen, or credit a wallet that should be closed.
 
 RRQ chose re-validation. Specifically, when resuming a saga in any non-Init state, the orchestrator:
 
@@ -266,15 +266,15 @@ RRQ chose paranoid. The cost is small; the worst case is bad.
 
 A few more crash-recovery scenarios that show up in chaos tests:
 
-**Crash after `INSERT events` but before `UPDATE saga_state`.** Impossible by construction — they're in the same transaction. Either both commit or neither does. If you saw this in production, you have a bug in transaction handling, not a saga-state-machine bug.
+**Crash after `INSERT events` but before `UPDATE saga_state`.** Impossible by construction, they're in the same transaction. Either both commit or neither does. If you saw this in production, you have a bug in transaction handling, not a saga-state-machine bug.
 
 **Crash during compensation.** Same logic as forward crash. The state is `Compensating`; `last_completed_step` indicates which compensation completed last (the most recent compensation, since they run in reverse). Resume continues compensating backward from that point.
 
 **Two workers reclaim the same message.** Possible in principle if both call `XAUTOCLAIM` at the same instant. Defense: the `SELECT ... FOR UPDATE` on the saga_state row when processing begins. Whichever worker wins the row lock proceeds; the other blocks, eventually finds the state has advanced, and either resumes (different state) or no-ops (terminal state).
 
-**Worker reads stale saga_state from a read replica.** Not possible — the saga worker reads from the primary. Read replicas serve dashboard queries, not operational ones. Documented in the data model section.
+**Worker reads stale saga_state from a read replica.** Not possible, the saga worker reads from the primary. Read replicas serve dashboard queries, not operational ones. Documented in the data model section.
 
-**The saga's deadline_at expires mid-execution.** The deadline is for *observability*, not for *enforcement*. A saga that exceeds its deadline keeps running; the deadline is what makes "stuck saga" queryable by the admin CLI. The saga doesn't auto-abort on deadline.
+**The saga's deadline_at expires mid-execution.** The deadline is for *observability*, not for *enforcement*. A saga that exceeds its deadline keeps running; the deadline is what makes "stuck saga" queryable in the Admin Dashboard. The saga doesn't auto-abort on deadline.
 
 ---
 
@@ -284,9 +284,9 @@ Compensations are idempotent. This is the most important property of the compens
 
 ### Why compensation idempotency is necessary
 
-Crash recovery during compensation: the worker is partway through running compensations (say, has finished `C₃` and is starting `C₂`) and dies. The replacement worker reads `saga_state.current_state = 'Compensating'`, `last_completed_step = 'compensation_for_step_3'`, and resumes. But "resume" here means *retry from where we left off* — and the previous worker may have completed `C₂` before crashing, even though `last_completed_step` doesn't reflect it (if the update of `last_completed_step` was the last thing that didn't commit).
+Crash recovery during compensation: the worker is partway through running compensations (say, has finished `C₃` and is starting `C₂`) and dies. The replacement worker reads `saga_state.current_state = 'Compensating'`, `last_completed_step = 'compensation_for_step_3'`, and resumes. But "resume" here means *retry from where we left off*, and the previous worker may have completed `C₂` before crashing, even though `last_completed_step` doesn't reflect it (if the update of `last_completed_step` was the last thing that didn't commit).
 
-The replacement runs `C₂` again. If `C₂` is not idempotent, this is a bug — it has the effect of running the compensation twice.
+The replacement runs `C₂` again. If `C₂` is not idempotent, this is a bug, it has the effect of running the compensation twice.
 
 For a debit→credit compensation, "not idempotent" would mean: the compensation inserts a credit entry without checking whether one already exists. Two runs of the compensation = two credit entries = source wallet is now richer than it started.
 
@@ -321,7 +321,7 @@ For events: events have their own `event_id` (a ULID) which is unique by constru
 
 For Redis side effects (lock acquisition): the lock value is the saga_id, so trying to acquire an already-held lock is a no-op (we already own it).
 
-For external side effects (a webhook POST to a merchant): handled by the merchant's idempotent processing of `event_id` — out of our direct control.
+For external side effects (a webhook POST to a merchant): handled by the merchant's idempotent processing of `event_id`, out of our direct control.
 
 The pattern is: **make the side effect itself idempotent at the storage layer, not at the code layer.** Code-level idempotency (check-then-write) is racy; storage-level idempotency (unique constraint) is atomic. RRQ uses storage-level idempotency wherever possible.
 
@@ -339,10 +339,10 @@ RRQ's answer: **transition the saga to `DeadLettered`**. The state row indicates
 
 The operator's tools:
 
-1. The admin CLI's `rrq saga show sg_42` reveals the full state, including which step failed, why, and the partial ledger entries.
+1. The Admin Dashboard's saga detail view for `sg_42` reveals the full state, including which step failed, why, and the partial ledger entries.
 2. The operator investigates the root cause. Often it's an environmental issue (database overload, transient network partition) that has since resolved.
 3. The operator decides on a path: 
-    - **Replay compensation manually.** If the underlying issue is fixed, `rrq saga retry-compensation sg_42` (a hypothetical command) re-runs the compensation. The idempotency constraints ensure it doesn't double-credit if it had partially succeeded.
+    - **Replay compensation manually.** If the underlying issue is fixed, the dashboard's retry-compensation action on `sg_42` re-runs the compensation. The idempotency constraints ensure it doesn't double-credit if it had partially succeeded.
     - **Manual adjustment.** If the compensation cannot be safely re-run (e.g., the saga's data has been corrupted), the operator inserts an adjustment event manually with full reasoning, restoring the wallet to its correct state.
     - **Mark resolved with note.** If the discrepancy is small and not worth investigating (rare; usually only in test environments).
 
@@ -441,9 +441,9 @@ impl Saga<Debited> {
 
 **Strengths:** invalid transitions are compile errors. `saga_in_init.credit()` doesn't compile because `Saga<Init>` doesn't have a `credit()` method. Refactor safely: add a new state, the compiler tells you every place that needs to handle it.
 
-**Weaknesses:** more code (one impl block per state). The crash-recovery boundary is unavoidably stringly-typed — reading `current_state = 'Debited'` from the database requires reconstructing `Saga<Debited>` via pattern-matching on a string. The type-state guarantee resumes *after* the reconstruction, not at it.
+**Weaknesses:** more code (one impl block per state). The crash-recovery boundary is unavoidably stringly-typed, reading `current_state = 'Debited'` from the database requires reconstructing `Saga<Debited>` via pattern-matching on a string. The type-state guarantee resumes *after* the reconstruction, not at it.
 
-**Where RRQ uses it:** the Rust implementation. It's not gratuitous — it's a real correctness mechanism, and it's the single strongest Rust-specific talking point in the project.
+**Where RRQ uses it:** the Rust implementation. It's not gratuitous, it's a real correctness mechanism, and it's the single strongest Rust-specific talking point in the project.
 
 ### Pattern C: Explicit state machine with pattern match (an alternative neither uses)
 
@@ -472,7 +472,7 @@ fn run_saga(state) {
 
 ### Which is "best"?
 
-There isn't one. They're three points on a tradeoff curve between conciseness and compile-time safety. RRQ picks A for Go (idiom) and B for Rust (type-state strength) deliberately. A reviewer asking "why these specific choices?" gets a specific answer about idiom and tradeoff — not "because this is the One True Way."
+There isn't one. They're three points on a tradeoff curve between conciseness and compile-time safety. RRQ picks A for Go (idiom) and B for Rust (type-state strength) deliberately. A reviewer asking "why these specific choices?" gets a specific answer about idiom and tradeoff, not "because this is the One True Way."
 
 ---
 
@@ -485,7 +485,7 @@ For RRQ's Transfer saga with 6 steps, that's 6 state updates per saga. At 1,000 
 Optimizations RRQ does not use, but could:
 
 - **Bundle state update with the work transaction.** Already done. The state update and the work (ledger insert + event insert) are in the same transaction. One commit per step, not two.
-- **Skip state updates for transient intermediate states.** Some saga implementations skip persisting "fast" states (Init → Valid is a few microseconds; do we really need to write Valid before moving to Locked?). RRQ doesn't skip — every state transition is durable. The cost is small; the recovery semantics are cleaner.
+- **Skip state updates for transient intermediate states.** Some saga implementations skip persisting "fast" states (Init → Valid is a few microseconds; do we really need to write Valid before moving to Locked?). RRQ doesn't skip, every state transition is durable. The cost is small; the recovery semantics are cleaner.
 - **Batched saga state writes.** Multiple sagas advancing simultaneously could batch their state updates. Adds complexity, doesn't meaningfully help at our throughput.
 
 Optimizations RRQ doesn't do because they break correctness:
@@ -505,11 +505,11 @@ A short tour of saga anti-patterns that show up in immature implementations:
 
 **"Save state to memory; persist at the end."** Tempting because it's fast. Broken because crashes lose the state. Sagas have to be durable across crashes; this is non-negotiable.
 
-**"Long-lived database transactions across the whole saga."** This is the thing sagas exist to *avoid*. If you can hold a transaction open across all steps, you don't need a saga — just use the transaction. If you can't, holding a transaction open is wrong.
+**"Long-lived database transactions across the whole saga."** This is the thing sagas exist to *avoid*. If you can hold a transaction open across all steps, you don't need a saga, just use the transaction. If you can't, holding a transaction open is wrong.
 
-**"Compensations that are full inverses of forward operations."** A "credit" is not the inverse of a "debit" in a strict sense — it has its own audit trail, its own ledger entry, its own event. The compensation is *semantically* the inverse; it leaves the system in an equivalent state. Treating compensations as literal reverse-operations leads to confusion about what to record in audits.
+**"Compensations that are full inverses of forward operations."** A "credit" is not the inverse of a "debit" in a strict sense, it has its own audit trail, its own ledger entry, its own event. The compensation is *semantically* the inverse; it leaves the system in an equivalent state. Treating compensations as literal reverse-operations leads to confusion about what to record in audits.
 
-**"Idempotent forward operations, non-idempotent compensations."** Both must be idempotent. The compensation is the more dangerous one — it runs in the failure path, often after a crash, and is far more likely to be replayed than the forward path. If only one is idempotent, make it the compensation.
+**"Idempotent forward operations, non-idempotent compensations."** Both must be idempotent. The compensation is the more dangerous one, it runs in the failure path, often after a crash, and is far more likely to be replayed than the forward path. If only one is idempotent, make it the compensation.
 
 **"Saga steps that call each other."** A step calling another step (with its own state transition) creates a nested saga that's not represented in the state machine. The result: crash recovery has to be aware of the nesting, which is much harder to get right. Keep steps atomic and linearly ordered.
 

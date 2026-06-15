@@ -1,4 +1,4 @@
-# 26 — Observability
+# 26: Observability
 
 > **What this is.** The deep dive on observability in RRQ: distributed tracing, metrics, structured logs, and what "observable" actually means. Less algorithmically deep than other deep-dives, but operationally essential.
 >
@@ -14,12 +14,12 @@ Observability is the property that lets you answer questions about your system's
 
 The test of observability is concrete: **given a merchant complaint, "my transfer at 14:23 failed and I don't know why," can the operator answer within 5 minutes using only what the system emits?** If yes, the system is observable. If the operator has to SSH into a box and grep log files, it isn't.
 
-The bar matters because the cost of inadequate observability is paid during incidents, when stakes are high and time is short. Building observability after the fact is much harder than building it from the start — you have to retrofit every service, and you discover you didn't capture the data that would have explained the incident.
+The bar matters because the cost of inadequate observability is paid during incidents, when stakes are high and time is short. Building observability after the fact is much harder than building it from the start, you have to retrofit every service, and you discover you didn't capture the data that would have explained the incident.
 
 Observability has three pillars: **traces, metrics, logs**. Each addresses a different question.
 
 - **Traces** answer "what happened to this specific request?" A trace is a record of one request as it flowed through the system, including timing and outcomes at each step.
-- **Metrics** answer "what's the system doing in aggregate?" Metrics are time series — counts and durations sampled over time.
+- **Metrics** answer "what's the system doing in aggregate?" Metrics are time series, counts and durations sampled over time.
 - **Logs** answer "what did the code think it was doing?" Logs are events emitted by application code, structured for machine query.
 
 Each pillar has a role. Traces are best for incident diagnosis; metrics are best for monitoring and alerts; logs are best for forensics. Together, they cover the questions you ask in practice.
@@ -79,7 +79,7 @@ Three concrete uses:
 
 **Finding the bottleneck.** Performance is poor for some subset of transfers. Group traces by status, by merchant, by saga type. Compare durations. The slow group's trace shows which step is consuming the time. No guessing.
 
-**Understanding async causality.** RRQ is event-driven; a single API request triggers a chain of async work (saga, webhook). Without tracing, the relationship between the request and the eventual webhook would be invisible — they'd be separate log lines with no thread to connect them. With tracing, the trace_id propagates through the system, tying them together.
+**Understanding async causality.** RRQ is event-driven; a single API request triggers a chain of async work (saga, webhook). Without tracing, the relationship between the request and the eventual webhook would be invisible, they'd be separate log lines with no thread to connect them. With tracing, the trace_id propagates through the system, tying them together.
 
 This last property is what makes distributed tracing distinctive. Logs alone could capture the same information per-service, but assembling the cross-service story requires a shared identifier. The trace_id is that identifier.
 
@@ -93,11 +93,11 @@ Components:
 - **OTel Collector** receives spans from applications, batches them, forwards to backends. Runs as a sidecar or standalone process; configured via YAML.
 - **Jaeger** (or Tempo, or Honeycomb, or Datadog APM, or any OTel-compatible backend) stores traces and provides the query UI.
 
-In v1, we run the all-in-one Jaeger container in docker-compose for local development. Production would use a more scalable backend.
+For local development, we run the all-in-one Jaeger container in docker-compose. Production would use a more scalable backend.
 
 ### Propagating trace context
 
-A trace_id starts somewhere — for RRQ, at the API gateway when a merchant request arrives. From there, it has to propagate through the system: across HTTP calls (the gateway → saga via Redis), across async boundaries (event passed through a stream), across database round-trips.
+A trace_id starts somewhere, for RRQ, at the API gateway when a merchant request arrives. From there, it has to propagate through the system: across HTTP calls (the gateway → saga via Redis), across async boundaries (event passed through a stream), across database round-trips.
 
 OpenTelemetry standardizes this propagation:
 
@@ -131,7 +131,7 @@ Spans aren't logs. Don't put unbounded data on them:
 
 - **Don't put full request bodies.** A transfer payload might be small; a bulk payout payload might be megabytes. Spans should be small and consistent.
 - **Don't put PII.** Even if the payload is small, customer data shouldn't end up in trace storage. The merchant_id is fine; the customer's name isn't.
-- **Don't put secrets.** API keys, signing secrets — never in spans.
+- **Don't put secrets.** API keys, signing secrets, never in spans.
 
 Spans should be enough to *find* what you need; the actual data is in the database where it belongs.
 
@@ -139,12 +139,12 @@ Spans should be enough to *find* what you need; the actual data is in the databa
 
 In production with high throughput, recording every span for every request is expensive. The standard mitigation is sampling: record N% of traces fully, discard the rest.
 
-RRQ's v1 records 100% of traces (sample rate = 1.0). Justifiable at our scale (1,000 TPS is manageable storage-wise). For higher scale, the sampling strategy would be:
+RRQ records 100% of traces (sample rate = 1.0). Justifiable at our scale (1,000 TPS is manageable storage-wise). For higher scale, the sampling strategy would be:
 
 - **Head-based sampling**: decide at the start of the trace whether to record it. Simple but loses some interesting traces.
 - **Tail-based sampling**: record everything in memory, decide at the end whether to keep. Better for "always keep errors" but requires the collector to buffer.
 
-v1 doesn't optimize this; v2 would.
+RRQ doesn't optimize this; it's a known path for higher scale.
 
 ---
 
@@ -154,20 +154,20 @@ v1 doesn't optimize this; v2 would.
 
 Metrics are time-series data: a value, a name, and a set of labels, sampled at intervals. Examples:
 
-- `rrq_transfers_total{status="success"}` — counter of successful transfers.
-- `rrq_saga_duration_seconds{step="debit"}` — histogram of step durations.
-- `rrq_active_sagas` — gauge of currently-running sagas.
+- `rrq_transfers_total{status="success"}`, counter of successful transfers.
+- `rrq_saga_duration_seconds{step="debit"}`, histogram of step durations.
+- `rrq_active_sagas`, gauge of currently-running sagas.
 
-Metrics are not for individual requests (that's what traces are for). They're for aggregate behavior — counts, rates, percentiles — over time.
+Metrics are not for individual requests (that's what traces are for). They're for aggregate behavior, counts, rates, percentiles, over time.
 
 ### The four golden signals
 
 Google's SRE book identifies four metrics that define a service's health:
 
-1. **Latency** — how long requests take. Report p50, p95, p99. Never report only the average; averages hide tails.
-2. **Traffic** — how many requests per second. The basic load measurement.
-3. **Errors** — what fraction of requests fail. Error rate is what alerting fires on.
-4. **Saturation** — how full the system is. Different services have different measures: queue depth, consumer lag, CPU utilization, memory pressure.
+1. **Latency**, how long requests take. Report p50, p95, p99. Never report only the average; averages hide tails.
+2. **Traffic**, how many requests per second. The basic load measurement.
+3. **Errors**, what fraction of requests fail. Error rate is what alerting fires on.
+4. **Saturation**, how full the system is. Different services have different measures: queue depth, consumer lag, CPU utilization, memory pressure.
 
 These four metrics per service give you a dashboard that tells you whether the system is healthy at a glance.
 
@@ -176,37 +176,37 @@ These four metrics per service give you a dashboard that tells you whether the s
 Per service, the implementation captures (at minimum):
 
 **API Gateway:**
-- `rrq_gateway_requests_total{endpoint, status}` — counter
-- `rrq_gateway_request_duration_seconds{endpoint}` — histogram
-- `rrq_gateway_idempotency_check_duration_seconds` — histogram
-- `rrq_gateway_idempotency_hits_total{outcome}` — counter (outcome: new, in_flight, cached)
+- `rrq_gateway_requests_total{endpoint, status}`, counter
+- `rrq_gateway_request_duration_seconds{endpoint}`, histogram
+- `rrq_gateway_idempotency_check_duration_seconds`, histogram
+- `rrq_gateway_idempotency_hits_total{outcome}`, counter (outcome: new, in_flight, cached)
 
 **Saga Worker:**
-- `rrq_saga_total{saga_type, outcome}` — counter (outcome: completed, failed, dead_lettered)
-- `rrq_saga_duration_seconds{saga_type, outcome}` — histogram
-- `rrq_saga_step_duration_seconds{step}` — histogram
-- `rrq_saga_active` — gauge
-- `rrq_saga_state_transitions_total{from, to}` — counter (for state machine debugging)
+- `rrq_saga_total{saga_type, outcome}`, counter (outcome: completed, failed, dead_lettered)
+- `rrq_saga_duration_seconds{saga_type, outcome}`, histogram
+- `rrq_saga_step_duration_seconds{step}`, histogram
+- `rrq_saga_active`, gauge
+- `rrq_saga_state_transitions_total{from, to}`, counter (for state machine debugging)
 
 **Webhook Worker:**
-- `rrq_webhook_deliveries_total{outcome}` — counter (outcome: delivered, failed_retry, failed_dlq)
-- `rrq_webhook_delivery_duration_seconds` — histogram
-- `rrq_webhook_retries_total{attempt}` — counter
-- `rrq_circuit_breaker_state{merchant_id}` — gauge (encoded as 0=closed, 1=open, 2=half_open)
+- `rrq_webhook_deliveries_total{outcome}`, counter (outcome: delivered, failed_retry, failed_dlq)
+- `rrq_webhook_delivery_duration_seconds`, histogram
+- `rrq_webhook_retries_total{attempt}`, counter
+- `rrq_circuit_breaker_state{merchant_id}`, gauge (encoded as 0=closed, 1=open, 2=half_open)
 
 **Fraud Worker:**
-- `rrq_fraud_events_processed_total` — counter
-- `rrq_fraud_signals_emitted_total{rule}` — counter
-- `rrq_fraud_active_tasks` — gauge
-- `rrq_fraud_task_panic_total` — counter
+- `rrq_fraud_events_processed_total`, counter
+- `rrq_fraud_signals_emitted_total{rule}`, counter
+- `rrq_fraud_active_tasks`, gauge
+- `rrq_fraud_task_panic_total`, counter
 
 **Reconciliation:**
-- `rrq_reconciliation_run_duration_seconds` — histogram (sparse — once per day)
-- `rrq_reconciliation_discrepancies_total` — counter — *the most important business-level metric*
-- `rrq_reconciliation_wallets_checked` — gauge
+- `rrq_reconciliation_run_duration_seconds`, histogram (sparse, once per day)
+- `rrq_reconciliation_discrepancies_total`, counter, *the most important business-level metric*
+- `rrq_reconciliation_wallets_checked`, gauge
 
 **Stream consumer lag** (across all consumers, scraped from Redis):
-- `rrq_stream_lag{stream, consumer_group}` — gauge
+- `rrq_stream_lag{stream, consumer_group}`, gauge
 
 These metrics are exposed by each service on its `/metrics` endpoint (Prometheus format). Prometheus scrapes them every 15 seconds. Grafana renders dashboards.
 
@@ -222,7 +222,7 @@ The three types and when to use each:
 
 Histogram bucket choices matter. RRQ uses Prometheus defaults for HTTP request durations and saga durations: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10 seconds. These cover the range from sub-millisecond fast paths to multi-second slow paths.
 
-If most of the observations fall outside the bucket range, percentile estimates degrade. We watch for this in benchmarks; v1's defaults are tuned to RRQ's actual latency distribution.
+If most of the observations fall outside the bucket range, percentile estimates degrade. We watch for this in benchmarks; the defaults are tuned to RRQ's actual latency distribution.
 
 ### Why p99 matters more than average
 
@@ -288,7 +288,7 @@ Properties:
 - **Joinable to traces.** Every log line carries trace_id/span_id, so you can pivot from a trace to its logs and back.
 - **Stable.** Adding a new field is fine. Changing the meaning of an existing field is not. Schema discipline matters.
 
-The alternative — `printf`-style logs like "saga sg_99 completed step debit in 110ms" — works for humans reading individual lines but breaks down at scale. You can't grep for "all log lines for merchant m_M" when the merchant_id is embedded inconsistently in the prose. Structured logs solve this by making the fields explicit.
+The alternative, `printf`-style logs like "saga sg_99 completed step debit in 110ms", works for humans reading individual lines but breaks down at scale. You can't grep for "all log lines for merchant m_M" when the merchant_id is embedded inconsistently in the prose. Structured logs solve this by making the fields explicit.
 
 ### Log levels with discipline
 
@@ -301,7 +301,7 @@ The standard levels:
 
 RRQ's discipline:
 
-- DEBUG is off in production. Don't log every database query or HTTP call — those are span data, captured by tracing.
+- DEBUG is off in production. Don't log every database query or HTTP call, those are span data, captured by tracing.
 - INFO is for transitions worth recording: "saga sg_99 reached state Completed", "consumer reclaimed N stuck messages on startup". Not for "received message", which would flood logs.
 - WARN is for handled errors: "webhook delivery failed, scheduling retry", "circuit breaker opened for merchant m_X".
 - ERROR is rare and significant: "saga step panicked", "could not connect to Postgres on startup". Every ERROR is a bug to be investigated.
@@ -312,7 +312,7 @@ The volume hierarchy: ERROR << WARN < INFO < DEBUG. If ERROR is firing frequentl
 
 Three categories of mistake:
 
-**Logging on every operation.** Don't log "received HTTP request" for every request — that's what request metrics are for. Don't log "started database query" — that's what spans are for. Logs are for *unusual* or *significant* events, not for everything.
+**Logging on every operation.** Don't log "received HTTP request" for every request, that's what request metrics are for. Don't log "started database query", that's what spans are for. Logs are for *unusual* or *significant* events, not for everything.
 
 **Logging PII.** Customer names, account numbers, personal details. Log the merchant_id (an opaque identifier), not the merchant's name. Log the wallet_id, not the customer's email.
 
@@ -325,11 +325,11 @@ Three categories of mistake:
 A real incident:
 
 1. **Alert fires.** `rrq_webhook_deliveries_dlq_total{merchant_id="m_X"}` increased by 50 in the last hour.
-2. **Operator opens Grafana dashboard.** The graph shows when the increase started — 14:00 UTC. Other panels show error rate for m_X spiked at the same time.
+2. **Operator opens Grafana dashboard.** The graph shows when the increase started, 14:00 UTC. Other panels show error rate for m_X spiked at the same time.
 3. **Operator queries Loki for warnings/errors related to m_X.** Sees logs like "webhook delivery failed: HTTP 500" repeating.
 4. **Operator picks one failure and follows the trace.** The trace shows: HTTP POST to merchant endpoint took 8 seconds (timeout), returned 500. Status: ERROR.
 5. **Operator concludes**: the merchant's endpoint started returning 500s at 14:00. Reaches out to m_X.
-6. **Eventually**: m_X confirms their issue, fixes it. Operator uses CLI to reset the circuit breaker and replay DLQ entries.
+6. **Eventually**: m_X confirms their issue, fixes it. Operator uses the Admin Dashboard to reset the circuit breaker and replay DLQ entries.
 
 Each pillar contributed:
 - The metric told the operator something was wrong, with merchant scope.
@@ -365,7 +365,7 @@ The good news: the cost is mostly upfront and template-y. Once the patterns are 
 
 ## What "observability" looks like at scale
 
-RRQ's v1 scale (1,000 TPS) is small enough that we can do everything: 100% sampling, all metrics, all logs. The collection and storage costs are negligible.
+RRQ's scale (1,000 TPS) is small enough that we can do everything: 100% sampling, all metrics, all logs. The collection and storage costs are negligible.
 
 At higher scale, the tradeoffs change:
 
@@ -373,13 +373,13 @@ At higher scale, the tradeoffs change:
 - **Metric cardinality** becomes a real concern. Labels like `merchant_id` can produce millions of distinct time series; storage explodes. The mitigation: per-merchant metrics are exposed selectively (only top-N merchants or aggregated bands).
 - **Log volume** dwarfs everything else. Structured logs at TB/day are expensive. Sampling and aggregation are essential.
 
-v1 doesn't optimize for any of these. The patterns scale, but the volumes don't yet need to.
+RRQ doesn't optimize for any of these. The patterns scale, but the volumes don't yet need to.
 
 ---
 
 ## The benchmark scenarios benefit specifically from observability
 
-Notable: the benchmark methodology (in `docs/appendix/43-BENCHMARK-METHODOLOGY.md`) relies heavily on traces and metrics. Comparing Go and Rust isn't just "this one was faster"; it's "Rust's p99 was 2.5ms while Go's was 3.8ms, and the trace shows Go's tail comes from GC pauses during reconciliation, visible as 50ms gaps in span durations." The conclusion is supported by trace data, not assertions.
+Notable: the benchmark methodology (in `docs/appendices/43-BENCHMARK-METHODOLOGY.md`) relies heavily on traces and metrics. Comparing Go and Rust isn't just "this one was faster"; it's "Rust's p99 was 2.5ms while Go's was 3.8ms, and the trace shows Go's tail comes from GC pauses during reconciliation, visible as 50ms gaps in span durations." The conclusion is supported by trace data, not assertions.
 
 Without observability, benchmarks produce numbers without explanations. With it, benchmarks produce *insights*. That's the value at the project level.
 
@@ -408,7 +408,7 @@ The setup is well-trodden territory; the value is in *using* it consistently, no
 
 ## Where to read next
 
-- The benchmark methodology that uses traces and metrics → [`../appendix/43-BENCHMARK-METHODOLOGY.md`](../appendix/43-BENCHMARK-METHODOLOGY.md)
+- The benchmark methodology that uses traces and metrics → [`../appendices/43-BENCHMARK-METHODOLOGY.md`](../appendices/43-BENCHMARK-METHODOLOGY.md)
 - OpenTelemetry concepts: <https://opentelemetry.io/docs/concepts/>
 - Google's SRE book on the four golden signals: <https://sre.google/sre-book/monitoring-distributed-systems/>
 

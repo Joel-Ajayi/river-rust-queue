@@ -1,4 +1,4 @@
-# 40 — Data Model
+# 40: Data Model
 
 > **What this is.** Reference for the Postgres schema. Every table, every column, every index, with the reasoning.
 >
@@ -11,21 +11,94 @@
 **IDs are ULIDs as TEXT.** ULIDs are 26-character strings, lexicographically sortable by time. They sort like timestamps but are globally unique without coordination. Stored as TEXT in Postgres (not bytea, not UUID) for readability and easy interaction with command-line tools.
 
 ID prefixes by entity type for human-readability:
-- `m_` — merchant
-- `wal_` — wallet
-- `job_` — job
-- `sg_` — saga
-- `ev_` — event
-- `wd_` — webhook delivery
-- `dlq_` — DLQ entry
-- `rec_` — reconciliation run
-- `disp_` — dispute (v2)
+- `m_`, merchant
+- `wal_`, wallet
+- `job_`, job
+- `sg_`, saga
+- `ev_`, event
+- `wd_`, webhook delivery
+- `dlq_`, DLQ entry
+- `rec_`, reconciliation run
+- `disp_`, dispute (chargebacks; designed, not yet built)
 
 **Timestamps are `TIMESTAMPTZ`.** Always UTC; the timezone-aware variant prevents bugs from local-time interpretation.
 
 **Money is `BIGINT`, in the smallest currency unit.** Never floating point. For NGN, the unit is kobo (1 NGN = 100 kobo). For USD, cents. For currencies with no subunit, the unit is the currency itself. Application code converts for display.
 
 **Boolean status values use TEXT with CHECK constraints, not boolean.** A `status` column with values `'active' | 'frozen' | 'closed'` is more extensible than two boolean columns (`is_active`, `is_frozen`); adding a fourth state is one CHECK update, not a schema migration.
+
+---
+
+## The tables at a glance
+
+```mermaid
+erDiagram
+    merchants ||--o{ wallets : "owns"
+    merchants ||--o{ webhook_deliveries : "receives"
+    wallets ||--o{ ledger_entries : "is mutated by"
+    wallets ||--|| wallet_balance_cache : "cached as"
+    events ||--o{ ledger_entries : "records"
+    events ||--o{ webhook_deliveries : "is the source of"
+    merchants {
+        text id PK
+        text api_key_hash UK
+        text webhook_url
+        text webhook_secret
+        text tier
+        text status
+    }
+    wallets {
+        text id PK
+        text merchant_id FK
+        text currency
+        text wallet_type
+        text external_ref
+        text status
+    }
+    events {
+        bigserial id PK
+        text event_id UK
+        text event_type
+        text aggregate_id
+        text correlation_id
+        jsonb payload
+    }
+    ledger_entries {
+        bigserial id PK
+        text wallet_id FK
+        bigint amount
+        text saga_id
+        text step_name
+        text event_id FK
+    }
+    saga_state {
+        text saga_id PK
+        text job_id
+        text saga_type
+        text current_state
+        timestamptz deadline_at
+    }
+    webhook_deliveries {
+        text id PK
+        text merchant_id FK
+        text source_event_id FK
+        int attempt_count
+        text status
+    }
+    dlq_entries {
+        text id PK
+        text source
+        jsonb original_payload
+        text status
+    }
+    wallet_balance_cache {
+        text wallet_id PK
+        bigint balance
+        bigint last_event_id
+    }
+```
+
+`events` is the source of truth; `ledger_entries` and `wallet_balance_cache` are projections derived from it. `saga_state` and `dlq_entries` carry no foreign keys on purpose (they reference work by id, and must survive even if the referenced rows are pruned). The sections below give every column with its reasoning.
 
 ---
 
@@ -141,7 +214,7 @@ The indexes:
 | --- | --- |
 | `events_aggregate_idx` | Per-aggregate replay. Reconciliation, audit, balance derivation. |
 | `events_type_time_idx` | Time-window queries by event type. Reconciliation, reporting. |
-| `events_correlation_idx` | Saga history lookup. Admin CLI. |
+| `events_correlation_idx` | Saga history lookup. Admin Dashboard. |
 
 Partial index on `correlation_id` because many events don't have a correlation (system-initiated events like reconciliation runs).
 
@@ -219,8 +292,8 @@ CREATE INDEX saga_state_job_idx ON saga_state (job_id);
 | Column | Why it exists |
 | --- | --- |
 | `saga_id` | ULID with `sg_` prefix. Also the events' `correlation_id`. |
-| `job_id` | The triggering job (one-to-one with sagas in v1). |
-| `saga_type` | `transfer` \| `bulk_payout` \| (v2: `chargeback`, `fx_transfer`). |
+| `job_id` | The triggering job (one-to-one with sagas). |
+| `saga_type` | `transfer` \| `bulk_payout` \| `chargeback` (chargeback designed, not yet built). |
 | `current_state` | The state machine's current state. `Init`, `Valid`, `Locked`, `Debited`, `Credited`, `Compensating`, `Completed`, `Failed`, `DeadLettered`. |
 | `last_completed_step` | The most recent step that committed. Used by resume logic to determine the next step. |
 | `state_data` | Step outputs threaded through the saga. Lock token, wallet metadata, etc. JSONB. |
@@ -334,7 +407,7 @@ The partial index supports the dominant operator query: "open entries, newest fi
 
 ## wallet_balance_cache (read projection)
 
-Denormalized balance per wallet. Refreshed asynchronously from `ledger_entries`. *Not* the source of truth — reconciliation verifies this against the derived sum.
+Denormalized balance per wallet. Refreshed asynchronously from `ledger_entries`. *Not* the source of truth, reconciliation verifies this against the derived sum.
 
 ```sql
 CREATE TABLE wallet_balance_cache (
@@ -365,7 +438,7 @@ The projector tails events and updates this table. Lag is typically < 1 second; 
 | Webhook Worker | `merchants` (cached), `webhook_deliveries` | `webhook_deliveries`, `events`, `dlq_entries` |
 | Fraud Worker | `wallets`, `events` (rebuild) | `wallets`, `events` |
 | Reconciliation | `events`, `ledger_entries`, `wallets` | `events` (alert entries only) |
-| Admin CLI | all tables (reads) | `events` (audit entries), specific writes per command |
+| Admin Dashboard | all tables (reads) | `events` (audit entries), specific writes per action |
 
 ---
 
@@ -381,7 +454,7 @@ Migrations run in numbered order:
 6. `006_create_webhook_deliveries.sql` (depends on merchants, events)
 7. `007_create_dlq_entries.sql`
 
-Future migrations add the projections, the v2 features (disputes, fx_rate_snapshots), and the role-based permissions for production.
+Later migrations add the projections, the chargeback tables (disputes), and the role-based permissions for production.
 
 ---
 

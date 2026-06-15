@@ -1,22 +1,22 @@
-# 13 — Fraud Worker
+# 13: Fraud Worker
 
-> **What this is.** The service document for the Fraud Worker. The technically most interesting service in RRQ because of the per-key ordering problem at its center — solving it correctly is one of the project's signature talking points.
+> **What this is.** The service document for the Fraud Worker. The technically most interesting service in RRQ because of the per-key ordering problem at its center, solving it correctly is one of the project's signature talking points.
 >
 > **Reading time.** ~20 minutes.
 >
-> **Prerequisites.** Read [`11-SAGA-WORKER.md`](11-SAGA-WORKER.md). The fraud worker joins `stream:jobs` with an independent `fraud-workers` consumer group — the same stream the API Gateway populates and the saga worker consumes.
+> **Prerequisites.** Read [`11-SAGA-WORKER.md`](11-SAGA-WORKER.md). The fraud worker joins `stream:jobs` with an independent `fraud-workers` consumer group, the same stream the API Gateway populates and the saga worker consumes.
 
 ---
 
 ## What it does
 
-The Fraud Worker is a **detective control**, not a preventative one. It watches the stream of transfer requests and looks for patterns that suggest abuse — primarily velocity, the pattern where one wallet originates many transfers in a short window. When a threshold is exceeded, it freezes the offending wallet automatically. An operator can then investigate, decide whether the activity is legitimate, and unfreeze.
+The Fraud Worker is a **detective control**, not a preventative one. It watches the stream of transfer requests and looks for patterns that suggest abuse, primarily velocity, the pattern where one wallet originates many transfers in a short window. When a threshold is exceeded, it freezes the offending wallet automatically. An operator can then investigate, decide whether the activity is legitimate, and unfreeze.
 
-The word "detective" matters. The fraud worker does not gate transfers — it reads the same `JobRequested` events from `stream:jobs` as the saga worker (via the independent `fraud-workers` consumer group) and scores requests without blocking them. A preventative fraud system would sit in the request path, scoring each transfer before allowing it to proceed; that's a much harder system (latency-critical, needs synchronous model evaluation) and is deliberately out of scope for v1. Reading `JobRequested` rather than completed-transfer events means the velocity count includes all attempts — even those that later fail validation — which is actually a stronger fraud signal.
+The word "detective" matters. The fraud worker does not gate transfers, it reads the same `JobRequested` events from `stream:jobs` as the saga worker (via the independent `fraud-workers` consumer group) and scores requests without blocking them. A preventative fraud system would sit in the request path, scoring each transfer before allowing it to proceed; that's a much harder system (latency-critical, needs synchronous model evaluation) and is deliberately out of scope. Reading `JobRequested` rather than completed-transfer events means the velocity count includes all attempts, even those that later fail validation, which is actually a stronger fraud signal.
 
-What v1 _does_ solve is the technically interesting part: **per-wallet event ordering under horizontal scaling**. Velocity is a stateful computation over a stream of events for a specific wallet. The events must be processed in order — out-of-order processing produces incorrect counts and false signals. But the system has many wallets, and we want to process different wallets in parallel for throughput. The reconciliation between "per-wallet ordering" and "horizontal parallelism" is the design problem at the heart of this service.
+What the fraud worker _does_ solve is the technically interesting part: **per-wallet event ordering under horizontal scaling**. Velocity is a stateful computation over a stream of events for a specific wallet. The events must be processed in order, out-of-order processing produces incorrect counts and false signals. But the system has many wallets, and we want to process different wallets in parallel for throughput. The reconciliation between "per-wallet ordering" and "horizontal parallelism" is the design problem at the heart of this service.
 
-The Webhook Worker solves a similar problem with stream partitioning (16 shards by merchant*id). The Fraud Worker could \_not* use the same approach because the cardinality of wallets is much higher than merchants (a merchant has many wallets), and even with high partition count, the load distribution across partitions would be highly uneven — a hot wallet would hash to a single partition and bottleneck its consumer. So the Fraud Worker uses a different mechanism: **two-level dispatch with lazy per-wallet tasks**.
+The Webhook Worker solves a similar problem with stream partitioning (16 shards by merchant*id). The Fraud Worker could \_not* use the same approach because the cardinality of wallets is much higher than merchants (a merchant has many wallets), and even with high partition count, the load distribution across partitions would be highly uneven, a hot wallet would hash to a single partition and bottleneck its consumer. So the Fraud Worker uses a different mechanism: **two-level dispatch with lazy per-wallet tasks**.
 
 ---
 
@@ -24,7 +24,7 @@ The Webhook Worker solves a similar problem with stream partitioning (16 shards 
 
 **Inputs**
 
-- `JobRequested` events from `stream:jobs`, consumed by the `fraud-workers` consumer group. The fraud worker joins the same job stream as the saga worker but as a _different_ consumer group — both groups receive every message independently. Non-transfer job types (e.g. bulk payout orchestration messages) are filtered out by the dispatcher.
+- `JobRequested` events from `stream:jobs`, consumed by the `fraud-workers` consumer group. The fraud worker joins the same job stream as the saga worker but as a _different_ consumer group, both groups receive every message independently. Non-transfer job types (e.g. bulk payout orchestration messages) are filtered out by the dispatcher.
 - Wallet status from Postgres (to check whether a wallet is already frozen).
 
 **Outputs**
@@ -57,9 +57,9 @@ To understand the design, see why the simpler approaches break:
 
 **Approach 1: single consumer.** One consumer, processes all events serially in order. Trivially correct for ordering. Problem: throughput bounded by one consumer. Doesn't scale.
 
-**Approach 2: consumer group with N consumers, no partitioning.** Multiple consumers pull from the same stream and balance load. Throughput scales. Problem: ordering destroyed — two events for wallet W1 can be processed by two different consumers concurrently, and the second one might run first.
+**Approach 2: consumer group with N consumers, no partitioning.** Multiple consumers pull from the same stream and balance load. Throughput scales. Problem: ordering destroyed, two events for wallet W1 can be processed by two different consumers concurrently, and the second one might run first.
 
-**Approach 3: stream partitioned by wallet_id (like webhooks).** Each shard owns a subset of wallets. Within a shard, events for the same wallet are serial. Problem: wallet cardinality is high (thousands or millions of wallets per merchant) and _load_ per wallet is highly skewed. A merchant's main funding wallet might generate 1000 events/sec while most wallets generate one event per day. Hashing wallets to shards distributes the _number_ of wallets evenly but distributes the _load_ unevenly — the shard with the hot wallet becomes the bottleneck. Adding more shards doesn't help because the hot wallet still hashes to one shard.
+**Approach 3: stream partitioned by wallet_id (like webhooks).** Each shard owns a subset of wallets. Within a shard, events for the same wallet are serial. Problem: wallet cardinality is high (thousands or millions of wallets per merchant) and _load_ per wallet is highly skewed. A merchant's main funding wallet might generate 1000 events/sec while most wallets generate one event per day. Hashing wallets to shards distributes the _number_ of wallets evenly but distributes the _load_ unevenly, the shard with the hot wallet becomes the bottleneck. Adding more shards doesn't help because the hot wallet still hashes to one shard.
 
 **Approach 4 (chosen): two-level dispatch.** Outer consumer reads any event from the stream. For each event, look at its `wallet_id` and route it to an in-process channel/queue dedicated to that wallet. A goroutine/task per wallet drains its channel serially.
 
@@ -87,9 +87,9 @@ Properties:
 - **Parallelism across wallets** because different wallets have different tasks running concurrently.
 - **No advance configuration of wallet→shard mapping**. Tasks are spawned lazily when a wallet's first event arrives. No pre-allocation; no surprise when a new wallet appears.
 - **Load follows demand**. A hot wallet's task is constantly busy; a cold wallet's task spends most of its time idle. Idle tasks exit after a timeout to reclaim memory.
-- **Outer consumer never blocks**. The dispatch is a non-blocking channel send. If a per-wallet channel is full (slow processing for that wallet), the outer consumer may block briefly — that's intentional backpressure on that wallet specifically.
+- **Outer consumer never blocks**. The dispatch is a non-blocking channel send. If a per-wallet channel is full (slow processing for that wallet), the outer consumer may block briefly, that's intentional backpressure on that wallet specifically.
 
-The pattern has a name in the literature: **"actor per key"** or **"single-writer principle"**. It shows up in payment systems, financial engines, and game servers — anywhere per-entity state needs to be mutated by a single concurrent unit.
+The pattern has a name in the literature: **"actor per key"** or **"single-writer principle"**. It shows up in payment systems, financial engines, and game servers, anywhere per-entity state needs to be mutated by a single concurrent unit.
 
 ### The lifecycle of a per-wallet task
 
@@ -143,7 +143,7 @@ Three things to notice:
 
 - **The task is spawned on first event for that wallet, not pre-allocated.** Avoids a static configuration of "max wallets" and lets the system scale to whatever cardinality the workload produces.
 - **The task exits after idle.** A wallet that hasn't been active for 5 minutes has its task cleaned up. If a new event arrives later, a fresh task is spawned. This bounds memory at any point in time to "number of currently-active wallets."
-- **The outer consumer's ACK is independent of the task's processing.** When does the outer consumer ACK? See the next subsection — this is the subtle part.
+- **The outer consumer's ACK is independent of the task's processing.** When does the outer consumer ACK? See the next subsection, this is the subtle part.
 
 ### The ACK question
 
@@ -158,18 +158,18 @@ Three options:
 
 **Option B: ACK only after the per-wallet task confirms processing.**
 
-- Pro: durability — events are only ACKed when processed.
-- Con: the outer consumer has to wait. If the per-wallet task is slow, the outer consumer blocks. Throughput limited. Also complicates the code significantly — you need a back-channel from task to dispatcher.
+- Pro: durability, events are only ACKed when processed.
+- Con: the outer consumer has to wait. If the per-wallet task is slow, the outer consumer blocks. Throughput limited. Also complicates the code significantly, you need a back-channel from task to dispatcher.
 
 **Option C: ACK immediately, accept that a worker crash can lose in-flight events, document the limitation.**
 
-- The choice v1 makes.
+- The choice RRQ makes.
 
-The reasoning: fraud is a _detective_ control. Missing an event in the velocity window because of a worker crash is unlikely (workers crash rarely, and only events in flight at that exact moment are affected — typically zero or one events per crash). When it does happen, the worst case is a fraud signal that would have fired a few seconds later fires a few seconds later than it should — or, in the absolute worst case, the threshold is crossed but the freeze isn't applied. The nightly reconciliation surfaces wallets with anomalous activity; an operator can review and freeze manually if the auto-freeze missed.
+The reasoning: fraud is a _detective_ control. Missing an event in the velocity window because of a worker crash is unlikely (workers crash rarely, and only events in flight at that exact moment are affected, typically zero or one events per crash). When it does happen, the worst case is a fraud signal that would have fired a few seconds later fires a few seconds later than it should, or, in the absolute worst case, the threshold is crossed but the freeze isn't applied. The nightly reconciliation surfaces wallets with anomalous activity; an operator can review and freeze manually if the auto-freeze missed.
 
-The alternative — durably tracking per-wallet processing state — would be a Postgres write per event, which would dominate the worker's throughput. For a non-critical detective control, that's the wrong tradeoff.
+The alternative, durably tracking per-wallet processing state, would be a Postgres write per event, which would dominate the worker's throughput. For a non-critical detective control, that's the wrong tradeoff.
 
-This is one place where the v1 design accepts a known limitation. It's documented in [`STATUS.md`](../../STATUS.md) and surfaced in the README. A v2 deployment that needs stronger guarantees would switch to Option B.
+This is one place where RRQ accepts a known limitation. It's documented in [`STATUS.md`](../../STATUS.md) and surfaced in the README. A deployment that needs stronger guarantees would switch to Option B.
 
 ### Velocity computation with Redis sorted sets
 
@@ -181,7 +181,7 @@ ZREMRANGEBYSCORE  velocity:wallet:W_ID  0  <timestamp_ms - window_ms>
 ZCARD  velocity:wallet:W
 ```
 
-The sorted set acts as a sliding window. Each event adds a member scored by timestamp. The `ZREMRANGEBYSCORE` removes members older than the window. `ZCARD` returns the count of remaining members — the velocity over the window.
+The sorted set acts as a sliding window. Each event adds a member scored by timestamp. The `ZREMRANGEBYSCORE` removes members older than the window. `ZCARD` returns the count of remaining members, the velocity over the window.
 
 Properties:
 
@@ -190,7 +190,7 @@ Properties:
 - **Memory cost.** ~30 bytes per member in Redis. A window of 1000 events × millions of wallets is bounded; only currently-active wallets have non-empty sets.
 - **Atomic.** All three operations can be packaged into a single Lua script for a true atomic transaction, ensuring the check is consistent with the state.
 
-Rules in v1 are simple and configuration-driven. The default rule:
+Rules are simple and configuration-driven. The default rule:
 
 ```yaml
 - name: velocity_high
@@ -200,7 +200,7 @@ Rules in v1 are simple and configuration-driven. The default rule:
   reason: "50+ transfers from wallet in 60 seconds"
 ```
 
-Additional rules could include "100 transfers in 10 minutes" or "sudden geographic dispersion of recipients" — adding rules is an enhancement, not an architectural change.
+Additional rules could include "100 transfers in 10 minutes" or "sudden geographic dispersion of recipients", adding rules is an enhancement, not an architectural change.
 
 ---
 
@@ -243,7 +243,7 @@ A wallet `wal_X` has been very active recently. Its 50th transfer in 60 seconds 
    COMMIT
    ```
 
-   The `AND status='active'` guard makes this idempotent — if another worker froze the wallet in between our SELECT and UPDATE, we no-op.
+   The `AND status='active'` guard makes this idempotent, if another worker froze the wallet in between our SELECT and UPDATE, we no-op.
 
 9. **Emit metric.** `wallet_frozen_total{reason='velocity'}` increments.
 
@@ -267,7 +267,7 @@ Result: the event was ACKed (not redelivered) but its effect on velocity state w
 
 Mitigation: nightly reconciliation re-derives velocity from event log. If a wallet shows anomalous patterns that the live system missed, the reconciliation surfaces it and an operator reviews. The reconciliation isn't designed specifically for fraud signals, but it does provide a backstop.
 
-This is documented as a v1 limitation. Real production would use Option B (durable processing tracking) or accept the looser guarantee on the grounds that fraud detection is best-effort anyway.
+This is documented as a known limitation. Real production would use Option B (durable processing tracking) or accept the looser guarantee on the grounds that fraud detection is best-effort anyway.
 
 ### F2: Per-wallet task panics on an event
 
@@ -279,7 +279,7 @@ Defensive handling:
 - On panic, log the error with the event details, increment a `fraud_task_panic_total` metric, drop the event, continue.
 - The next event for the same wallet spawns a fresh task (since the old one died).
 
-This is "fail-open" behavior — a bug skips fraud detection for one event rather than crashing the worker. For a detective control, this is correct. A preventative control would need to fail-closed (block the transfer if fraud check fails), but that's not what we're building.
+This is "fail-open" behavior, a bug skips fraud detection for one event rather than crashing the worker. For a detective control, this is correct. A preventative control would need to fail-closed (block the transfer if fraud check fails), but that's not what we're building.
 
 ### F3: Redis sorted set corrupted (data structure inconsistency)
 
@@ -314,7 +314,7 @@ If a per-wallet task is blocked indefinitely (e.g., a stuck Postgres query), its
 - Per-task context with timeout: `SELECT ... timeout 5s`. Any Postgres operation has a bounded time budget.
 - Task watchdog: a side goroutine that detects tasks not progressing and kills them.
 
-v1 implements the timeout; the watchdog is v2.
+RRQ implements the timeout; the watchdog is a known follow-up, not yet built.
 
 ### F6: Per-wallet task count grows without bound (memory pressure)
 
@@ -322,7 +322,7 @@ Each task consumes goroutine/task overhead (~2KB for goroutines, similar for tok
 
 Mitigation: idle timeout. Tasks exit after 5 minutes without an event. The active task count tracks the active-wallet count, which is much smaller than total-wallet count.
 
-Metric: `fraud_active_tasks_gauge` exposes the count. If it exceeds a configured limit, the worker stops spawning new tasks and processes those events serially in the outer consumer's context — degraded mode but bounded resource use.
+Metric: `fraud_active_tasks_gauge` exposes the count. If it exceeds a configured limit, the worker stops spawning new tasks and processes those events serially in the outer consumer's context, degraded mode but bounded resource use.
 
 ---
 
@@ -429,7 +429,7 @@ func (w *Worker) dispatch(ctx context.Context, msg redis.XMessage) {
     case <-ctx.Done():
         return
     }
-    // No default — we want backpressure. If the channel is full,
+    // No default, we want backpressure. If the channel is full,
     // we block until the task drains one. This is intentional.
 }
 
@@ -583,7 +583,7 @@ Key implementation points:
 The Rust version uses `DashMap` (lock-free concurrent map) and `tokio::spawn`:
 
 ```rust
-//! Fraud Worker — two-level dispatch with lazy per-wallet tasks.
+//! Fraud Worker, two-level dispatch with lazy per-wallet tasks.
 //!
 //! The dispatcher uses DashMap to avoid lock contention on the hot path.
 //! Per-wallet tasks are spawned via tokio::spawn and exit on idle timeout.
@@ -707,7 +707,7 @@ The Rust version is structurally similar but uses different concurrency primitiv
 
 - **`DashMap::entry().or_insert_with()`** is the equivalent of Go's double-check pattern, with shard-level locking rather than global locking. Different shards of the DashMap can be written concurrently. For a workload of many wallets, this matters.
 - **`mpsc::channel`** with bounded buffer provides the same backpressure semantics as a Go buffered channel.
-- **Dropping the `WalletTask` cascades to closing the sender, which causes the receive loop to exit when there are no more senders.** Idiomatic Rust async cleanup — no explicit cancel needed.
+- **Dropping the `WalletTask` cascades to closing the sender, which causes the receive loop to exit when there are no more senders.** Idiomatic Rust async cleanup, no explicit cancel needed.
 - **`catch_unwind`** catches panics in the task body so the task doesn't propagate the panic up to the runtime. Equivalent to Go's `recover()`.
 
 The Go-vs-Rust comparison here is one of the most direct: same architecture, different concurrency idioms. The benchmarks should focus on this service for the headline "concurrency model" comparison.
@@ -718,50 +718,50 @@ The Go-vs-Rust comparison here is one of the most direct: same architecture, dif
 
 ### Validates per-wallet ordering (the central correctness property)
 
-- **`TestOrdering_SameWallet`** — emit 1000 events for wallet W in known sequence; assert per-wallet task processes them in the same order (instrument the task with an in-test recorder).
-- **`TestOrdering_HighParallelism`** — emit 10000 events distributed across 100 wallets, 100 events each; assert each wallet's sequence is preserved internally while different wallets process in parallel (measure parallel task count).
+- **`TestOrdering_SameWallet`**, emit 1000 events for wallet W in known sequence; assert per-wallet task processes them in the same order (instrument the task with an in-test recorder).
+- **`TestOrdering_HighParallelism`**, emit 10000 events distributed across 100 wallets, 100 events each; assert each wallet's sequence is preserved internally while different wallets process in parallel (measure parallel task count).
 
 ### Validates threshold detection
 
-- **`TestThreshold_TripsAtN`** — emit N-1 events; assert no freeze. Emit one more; assert freeze.
-- **`TestThreshold_RespectsWindow`** — emit N events spread over 2\*window; assert no freeze (events outside window don't count).
-- **`TestThreshold_IdempotentRedelivery`** — emit same event twice; assert ZADD doesn't double-count (sorted set's set semantics on member).
+- **`TestThreshold_TripsAtN`**, emit N-1 events; assert no freeze. Emit one more; assert freeze.
+- **`TestThreshold_RespectsWindow`**, emit N events spread over 2\*window; assert no freeze (events outside window don't count).
+- **`TestThreshold_IdempotentRedelivery`**, emit same event twice; assert ZADD doesn't double-count (sorted set's set semantics on member).
 
 ### Validates auto-freeze
 
-- **`TestFreeze_UpdatesWalletStatus`** — trip threshold; assert `wallets.status='frozen'`.
-- **`TestFreeze_EmitsEvent`** — trip threshold; assert `events` table contains `wallet.frozen` with correct payload.
-- **`TestFreeze_IdempotentOnRace`** — two threshold trips for same wallet simultaneously; assert only one `wallet.frozen` event written (the `AND status='active'` guard catches it).
-- **`TestFreeze_RespectsAlreadyFrozen`** — wallet is already frozen for other reason; trip threshold; assert no second freeze event written.
+- **`TestFreeze_UpdatesWalletStatus`**, trip threshold; assert `wallets.status='frozen'`.
+- **`TestFreeze_EmitsEvent`**, trip threshold; assert `events` table contains `wallet.frozen` with correct payload.
+- **`TestFreeze_IdempotentOnRace`**, two threshold trips for same wallet simultaneously; assert only one `wallet.frozen` event written (the `AND status='active'` guard catches it).
+- **`TestFreeze_RespectsAlreadyFrozen`**, wallet is already frozen for other reason; trip threshold; assert no second freeze event written.
 
 ### Validates task lifecycle
 
-- **`TestTask_SpawnedLazily`** — fresh worker with no tasks; emit first event for W; assert task spawned, active count = 1.
-- **`TestTask_IdleTimeoutCleansUp`** — emit event for W; advance time past idle timeout; trigger reaper; assert task gone, active count = 0.
-- **`TestTask_NewEventAfterReapSpawnsFresh`** — task reaped; emit new event for W; assert new task spawned.
+- **`TestTask_SpawnedLazily`**, fresh worker with no tasks; emit first event for W; assert task spawned, active count = 1.
+- **`TestTask_IdleTimeoutCleansUp`**, emit event for W; advance time past idle timeout; trigger reaper; assert task gone, active count = 0.
+- **`TestTask_NewEventAfterReapSpawnsFresh`**, task reaped; emit new event for W; assert new task spawned.
 
 ### Validates panic resilience
 
-- **`TestPanic_OneEventDoesNotKillTask`** — inject a malformed event that causes panic; emit subsequent good events; assert worker continues processing, panic metric incremented.
+- **`TestPanic_OneEventDoesNotKillTask`**, inject a malformed event that causes panic; emit subsequent good events; assert worker continues processing, panic metric incremented.
 
 ### Chaos tests
 
-- **`ChaosTest_WorkerKillDuringDispatch`** — kill worker mid-dispatch; verify next worker continues from XREADGROUP cleanly (note: pre-ACK events in dispatch are lost; this is documented).
-- **`TurmoilTest_RedisPartition`** (Rust) — partition Redis; assert per-wallet tasks fail gracefully and resume after partition heals.
+- **`ChaosTest_WorkerKillDuringDispatch`**, kill worker mid-dispatch; verify next worker continues from XREADGROUP cleanly (note: pre-ACK events in dispatch are lost; this is documented).
+- **`TurmoilTest_RedisPartition`** (Rust comparison), partition Redis; assert per-wallet tasks fail gracefully and resume after partition heals.
 
 ---
 
 ## What this service depends on
 
-- **Redis** — the job stream (consume), sorted sets for velocity state.
-- **Postgres** — wallet status reads, wallet status updates on freeze, event writes.
-- **Saga Worker** — produces the events this service consumes.
+- **Redis**, the job stream (consume), sorted sets for velocity state.
+- **Postgres**, wallet status reads, wallet status updates on freeze, event writes.
+- **Saga Worker**, produces the events this service consumes.
 
 ## What depends on this service
 
-- **Saga Worker** — reads `wallets.status` during `Validate`. A frozen wallet causes transfers to fail.
-- **Admin CLI** — operators can list frozen wallets, manually unfreeze.
-- **Reconciliation** — reads `wallet.frozen` events as part of the full event audit.
+- **Saga Worker**, reads `wallets.status` during `Validate`. A frozen wallet causes transfers to fail.
+- **Admin Dashboard**, operators can list frozen wallets, manually unfreeze.
+- **Reconciliation**, reads `wallet.frozen` events as part of the full event audit.
 
 ---
 

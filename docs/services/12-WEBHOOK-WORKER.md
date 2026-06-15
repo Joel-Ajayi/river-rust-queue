@@ -1,4 +1,4 @@
-# 12 — Webhook Worker
+# 12: Webhook Worker
 
 > **What this is.** The service document for the Webhook Worker. Explains how RRQ delivers signed notifications to merchants with per-merchant ordering, exponential backoff with full jitter, per-merchant circuit breakers, and DLQ routing for terminal failures.
 
@@ -6,13 +6,13 @@
 
 The FAQ for this document has been moved to `docs/faq/12-WEBHOOK-WORKER-FAQ.md`.
 
-> **Prerequisites.** Read [`11-SAGA-WORKER.md`](11-SAGA-WORKER.md) — webhooks consume what sagas produce.
+> **Prerequisites.** Read [`11-SAGA-WORKER.md`](11-SAGA-WORKER.md), webhooks consume what sagas produce.
 
 ---
 
 ## What it does
 
-The Webhook Worker delivers signed HTTPS notifications to merchant endpoints. When a transfer completes (or fails, or any other notable event), the merchant needs to know — RRQ tells them by POSTing a signed payload to a URL they configured. The Webhook Worker is the service that does the POSTing.
+The Webhook Worker delivers signed HTTPS notifications to merchant endpoints. When a transfer completes (or fails, or any other notable event), the merchant needs to know, RRQ tells them by POSTing a signed payload to a URL they configured. The Webhook Worker is the service that does the POSTing.
 
 It does five things:
 
@@ -24,7 +24,7 @@ It does five things:
 
 The interesting design tensions are:
 
-- **Per-merchant ordering** vs. **horizontal scalability**. A merchant expects their webhooks in order — they're building state machines on top of them. But naive parallelism (consumer group balances across N consumers) would deliver out of order. The answer is stream partitioning.
+- **Per-merchant ordering** vs. **horizontal scalability**. A merchant expects their webhooks in order, they're building state machines on top of them. But naive parallelism (consumer group balances across N consumers) would deliver out of order. The answer is stream partitioning.
 - **Retry persistence** vs. **operational simplicity**. Retries can span minutes (a 5xx that recovers quickly) to 45+ minutes (10 attempts with exponential backoff). The worker can't hold retries in memory; they have to survive process restarts. The answer is a Postgres-backed retry queue.
 - **One bad merchant shouldn't break the system**. A merchant whose endpoint is permanently broken will exhaust retries forever if you let it. The circuit breaker per-merchant is what bounds the damage.
 
@@ -58,7 +58,7 @@ The interesting design tensions are:
 
 - **No global webhook ordering**. Merchant A's webhooks and merchant B's webhooks are unordered relative to each other.
 - **No "successful delivery" guarantee per attempt**. A delivery may succeed at attempt 7 of 10; we promise per-merchant attempt order, not per-merchant success order.
-- **No guarantee that the merchant's endpoint processed the payload correctly**. We only know they returned 2xx. Their idempotent processing is their responsibility — we provide the `event_id` to make it possible.
+- **No guarantee that the merchant's endpoint processed the payload correctly**. We only know they returned 2xx. Their idempotent processing is their responsibility, we provide the `event_id` to make it possible.
 
 ---
 
@@ -72,9 +72,9 @@ Per-merchant ordering with horizontal scalability is the core problem. Here's wh
 
 **Approach 2: consumer group, one stream.** All events go to `stream:notify`, but a consumer group with N consumers balances messages across them. Throughput scales. Problem: Redis Streams' consumer group balances messages without regard to content. Two consumers can simultaneously process two events for the _same_ merchant, delivered to the merchant out of order. Ordering broken.
 
-**Approach 3: stream per merchant.** Create `stream:notify:m_A`, `stream:notify:m_B`, etc. Each stream has its own consumer. Ordering preserved per merchant; parallelism across merchants. Problem: number of streams grows with merchant count. Thousands of streams is operationally awkward — Redis handles it but tooling, monitoring, and consumer-process count become unwieldy.
+**Approach 3: stream per merchant.** Create `stream:notify:m_A`, `stream:notify:m_B`, etc. Each stream has its own consumer. Ordering preserved per merchant; parallelism across merchants. Problem: number of streams grows with merchant count. Thousands of streams is operationally awkward, Redis handles it but tooling, monitoring, and consumer-process count become unwieldy.
 
-**Approach 4 (chosen): N partitioned streams, hash by merchant.** Create `stream:notify-0` through `stream:notify-15` (16 shards). When emitting, write to `stream:notify-{hash(merchant_id) mod 16}`. Each shard is consumed by exactly one consumer at a time (within the consumer group, one of the N workers owns each shard). All of merchant M's events land on the same shard — same consumer — same serial processing. Different merchants land on (potentially) different shards and run in parallel.
+**Approach 4 (chosen): N partitioned streams, hash by merchant.** Create `stream:notify-0` through `stream:notify-15` (16 shards). When emitting, write to `stream:notify-{hash(merchant_id) mod 16}`. Each shard is consumed by exactly one consumer at a time (within the consumer group, one of the N workers owns each shard). All of merchant M's events land on the same shard, same consumer, same serial processing. Different merchants land on (potentially) different shards and run in parallel.
 
 This is the standard pattern for "per-key ordering with horizontal scaling." It's how Kafka works fundamentally (partitions). 16 shards is a tunable; the rule of thumb is 4x the number of worker replicas, so 4 workers handle 16 shards = 4 shards each.
 
@@ -229,7 +229,7 @@ Total worst-case retry window: roughly 45 minutes from first attempt to last. Af
 
 **Why full jitter, not "exponential with fixed jitter"?**
 
-Suppose 1,000 webhooks all fail at the same time (a brief outage at the merchant's load balancer). Without jitter, all 1,000 retry exactly 1s later, hitting the merchant simultaneously. Likely overwhelms them again. Then 2s later. Etc. — the **thundering herd**.
+Suppose 1,000 webhooks all fail at the same time (a brief outage at the merchant's load balancer). Without jitter, all 1,000 retry exactly 1s later, hitting the merchant simultaneously. Likely overwhelms them again. Then 2s later. Etc., the **thundering herd**.
 
 Fixed-component jitter (`delay = base * 2^attempt + random(0, jitter)`) partially helps but leaves correlation: the fixed component clusters retries near the same time. The retry distribution looks like a series of bumps at `1s, 2s, 4s, ...` with noise.
 
@@ -271,11 +271,11 @@ Tuning (defaults; all are configuration):
 - **Half-Open trial count**: 1.
 - **Reset window for failure counter**: 60 seconds. If we go 60 seconds without a failure, the counter resets to zero.
 
-Key property: **breaker state is per-merchant**, keyed `breaker:webhook:{merchant_id}` in Redis. One merchant's failures don't affect another's. This is critical — a single misconfigured merchant must not degrade service for everyone.
+Key property: **breaker state is per-merchant**, keyed `breaker:webhook:{merchant_id}` in Redis. One merchant's failures don't affect another's. This is critical, a single misconfigured merchant must not degrade service for everyone.
 
 **Interaction with the retry scheduler.** When the breaker is open, the scheduler still polls `webhook_deliveries` and finds due retries. Instead of attempting them, it updates `next_retry_at` to the breaker's cooldown end time and moves on. This naturally pauses retries for that merchant while keeping the scheduler responsive for others.
 
-**The half-open state is the riskiest moment.** During cooldown, real events keep arriving and getting deferred. When the breaker transitions to half-open, exactly one trial attempt is allowed. If that succeeds, the breaker closes and the backlog drains. If it fails, the breaker opens again — and the _backlog also got bigger_ during cooldown. For very-long-broken merchants, the backlog can grow unbounded. The mitigation: deliveries that have been pending more than 24 hours go to DLQ directly, regardless of attempt count. The DLQ becomes the safety valve.
+**The half-open state is the riskiest moment.** During cooldown, real events keep arriving and getting deferred. When the breaker transitions to half-open, exactly one trial attempt is allowed. If that succeeds, the breaker closes and the backlog drains. If it fails, the breaker opens again, and the _backlog also got bigger_ during cooldown. For very-long-broken merchants, the backlog can grow unbounded. The mitigation: deliveries that have been pending more than 24 hours go to DLQ directly, regardless of attempt count. The DLQ becomes the safety valve.
 
 ---
 
@@ -334,7 +334,7 @@ A `transfer.completed` event needs to be delivered to merchant `m_M`'s endpoint 
    );
    ```
 
-8. **Update breaker.** `record_success(m_M)` — if breaker was half-open, transition to closed. Reset consecutive-failure counter to zero.
+8. **Update breaker.** `record_success(m_M)`, if breaker was half-open, transition to closed. Reset consecutive-failure counter to zero.
 
 9. **ACK.** `XACK stream:notify-7 webhook-workers <message-id>`.
 
@@ -368,7 +368,7 @@ After 10 failures: see F4.
 
 1. POST hits the 10-second timeout. Connection aborted, no response received.
 2. Worker classifies timeout as retryable.
-3. **Critical:** the timeout case is the unknown-outcome case. The merchant _might_ have processed the request and returned 200 — we just never got the response. We have to retry, but we have to acknowledge that this might create a duplicate on the merchant's side.
+3. **Critical:** the timeout case is the unknown-outcome case. The merchant _might_ have processed the request and returned 200, we just never got the response. We have to retry, but we have to acknowledge that this might create a duplicate on the merchant's side.
 4. Update `webhook_deliveries` with `last_error='timeout'`, increment attempt count, schedule retry.
 5. The merchant, when they next receive the same `event_id`, recognizes the duplicate and no-ops it.
 
@@ -387,7 +387,7 @@ This is why every payload has an `event_id` and why we tell merchants in the doc
 
 The merchant's experience during this is: webhooks stop arriving for ~30s, then either resume or stay stopped (if the breaker keeps re-opening).
 
-### F4: Delivery exceeds max retries — DLQ routing
+### F4: Delivery exceeds max retries, DLQ routing
 
 1. Attempt 10 fails. `attempt_count` is now 10, equal to `max_retries`.
 2. Worker updates `webhook_deliveries.status='dlq'`, sets `next_retry_at=NULL`, records final error.
@@ -398,17 +398,17 @@ The merchant's experience during this is: webhooks stop arriving for ~30s, then 
 The operator, alerted by the metric or noticing the DLQ growing, can:
 
 - Investigate why the merchant's endpoint is failing.
-- After fixing the underlying issue, run `rrq dlq replay wd_<id>` to retry.
-- Or `rrq dlq resolve wd_<id> --note "merchant decommissioned"` to close out without retrying.
+- After fixing the underlying issue, use the Admin Dashboard's DLQ replay action on `wd_<id>` to retry.
+- Or mark the entry resolved in the dashboard with a note ("merchant decommissioned") to close it out without retrying.
 
 ### F5: Postgres unavailable during retry-scheduler loop
 
-The retry scheduler depends on Postgres heavily — every poll queries the table. If Postgres is unreachable:
+The retry scheduler depends on Postgres heavily, every poll queries the table. If Postgres is unreachable:
 
 1. The `SELECT FROM webhook_deliveries` fails.
 2. Worker logs the error, sleeps for the polling interval (5s), retries.
 3. Retries continue until Postgres is back.
-4. During the gap, no new retries are attempted, but no work is lost — the deliveries are still in `webhook_deliveries` with their `next_retry_at` set.
+4. During the gap, no new retries are attempted, but no work is lost, the deliveries are still in `webhook_deliveries` with their `next_retry_at` set.
 5. When Postgres recovers, the scheduler picks up where it left off. Some retries may be late (their `next_retry_at` is in the past), which is fine.
 
 The stream-consumer loop is independent. If Postgres is down but Redis is up, fresh notifications arrive in the stream and... the worker can't process them, because it needs to write to `webhook_deliveries`. So the stream-consumer loop also stalls. Stream backs up; consumer lag grows; alerting fires; operator intervenes.
@@ -431,8 +431,8 @@ No work is lost because every retry's state lives in Postgres, not in worker mem
 // Package webhook implements the Webhook Worker.
 //
 // Invariants upheld here:
-//   I5 (per-merchant webhook ordering) — via stream partitioning + per-shard consumer.
-//   I8 (DLQ entries are recoverable) — via DLQ routing on retry exhaustion.
+//   I5 (per-merchant webhook ordering), via stream partitioning + per-shard consumer.
+//   I8 (DLQ entries are recoverable), via DLQ routing on retry exhaustion.
 
 type Worker struct {
     redis       *redis.Client
@@ -506,8 +506,8 @@ func (w *Worker) handleMessage(ctx context.Context, stream string, msg redis.XMe
     merchant, err := w.merchants.Get(ctx, merchantID)
     if err != nil {
         // Can't deliver without merchant config. Log and DLQ?
-        // For a real production system, this is a serious bug — every event
-        // has a merchant_id that should exist. For v1, send to DLQ.
+        // For a real production system, this is a serious bug, every event
+        // has a merchant_id that should exist. Send to DLQ.
         w.routeToDLQ(ctx, msg, "merchant_lookup_failed: "+err.Error())
         w.ack(ctx, stream, msg.ID)
         return
@@ -618,8 +618,8 @@ The Rust version uses Tower middleware for the breaker, hyper for HTTP, and toki
 //! Webhook Worker.
 //!
 //! Invariants upheld here:
-//!   I5 (per-merchant ordering) — via shard-per-consumer-task.
-//!   I8 (no silent drops) — via DLQ routing.
+//!   I5 (per-merchant ordering), via shard-per-consumer-task.
+//!   I8 (no silent drops), via DLQ routing.
 
 pub struct Worker {
     redis: redis::Client,
@@ -724,56 +724,56 @@ Each delivery attempt goes through the stack: timeout enforcement → breaker ch
 
 ### Validates I5 (per-merchant webhook ordering)
 
-- **`TestOrdering_PerMerchant`** — emit 100 events for merchant M in order; assert merchant's endpoint receives them in the same order (mock endpoint records arrival).
-- **`TestOrdering_MultipleMerchants`** — emit interleaved events for M1, M2, M3; assert each merchant's sequence is preserved internally.
-- **`TestOrdering_SlowMerchantDoesntBlockOthers`** — M1's endpoint sleeps 3s per request; M2's responds instantly; assert M2's webhooks aren't delayed by M1's.
+- **`TestOrdering_PerMerchant`**, emit 100 events for merchant M in order; assert merchant's endpoint receives them in the same order (mock endpoint records arrival).
+- **`TestOrdering_MultipleMerchants`**, emit interleaved events for M1, M2, M3; assert each merchant's sequence is preserved internally.
+- **`TestOrdering_SlowMerchantDoesntBlockOthers`**, M1's endpoint sleeps 3s per request; M2's responds instantly; assert M2's webhooks aren't delayed by M1's.
 
 ### Validates I8 (DLQ recovery)
 
-- **`TestDLQ_RoutedAfterMaxRetries`** — endpoint that always returns 500; assert delivery moves to DLQ after exactly `max_attempts` attempts with full context preserved.
-- **`TestDLQ_ReplayWorks`** — DLQ entry replayed via admin CLI; assert it gets re-attempted and succeeds against a now-healthy endpoint.
+- **`TestDLQ_RoutedAfterMaxRetries`**, endpoint that always returns 500; assert delivery moves to DLQ after exactly `max_attempts` attempts with full context preserved.
+- **`TestDLQ_ReplayWorks`**, DLQ entry replayed via the Admin Dashboard; assert it gets re-attempted and succeeds against a now-healthy endpoint.
 
 ### Validates signature correctness
 
-- **`TestSignature_RoundTrip`** — emit, capture the body and signature, verify HMAC matches.
-- **`TestSignature_DifferentSecretsForDifferentMerchants`** — assert M1's signature doesn't validate against M2's secret.
-- **`TestSignature_CanonicalJSON`** — same payload with different key order should produce same canonical form and same signature.
+- **`TestSignature_RoundTrip`**, emit, capture the body and signature, verify HMAC matches.
+- **`TestSignature_DifferentSecretsForDifferentMerchants`**, assert M1's signature doesn't validate against M2's secret.
+- **`TestSignature_CanonicalJSON`**, same payload with different key order should produce same canonical form and same signature.
 
 ### Validates retry behavior
 
-- **`TestRetry_FullJitterDistribution`** — schedule 1000 retries at attempt=3; assert their `next_retry_at` values are uniformly distributed in [0, 8s].
-- **`TestRetry_MaxRetriesEnforced`** — set max_attempts=3; assert delivery moves to DLQ on the 4th attempt.
-- **`TestRetry_BackoffAcrossWorkerRestart`** — schedule a retry; restart the worker; assert the retry still fires at the correct time (state in DB, not memory).
+- **`TestRetry_FullJitterDistribution`**, schedule 1000 retries at attempt=3; assert their `next_retry_at` values are uniformly distributed in [0, 8s].
+- **`TestRetry_MaxRetriesEnforced`**, set max_attempts=3; assert delivery moves to DLQ on the 4th attempt.
+- **`TestRetry_BackoffAcrossWorkerRestart`**, schedule a retry; restart the worker; assert the retry still fires at the correct time (state in DB, not memory).
 
 ### Validates circuit breaker
 
-- **`TestBreaker_OpensAfterThresholdFailures`** — feed 5 consecutive failures; assert breaker is open; assert next attempt fast-fails without HTTP call.
-- **`TestBreaker_CoolsDown`** — open breaker, wait for cooldown; assert state is half-open; one trial succeeds; assert state is closed.
-- **`TestBreaker_PerMerchantIsolation`** — open M1's breaker; assert M2's deliveries still flow.
+- **`TestBreaker_OpensAfterThresholdFailures`**, feed 5 consecutive failures; assert breaker is open; assert next attempt fast-fails without HTTP call.
+- **`TestBreaker_CoolsDown`**, open breaker, wait for cooldown; assert state is half-open; one trial succeeds; assert state is closed.
+- **`TestBreaker_PerMerchantIsolation`**, open M1's breaker; assert M2's deliveries still flow.
 
 ### Validates timeout handling
 
-- **`TestTimeout_ClassifiedAsRetryable`** — endpoint that hangs forever; assert client times out at 10s and schedules retry (not DLQ).
+- **`TestTimeout_ClassifiedAsRetryable`**, endpoint that hangs forever; assert client times out at 10s and schedules retry (not DLQ).
 
 ### Chaos tests
 
-- **`ChaosTest_WorkerKillMidBatch`** — kill worker while processing 100 due retries; assert all 100 are eventually delivered (or DLQ'd) by survivors.
-- **`ChaosTest_RedisRestart`** — restart Redis mid-operation; assert worker reconnects and resumes.
-- **`TurmoilTest_NetworkPartition`** (Rust) — partition merchant endpoints from worker for 30s; assert breaker opens, deliveries queue, breaker closes after partition heals, queue drains.
+- **`ChaosTest_WorkerKillMidBatch`**, kill worker while processing 100 due retries; assert all 100 are eventually delivered (or DLQ'd) by survivors.
+- **`ChaosTest_RedisRestart`**, restart Redis mid-operation; assert worker reconnects and resumes.
+- **`TurmoilTest_NetworkPartition`** (Rust comparison), partition merchant endpoints from worker for 30s; assert breaker opens, deliveries queue, breaker closes after partition heals, queue drains.
 
 ---
 
 ## What this service depends on
 
-- **Saga Worker** — produces the notify-stream messages.
-- **Redis** — partitioned notify streams; per-merchant circuit breaker state.
-- **Postgres** — webhook_deliveries (retry state), merchants (lookup), events (delivery records), dlq_entries (terminal failures).
-- **Merchant endpoints** — out of our control; the whole resilience story exists because of them.
+- **Saga Worker**, produces the notify-stream messages.
+- **Redis**, partitioned notify streams; per-merchant circuit breaker state.
+- **Postgres**, webhook_deliveries (retry state), merchants (lookup), events (delivery records), dlq_entries (terminal failures).
+- **Merchant endpoints**, out of our control; the whole resilience story exists because of them.
 
 ## What depends on this service
 
-- **Merchants** themselves — they receive the webhooks.
-- **Admin CLI** — reads webhook_deliveries, DLQ entries, breaker state.
+- **Merchants** themselves, they receive the webhooks.
+- **Admin Dashboard**, reads webhook_deliveries, DLQ entries, breaker state.
 
 ---
 

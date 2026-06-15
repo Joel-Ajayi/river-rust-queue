@@ -1,4 +1,4 @@
-# 45 — Glossary
+# 45: Glossary
 
 > **What this is.** Reference for terminology used throughout the docs. Look up any term you encounter; find the canonical definition here.
 
@@ -16,7 +16,7 @@
 
 **At-most-once execution.** A processing guarantee where an operation happens zero or one times. Combined with retries, gives the property merchants care about: "my retry doesn't double-charge." RRQ's idempotency keys provide at-most-once execution per `(merchant_id, idempotency_key)`.
 
-**Audit event.** An event recording an operator action. Type prefix `operator.*`. Includes the operator's identity, the command run, and the entity affected. Makes operator interventions visible in the same event log as system events.
+**Audit event.** An event recording an operator action. Type prefix `operator.*`. Includes the operator's identity, the action taken, and the entity affected. Makes operator interventions visible in the same event log as system events.
 
 ---
 
@@ -38,7 +38,7 @@
 
 **Causal ordering.** Ordering that respects cause-effect relationships, without requiring strict wall-clock ordering. Per-wallet event ordering in RRQ is causal: a wallet's events are applied in the order they were committed, which reflects the causal sequence of changes to that wallet.
 
-**CDC (Change Data Capture).** A pattern for propagating database changes to other systems by tailing the WAL. RRQ doesn't use CDC because the event store already serves this purpose — events are the canonical change stream.
+**CDC (Change Data Capture).** A pattern for propagating database changes to other systems by tailing the WAL. RRQ doesn't use CDC because the event store already serves this purpose, events are the canonical change stream.
 
 **Circuit breaker.** A resilience pattern that fast-fails after consecutive failures, reducing wasted resources on a broken dependency. State machine: Closed → Open (on N failures) → Half-Open (after cooldown) → Closed (on success) or Open (on failure). RRQ uses per-merchant circuit breakers on webhook delivery.
 
@@ -92,11 +92,11 @@
 
 **Fan-out.** A pattern where one input produces many outputs. RRQ's bulk payout uses fan-out: one parent saga spawns N sub-transfers.
 
-**Fencing token.** A monotonically increasing number issued at lock acquisition. Used to detect stale lock holders (their token is older than the latest issued). RRQ doesn't implement fencing tokens in v1; storage-layer idempotency (via UNIQUE constraints) provides equivalent protection for its specific operations.
+**Fencing token.** A monotonically increasing number issued at lock acquisition. Used to detect stale lock holders (their token is older than the latest issued). RRQ doesn't implement fencing tokens; storage-layer idempotency (via UNIQUE constraints) provides equivalent protection for its specific operations.
 
 **Full jitter.** A backoff strategy where the delay is uniformly random within an exponentially-growing window. Specifically: `delay = random(0, base * 2^attempt)`. Maximally decorrelates retries; prevents thundering herd.
 
-**Funding model.** How money enters and exits the system. See `44-FUNDING-MODEL.md`. v1 uses operator seeding (dev only); v2 will use real bank/card integrations.
+**Funding model.** How money enters and exits the system. See `16-MERCHANT-WALLET-LIFECYCLE.md` (Funding). RRQ uses operator seeding (dev only); real bank/card integrations are out of scope.
 
 ---
 
@@ -146,8 +146,6 @@
 
 **Ledger entry.** One row in `ledger_entries`. Signed amount (negative=debit, positive=credit). Idempotent via `UNIQUE(saga_id, step_name)`.
 
-**Linkerd.** A service mesh providing mTLS, observability, and traffic management for Kubernetes. Designed for use in RRQ's v2 deployment; not deployed in v1.
-
 **Liveness probe.** A Kubernetes health check that tests whether a pod should be killed and restarted. Distinct from readiness probe.
 
 **Long-lived transaction (LLT).** A logical operation that takes longer than is practical to hold a database transaction. The original Sagas paper (1987) introduced sagas as the solution.
@@ -159,8 +157,6 @@
 **Merchant.** A business customer of the RRQ platform. Has an API key, webhook URL, signing secret, and owns wallets. Not the same as an end-user.
 
 **Migration.** A script that changes the database schema. RRQ migrations are numbered SQL files in `/migrations/`. Run via a Kubernetes Job before application deploys.
-
-**mTLS (Mutual TLS).** TLS where both client and server present certificates, authenticating each other. Designed for v2 deployment; not in v1.
 
 ---
 
@@ -186,7 +182,7 @@
 
 ## P
 
-**Partial index.** A Postgres index that only includes rows matching a WHERE clause. RRQ uses partial indexes for `webhook_deliveries(status='pending')` and similar — the index is much smaller than a full index because most rows don't match.
+**Partial index.** A Postgres index that only includes rows matching a WHERE clause. RRQ uses partial indexes for `webhook_deliveries(status='pending')` and similar, the index is much smaller than a full index because most rows don't match.
 
 **Partitioning (stream partitioning).** Dividing a stream into multiple sub-streams (shards) for parallelism while preserving ordering within each shard. RRQ partitions the notify stream by `hash(merchant_id) mod 16`.
 
@@ -220,7 +216,7 @@
 
 **Reconciliation.** The nightly batch that verifies the ledger agrees with the event log. Replays events to derive balances; compares to materialized ledger; emits alerts on discrepancy.
 
-**Redlock.** A distributed lock algorithm for Redis, designed to be robust to single-node failure with multiple Redis instances. v1 deploys with one instance (degraded safety); v2 with multiple.
+**Redlock.** A distributed lock algorithm for Redis, designed to tolerate single-node failure with multiple Redis instances. RRQ deploys with one instance (degraded safety); a production deployment would use multiple.
 
 **Replay.** Computing derived state by iterating events in order. Reconciliation does replay; balance derivation does replay; audit queries do replay.
 
@@ -232,7 +228,7 @@
 
 ## S
 
-**Saga.** A multi-step operation where each step has a compensation. If any step fails, prior compensations run in reverse. Provides "semantic atomicity" — either the whole thing succeeds, or it ends up equivalent to having never started.
+**Saga.** A multi-step operation where each step has a compensation. If any step fails, prior compensations run in reverse. Provides "semantic atomicity", either the whole thing succeeds, or it ends up equivalent to having never started.
 
 **Saga state.** A row in `saga_state` tracking where a saga is in its lifecycle. Updated transactionally with each step's work. Source of truth for crash recovery.
 
@@ -258,7 +254,7 @@
 
 **TTL (Time To Live).** A duration after which a key automatically expires. RRQ uses TTLs on idempotency keys (24h), merchant metadata cache (60s), and Redlocks (5s).
 
-**Turmoil.** A Rust crate for deterministic distributed-systems testing. Simulates network failures, host crashes, message drops in a single-threaded test runner. Used by RRQ's Rust chaos tests.
+**Turmoil.** A Rust crate for deterministic distributed-systems testing. Simulates network failures, host crashes, message drops in a single-threaded test runner. Used by RRQ's Rust chaos tests in the Rust comparison implementation.
 
 ---
 

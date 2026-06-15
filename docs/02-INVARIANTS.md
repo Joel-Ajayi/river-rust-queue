@@ -1,10 +1,10 @@
-# 02 — Invariants
+# 02: Invariants
 
 > **What this is.** The precise, testable statements about what RRQ guarantees. Not slogans. Statements that can be falsified by a test, and that *are* falsified by a test in the test suite.
 >
 > **Reading time.** ~10 minutes.
 >
-> **Audience.** Anyone reasoning about correctness — author, reviewer, future-you debugging an incident. Each invariant has a name (`I1`, `I2`, ...) used elsewhere in the docs to reference it.
+> **Audience.** Anyone reasoning about correctness, author, reviewer, future-you debugging an incident. Each invariant has a name (`I1`, `I2`, ...) used elsewhere in the docs to reference it.
 
 ---
 
@@ -24,7 +24,7 @@ A reviewer who reads only this document plus `00-OVERVIEW.md` knows what RRQ pro
 >   (a) `CreditApplied(wallet=W', amount=X, saga_id=S)` for some `W' ≠ W`, or
 >   (b) `DebitReversed(wallet=W, amount=X, saga_id=S)`.
 
-In English: every debit is paired with either a corresponding credit (the saga succeeded) or a corresponding reversal (the saga compensated). There are no floating debits — money never enters or leaves the system without a matching entry.
+In English: every debit is paired with either a corresponding credit (the saga succeeded) or a corresponding reversal (the saga compensated). There are no floating debits, money never enters or leaves the system without a matching entry.
 
 **Why it matters.** This is the financial soundness invariant. A violation means the system has either created or destroyed value; in a real system, this is a regulatory incident.
 
@@ -44,7 +44,7 @@ In English: every debit is paired with either a corresponding credit (the saga s
 
 In English: the system does not let wallets go negative. Frozen or closed wallets are exempt because they may have been frozen *because* of a discovered discrepancy that put them temporarily negative.
 
-**Why it matters.** A wallet going negative means the system extended credit it didn't have — the equivalent of letting a customer withdraw money they don't own. Real payment systems strictly forbid this on most wallet types.
+**Why it matters.** A wallet going negative means the system extended credit it didn't have, the equivalent of letting a customer withdraw money they don't own. Real payment systems strictly forbid this on most wallet types.
 
 **How it's enforced.** The Saga Worker's `Validate` step computes the derived balance of the source wallet and rejects the transfer if it would go negative. The check is performed *under the wallet's Redlock*, so no other concurrent saga can debit between the check and the actual `DebitApplied`. ([→ `23-LOCKING.md`](deep-dives/23-LOCKING.md) explains why the lock is necessary for this check.)
 
@@ -62,7 +62,7 @@ In English: the system does not let wallets go negative. Frozen or closed wallet
 
 In English: a merchant can retry the same operation a million times with the same idempotency key; the underlying transfer happens at most once.
 
-**Why it matters.** This is the duplicate-protection invariant. The merchant's expected behavior is "if I retry, nothing bad happens" — they don't want to think about whether their retry might double-charge their customer. RRQ guarantees that thinking is unnecessary.
+**Why it matters.** This is the duplicate-protection invariant. The merchant's expected behavior is "if I retry, nothing bad happens", they don't want to think about whether their retry might double-charge their customer. RRQ guarantees that thinking is unnecessary.
 
 **How it's enforced.** The API Gateway's idempotency middleware uses an atomic `SET NX` on the key; only the first request with a given key wins the race. Subsequent requests either see "in progress" (return 409) or get the cached response. ([→ `20-IDEMPOTENCY.md`](deep-dives/20-IDEMPOTENCY.md) for the full mechanism, including the request-body-hash check that prevents key reuse with different payloads.)
 
@@ -103,7 +103,7 @@ In English: a merchant sees their webhooks in the order things happened. They wi
 
 **Why it matters.** Merchants build state machines on top of webhooks. If the order is unpredictable, those state machines either become very defensive (treating every webhook as potentially-out-of-order) or break.
 
-**How it's enforced.** The notify stream is partitioned into N shards by `hash(merchant_id) mod N`. Within a shard, the consumer group guarantees that one consumer at a time processes the messages — Redis Streams' consumer-group semantics give us this for free within a shard. All of merchant M's events land on the same shard, so they're delivered serially. ([→ `22-ORDERING.md`](deep-dives/22-ORDERING.md))
+**How it's enforced.** The notify stream is partitioned into N shards by `hash(merchant_id) mod N`. Within a shard, the consumer group guarantees that one consumer at a time processes the messages, Redis Streams' consumer-group semantics give us this for free within a shard. All of merchant M's events land on the same shard, so they're delivered serially. ([→ `22-ORDERING.md`](deep-dives/22-ORDERING.md))
 
 **Caveats.**
 - "Attempts to deliver in order" is not "successfully delivers in order." If `E1`'s delivery is failing and getting retried while `E2`'s delivery is queued, `E2` waits for `E1`'s next attempt or DLQ-routing. Per-merchant ordering is preserved at the *attempt* level. This is the right tradeoff because head-of-line blocking is bounded by the retry policy.
@@ -121,7 +121,7 @@ In English: a merchant sees their webhooks in the order things happened. They wi
 
 In English: events are facts. Facts don't change. If a fact is wrong, you record a new fact correcting it. You don't go back and modify history.
 
-**Why it matters.** The entire correctness story rests on the event log being trustworthy. If events can be modified or deleted, then the log is no longer evidence of what actually happened — it's just another piece of mutable state that might lie. Reconciliation, audit, and replay all become unreliable.
+**Why it matters.** The entire correctness story rests on the event log being trustworthy. If events can be modified or deleted, then the log is no longer evidence of what actually happened, it's just another piece of mutable state that might lie. Reconciliation, audit, and replay all become unreliable.
 
 **How it's enforced.**
 1. The Postgres role used by application services has `INSERT` and `SELECT` permission on the `events` table, but not `UPDATE` or `DELETE`. A bug that tries to update would fail at the database with a permission error, not silently corrupt history. (DBAs operating with elevated roles can still do anything; this guards against application bugs, not malicious operators.)
@@ -145,7 +145,7 @@ In English: no saga runs forever invisibly. Either it finishes, or it's clearly 
 **Why it matters.** A saga that is silently in-flight is invisible to the system: it's not done, not failed, not surfaced for operator attention. In an incident, you can't tell whether a transfer is "still working" or "lost." This invariant says: there is no such ambiguous state.
 
 **How it's enforced.**
-- Every saga has a `deadline_at` column on `saga_state`. A saga that exceeds its deadline is logged at WARN, surfaced via the admin CLI's `stuck-sagas` command, and emits a Prometheus metric.
+- Every saga has a `deadline_at` column on `saga_state`. A saga that exceeds its deadline is logged at WARN, surfaced in the Admin Dashboard's stuck-sagas view, and emits a Prometheus metric.
 - Crashed-worker recovery: `XPENDING` and `XAUTOCLAIM` reassign messages whose worker died, so a saga doesn't sit "in-flight" indefinitely just because the worker holding it crashed.
 - Saga steps that hit retryable errors retry with exponential backoff, but with a bounded total retry duration (typically 5 minutes per step). After that, the step is treated as terminal-failure for the saga.
 - Saga steps that hit terminal errors (validation, permission denied) move the saga immediately to `Failed`, no retry.
@@ -168,8 +168,8 @@ In English: when the system gives up on a message, it gives up *visibly*. The DL
 
 **How it's enforced.**
 - Saga path: when a saga exceeds its retry budget on a step, the orchestrator writes a row to `dlq_entries` containing the saga_id, the failed step, the error, and the original `JobRequested` payload. Then it ACKs the source stream message (the message is now "owned" by the DLQ table, not the stream).
-- Webhook path: when a webhook delivery exceeds its retry budget, the same — DLQ row first, then ACK.
-- The admin CLI's `dlq replay <id>` command re-emits the original payload to the appropriate stream and marks the DLQ row `replayed`. The replayed work has a fresh idempotency key suffix to distinguish it from the original.
+- Webhook path: when a webhook delivery exceeds its retry budget, the same, DLQ row first, then ACK.
+- The Admin Dashboard's DLQ replay action re-emits the original payload to the appropriate stream and marks the DLQ row `replayed`. The replayed work has a fresh idempotency key suffix to distinguish it from the original.
 
 **How it's tested.**
 - Failure-injection test: send 100 webhooks to an endpoint that always returns 500. After max retries, assert 100 rows exist in `dlq_entries` and the source stream has nothing pending.
@@ -187,9 +187,9 @@ It is worth being explicit about what RRQ does *not* guarantee, to avoid implici
 
 **Not an invariant: low latency under load.** RRQ is designed to handle 1,000 TPS sustained on a single machine, but no SLO is defined. Latency degrades gracefully under load (via queue lag, not request failures); request failures only happen if the system is unable to *durably accept* work, not because internal queues are full.
 
-**Not an invariant: zero-downtime upgrades.** Rolling deploys are designed for, but a deploy can briefly fail in-flight requests if it coincides with a precise moment in saga lifecycles. Operationally, deploys happen during low-traffic windows and the API gateway's health checks ensure new pods are healthy before old ones are killed. v1 doesn't claim true zero-downtime; v2 with proper preStop drain hooks does.
+**Not an invariant: zero-downtime upgrades.** Rolling deploys are designed for, but a deploy can briefly fail in-flight requests if it coincides with a precise moment in saga lifecycles. Operationally, deploys happen during low-traffic windows and the API gateway's health checks ensure new pods are healthy before old ones are killed. RRQ does not claim true zero-downtime; the preStop drain hooks that would get it closer are a known gap.
 
-**Not an invariant: fairness among merchants.** A merchant submitting 10x the load gets 10x the share of worker capacity. v1 has no per-merchant rate limiting. A real production deployment would add this, partly for fairness and partly to prevent one merchant's traffic from starving others.
+**Not an invariant: fairness among merchants.** A merchant submitting 10x the load gets 10x the share of worker capacity. Per-merchant fairness is handled only as far as Kong's edge rate limiting goes; the workers themselves do not arbitrate fairness, so a heavy merchant can still crowd the queues.
 
 These non-invariants are not bugs; they are scope decisions. Each is documented so reviewers know exactly what RRQ promises and exactly what it doesn't.
 
@@ -199,9 +199,9 @@ These non-invariants are not bugs; they are scope decisions. Each is documented 
 
 When the service docs (`services/*`) and deep-dives (`deep-dives/*`) describe a mechanism, they reference invariants by ID. For example:
 
-> "The Saga Worker acquires a Redlock on both wallet IDs before the Debit step. This is what makes I2 (no negative balance) and I4 (per-wallet ordering) hold under concurrent transfers." — from `services/11-SAGA-WORKER.md`
+> "The Saga Worker acquires a Redlock on both wallet IDs before the Debit step. This is what makes I2 (no negative balance) and I4 (per-wallet ordering) hold under concurrent transfers.", from `services/11-SAGA-WORKER.md`
 
-> "The atomic SETNX on the idempotency key is what makes I3 (at-most-once execution) hold even under concurrent retries." — from `deep-dives/20-IDEMPOTENCY.md`
+> "The atomic SETNX on the idempotency key is what makes I3 (at-most-once execution) hold even under concurrent retries.", from `deep-dives/20-IDEMPOTENCY.md`
 
 This cross-referencing is deliberate. It means anyone tracing a correctness question can follow it from the invariant statement here, to the mechanism that enforces it, to the test that validates it, and back. The whole doc set forms a directed graph rooted at this file.
 

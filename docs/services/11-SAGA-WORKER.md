@@ -1,6 +1,6 @@
-# 11 — Saga Worker
+# 11: Saga Worker
 
-> **What this is.** The service document for the Saga Worker. This is the most important service in RRQ — the spine of the system. Every other service either feeds it (API Gateway) or consumes its output (Webhook, Fraud, Reconciliation).
+> **What this is.** The service document for the Saga Worker. This is the most important service in RRQ, the spine of the system. Every other service either feeds it (API Gateway) or consumes its output (Webhook, Fraud, Reconciliation).
 >
 > **Reading time.** ~30 minutes. Worth all of them.
 >
@@ -10,7 +10,7 @@
 
 ## What it does
 
-The Saga Worker is where transfers actually happen. The API Gateway accepts work and puts it on a stream; the Saga Worker takes that work and executes it. If the gateway is the front door, the saga worker is the kitchen — the place where the real cooking is done, and where the failures that matter occur.
+The Saga Worker is where transfers actually happen. The API Gateway accepts work and puts it on a stream; the Saga Worker takes that work and executes it. If the gateway is the front door, the saga worker is the kitchen, the place where the real cooking is done, and where the failures that matter occur.
 
 A saga is a multi-step operation where each step has a corresponding compensation. The Transfer saga has six steps:
 
@@ -18,7 +18,7 @@ A saga is a multi-step operation where each step has a corresponding compensatio
 Validate → AcquireLock → Debit → Credit → Complete → Notify
 ```
 
-Each step is durable: its outcome is persisted before the next step begins. If the worker crashes between step 3 and step 4, a replacement worker reads the persisted state, sees "the debit happened, the credit didn't," and resumes from step 4. If step 4 cannot succeed, the saga runs compensations in reverse — undoing the debit, releasing the lock — and reaches a `Failed` terminal state with the ledger net-zero.
+Each step is durable: its outcome is persisted before the next step begins. If the worker crashes between step 3 and step 4, a replacement worker reads the persisted state, sees "the debit happened, the credit didn't," and resumes from step 4. If step 4 cannot succeed, the saga runs compensations in reverse, undoing the debit, releasing the lock, and reaches a `Failed` terminal state with the ledger net-zero.
 
 This sounds straightforward and it almost is. The hard parts are not in the happy path; they're in the failure paths. Specifically: making sure crash recovery resumes from _exactly_ the right step, making sure compensations are _exactly_ idempotent so a crashed compensation re-runs safely, making sure two workers can never simultaneously process the same saga, and making sure a saga that genuinely cannot succeed reaches a terminal state rather than retrying forever.
 
@@ -70,7 +70,7 @@ sequenceDiagram
 
     Note over W: startup
     W->>R: XGROUP CREATE stream:jobs saga-workers $ MKSTREAM
-    Note over W: idempotent — ignores BUSYGROUP error
+    Note over W: idempotent, ignores BUSYGROUP error
     W->>R: XAUTOCLAIM stream:jobs saga-workers <consumer-id> 60s 0
     Note over R: reclaim any pending messages from dead workers
     W->>DB: SELECT * FROM saga_state WHERE current_state NOT IN terminal AND ...
@@ -100,7 +100,7 @@ sequenceDiagram
 A few things to notice:
 
 - **Startup runs `XAUTOCLAIM` before any new work.** This reclaims messages that were claimed by a previous worker instance but never ACKed (because the previous instance crashed). The 60-second idle threshold is the key tuning knob: too short and healthy slow workers get their messages stolen; too long and crashed-worker recovery is slow.
-- **Saga state is loaded once per message** — when the message comes off the stream, before any step executes. The state row is the source of truth for "where is this saga now?"
+- **Saga state is loaded once per message**, when the message comes off the stream, before any step executes. The state row is the source of truth for "where is this saga now?"
 - **Graceful shutdown doesn't ACK in-flight messages.** The worker finishes the step it's on (so the state is consistent), exits, and leaves the message unacked. A surviving worker will reclaim it via the next `XAUTOCLAIM` and resume from the last persisted state. This is correct; trying to ACK during shutdown introduces a race where the message is ACKed but the state hasn't been updated.
 
 ### The Transfer saga state machine
@@ -176,9 +176,9 @@ fn execute_step(saga_id, step):
 
 A few things worth noting:
 
-- **`SELECT ... FOR UPDATE` is a row lock on the saga_state row.** This prevents two workers from simultaneously trying to advance the same saga, which would be a problem even with the Redlock on wallets (because the Redlock protects wallet state, not saga state). If a second worker tries to claim the same message from the stream — which can happen with `XAUTOCLAIM` if the timing is right — only one of them gets past the row lock.
+- **`SELECT ... FOR UPDATE` is a row lock on the saga_state row.** This prevents two workers from simultaneously trying to advance the same saga, which would be a problem even with the Redlock on wallets (because the Redlock protects wallet state, not saga state). If a second worker tries to claim the same message from the stream, which can happen with `XAUTOCLAIM` if the timing is right, only one of them gets past the row lock.
 - **The `BEGIN ... COMMIT` envelope holds both the work-result insert and the state update.** This is what makes (2) and (3) atomic.
-- **Retryable vs terminal error classification matters.** A retryable error means "the work didn't happen; try again later." A terminal error means "the work definitively cannot succeed; transition to Compensating." Getting this wrong either causes spurious failures or wastes resources on doomed retries. The classifier lives in a small module — `errors.go` / `errors.rs` — that maps specific error types to one or the other.
+- **Retryable vs terminal error classification matters.** A retryable error means "the work didn't happen; try again later." A terminal error means "the work definitively cannot succeed; transition to Compensating." Getting this wrong either causes spurious failures or wastes resources on doomed retries. The classifier lives in a small module, `errors.go` / `errors.rs`, that maps specific error types to one or the other.
 
 ---
 
@@ -195,7 +195,7 @@ A transfer of 5,000 NGN from `wal_A` to `wal_B`, originated by merchant `m_M`, j
 - Lookup wallets: `SELECT id, merchant_id, currency, status FROM wallets WHERE id IN ('wal_A', 'wal_B')`. Both exist, both are `active`.
 - Check that `wal_A` belongs to `m_M` (authorization). Yes.
 - Check currencies match the transfer's currency. Both are NGN. Match.
-- Compute current balance of `wal_A`: `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id = 'wal_A'`. Result: 50000 (500 NGN — wait, this is in kobo, so 500 NGN = 50000 kobo; the transfer is 5000 NGN = 500000 kobo). Insufficient balance!
+- Compute current balance of `wal_A`: `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id = 'wal_A'`. Result: 50000 (500 NGN, wait, this is in kobo, so 500 NGN = 50000 kobo; the transfer is 5000 NGN = 500000 kobo). Insufficient balance!
 
 Actually let's redo this example with sufficient balance. Suppose the balance is 1000000 kobo (10,000 NGN). The transfer is 500000 kobo. Check passes.
 
@@ -264,7 +264,7 @@ Recovery sequence:
 4. **Critical:** the replacement worker does NOT re-run the Debit step (that would double-debit). The state machine says "if current_state is Debited, the next step is Credit."
 5. The Redlocks have expired by now (5 seconds vs the 60-second idle threshold). The replacement worker must re-acquire them. It runs `AcquireLock` again, with a different lock token.
 
-Wait — there's a subtlety here. If the Redlock expired, another saga could have acquired the lock during the gap and made changes to `wal_A`. If that happened, our `wal_A`'s state is inconsistent with what our saga assumed during Validate.
+Wait, there's a subtlety here. If the Redlock expired, another saga could have acquired the lock during the gap and made changes to `wal_A`. If that happened, our `wal_A`'s state is inconsistent with what our saga assumed during Validate.
 
 The defense: the Validate step is re-run if more than X seconds have elapsed since the saga's last activity. Specifically, when resuming, the worker checks `updated_at` on the saga state. If it's older than the lock TTL, the worker:
 
@@ -302,7 +302,7 @@ After this, `wal_A`'s ledger has both `DebitApplied(-500000)` and `DebitReversed
 
 ### F3: Worker crashes during compensation
 
-State at crash: saga is `Compensating`. The `CompensationDebit` ledger insert has either happened or not — we don't know.
+State at crash: saga is `Compensating`. The `CompensationDebit` ledger insert has either happened or not, we don't know.
 
 Recovery:
 
@@ -331,7 +331,7 @@ This is sometimes a real failure mode (very high contention on a single wallet) 
 
 ### F5: Postgres transaction commit fails mid-saga
 
-Unusual but possible — network blip between worker and Postgres at the exact moment of commit.
+Unusual but possible, network blip between worker and Postgres at the exact moment of commit.
 
 The worker's database client returns an error. The saga step is incomplete: we don't know if the commit succeeded on the database side or not. (This is the _unknown outcome_ problem from `01-PROBLEM.md`, applied locally.)
 
@@ -342,7 +342,7 @@ The worker treats this as a retryable error and re-attempts the step. The retry 
 
 Both paths converge to "the step is now done, move to the next." The `UNIQUE` constraint converts an unknown outcome into a definite known outcome, which is exactly what we need.
 
-### F6: Bulk payout — one sub-transfer fails
+### F6: Bulk payout, one sub-transfer fails
 
 Bulk payouts are 1-to-N transfers. The Saga Worker handles them by fanning out: one `BulkPayoutSaga` orchestrator that spawns N sub-`TransferSaga` instances, each independent.
 
@@ -466,7 +466,7 @@ func (o *Orchestrator) Run(ctx context.Context, sc *SagaContext) error {
 func (o *Orchestrator) compensate(ctx context.Context, sc *SagaContext, steps []Step, fromIdx int) error {
     for i := fromIdx; i >= 0; i-- {
         if err := steps[i].Compensate(ctx, sc); err != nil {
-            // Compensation failed. This is bad — the saga is now stuck
+            // Compensation failed. This is bad, the saga is now stuck
             // in an inconsistent state. Move to DeadLettered for operator attention.
             return o.markDeadLettered(ctx, sc, steps[i].Name(), err)
         }
@@ -480,7 +480,7 @@ func (o *Orchestrator) compensate(ctx context.Context, sc *SagaContext, steps []
 
 A few details worth understanding:
 
-- **`StepOutcome` distinguishes `Continue` from `Done`.** Both move to the next step; the difference is observability — a `Done` outcome means "this step was already done when I got here," and we metric that separately. A high rate of `Done` outcomes indicates frequent retries, which is diagnostic.
+- **`StepOutcome` distinguishes `Continue` from `Done`.** Both move to the next step; the difference is observability, a `Done` outcome means "this step was already done when I got here," and we metric that separately. A high rate of `Done` outcomes indicates frequent retries, which is diagnostic.
 - **`resumePoint` is where the state-machine intelligence lives.** Given `saga_state.current_state` and `saga_state.last_completed_step`, it returns the index of the next step to execute and whether to run forward or compensate. The logic is in one place; the rest of the orchestrator just iterates.
 - **`Step.Forward` returning `nil, Done`** is the idempotent-replay path. When called on a step whose ledger insert already happened (caught by the UNIQUE constraint), the step returns `Done` without doing additional work.
 
@@ -591,7 +591,7 @@ The shape of every step is similar: open transaction, insert ledger entry (which
 
 ---
 
-## Code skeleton (Rust reference) — the type-state encoding
+## Code skeleton (Rust reference), the type-state encoding
 
 This is where Rust's type system buys you something Go can't easily replicate. Saga states are encoded as types, not strings, and step methods are only callable on the appropriate state.
 
@@ -665,7 +665,7 @@ impl Saga<Credited> {
 }
 
 // The orchestrator: a function that drives a saga from any state to a terminal.
-// Note the return type — Result of an enum over terminal states.
+// Note the return type, Result of an enum over terminal states.
 pub async fn run_transfer(saga: Saga<Init>, ctx: &SagaCtx) -> TerminalState {
     let saga = match saga.validate(ctx).await {
         Ok(s) => s,
@@ -701,13 +701,13 @@ pub enum TerminalState {
 
 **What does this buy you?**
 
-The thing the type-state pattern prevents is: writing code that calls `credit()` on a saga that hasn't been debited yet. In Go, the only thing stopping you is convention and tests — you have to remember to check the state first, and if you forget, the bug exists at runtime and only manifests when the wrong path is exercised. In Rust, the function `credit` doesn't exist on `Saga<Init>`. Calling it is a compile error: "method not found." The bug never reaches runtime; it never reaches code review; it never reaches production.
+The thing the type-state pattern prevents is: writing code that calls `credit()` on a saga that hasn't been debited yet. In Go, the only thing stopping you is convention and tests, you have to remember to check the state first, and if you forget, the bug exists at runtime and only manifests when the wrong path is exercised. In Rust, the function `credit` doesn't exist on `Saga<Init>`. Calling it is a compile error: "method not found." The bug never reaches runtime; it never reaches code review; it never reaches production.
 
 In a saga with 6 steps and a compensation path, the number of invalid transitions is large enough that catching them all in tests is tedious. The type-state encoding makes the invalid transitions _unrepresentable_. That's the qualitative difference.
 
 **What's the catch?**
 
-Recovery from crashes. The type-state pattern's strength is at the point of code authorship — you write `saga.debit()` and it only compiles in the right context. But when a worker crashes mid-saga and a replacement reads `saga_state.current_state = 'Debited'` from the database, it has to _reconstruct_ a `Saga<Debited>` value to continue. The reconstruction is unavoidably stringly-typed: read the string `'Debited'`, match on it, build the right type.
+Recovery from crashes. The type-state pattern's strength is at the point of code authorship, you write `saga.debit()` and it only compiles in the right context. But when a worker crashes mid-saga and a replacement reads `saga_state.current_state = 'Debited'` from the database, it has to _reconstruct_ a `Saga<Debited>` value to continue. The reconstruction is unavoidably stringly-typed: read the string `'Debited'`, match on it, build the right type.
 
 ```rust
 pub fn resume_saga(state: SagaStateRow, ctx: &SagaCtx) -> ResumeResult {
@@ -732,67 +732,67 @@ pub enum ResumeResult {
 
 After `resume_saga`, you match on `ResumeResult` and call the appropriate continuation. The type-state guarantee resumes from that point.
 
-The honest answer is that the type-state pattern doesn't prevent _all_ state-machine bugs — the reconstruction boundary is fundamentally untyped. What it does is prevent the much larger class of bugs that originate inside the saga logic itself. The reconstruction is one place that needs careful testing; the rest is compiler-enforced.
+The honest answer is that the type-state pattern doesn't prevent _all_ state-machine bugs, the reconstruction boundary is fundamentally untyped. What it does is prevent the much larger class of bugs that originate inside the saga logic itself. The reconstruction is one place that needs careful testing; the rest is compiler-enforced.
 
 ---
 
 ## Test plan
 
-Tests are organized by which invariant they validate. Each must pass in both implementations.
+Tests are organized by which invariant they validate. Each must pass in the Go implementation first, and in the Rust comparison implementation in the Rust comparison once it is built.
 
 ### Validates I1 (conservation of value)
 
-- **`TestConservation_HappyPath`** — submit 1,000 transfers; assert sum of all amounts equals net zero across all wallets (every debit has a matching credit).
-- **`TestConservation_FailedTransfers`** — submit transfers that intentionally fail at the Credit step (frozen destination); assert each has both a `DebitApplied` and a `DebitReversed` with matching saga_id, net zero impact on source wallet.
+- **`TestConservation_HappyPath`**, submit 1,000 transfers; assert sum of all amounts equals net zero across all wallets (every debit has a matching credit).
+- **`TestConservation_FailedTransfers`**, submit transfers that intentionally fail at the Credit step (frozen destination); assert each has both a `DebitApplied` and a `DebitReversed` with matching saga_id, net zero impact on source wallet.
 
 ### Validates I2 (no negative balances)
 
-- **`TestBalance_RejectsOverdraft`** — submit a transfer from a wallet with balance 100 for amount 150; assert `TransferFailed` with reason `INSUFFICIENT_BALANCE`, no `DebitApplied` event written.
-- **`TestBalance_ConcurrentTransfersCannotOverdraft`** — wallet balance 100, submit two concurrent transfers of 60 each; assert exactly one succeeds, one fails, balance never goes negative. This is the core test for the Redlock guarantee.
+- **`TestBalance_RejectsOverdraft`**, submit a transfer from a wallet with balance 100 for amount 150; assert `TransferFailed` with reason `INSUFFICIENT_BALANCE`, no `DebitApplied` event written.
+- **`TestBalance_ConcurrentTransfersCannotOverdraft`**, wallet balance 100, submit two concurrent transfers of 60 each; assert exactly one succeeds, one fails, balance never goes negative. This is the core test for the Redlock guarantee.
 
 ### Validates I7 (saga termination)
 
-- **`TestTermination_HappyPath`** — every saga reaches `Completed` or `Failed` within deadline.
-- **`TestTermination_CrashRecovery`** — kill worker after `Debit`, before `Credit`; assert replacement worker resumes and reaches a terminal state.
-- **`TestTermination_TerminalErrorTerminates`** — inject an error in `Credit` step (mock wallet to be frozen); assert saga reaches `Failed` via compensation, doesn't retry forever.
-- **`TestTermination_StuckSagaDetected`** — inject a permanent error in compensation (compensation step itself fails); assert saga reaches `DeadLettered` and is queryable via the admin tooling.
+- **`TestTermination_HappyPath`**, every saga reaches `Completed` or `Failed` within deadline.
+- **`TestTermination_CrashRecovery`**, kill worker after `Debit`, before `Credit`; assert replacement worker resumes and reaches a terminal state.
+- **`TestTermination_TerminalErrorTerminates`**, inject an error in `Credit` step (mock wallet to be frozen); assert saga reaches `Failed` via compensation, doesn't retry forever.
+- **`TestTermination_StuckSagaDetected`**, inject a permanent error in compensation (compensation step itself fails); assert saga reaches `DeadLettered` and is queryable via the admin tooling.
 
 ### Validates idempotent step retry
 
-- **`TestIdempotency_StepReplayDoesNotDouble`** — manually call `Debit.Forward` twice; assert exactly one ledger entry exists with that `(saga_id, step_name)`.
-- **`TestIdempotency_CompensationReplayDoesNotDouble`** — same for compensation.
-- **`TestIdempotency_CrashDuringCommit`** — simulate a commit-time error by intercepting the database call; assert recovery sees the partial state and resumes correctly.
+- **`TestIdempotency_StepReplayDoesNotDouble`**, manually call `Debit.Forward` twice; assert exactly one ledger entry exists with that `(saga_id, step_name)`.
+- **`TestIdempotency_CompensationReplayDoesNotDouble`**, same for compensation.
+- **`TestIdempotency_CrashDuringCommit`**, simulate a commit-time error by intercepting the database call; assert recovery sees the partial state and resumes correctly.
 
 ### Validates concurrency / locking
 
-- **`TestLocking_TwoSagasOneWallet`** — two sagas targeting the same wallet; one acquires the lock first, the other waits, completes serially.
-- **`TestLocking_DeadlockPrevention`** — saga 1 wants `wal_A, wal_B`; saga 2 wants `wal_B, wal_A`; sorted ordering means both attempt locks in the same order, no deadlock.
-- **`TestLocking_StaleLockReleased`** — kill a worker holding a lock; assert another saga can acquire that wallet's lock after the TTL expires.
+- **`TestLocking_TwoSagasOneWallet`**, two sagas targeting the same wallet; one acquires the lock first, the other waits, completes serially.
+- **`TestLocking_DeadlockPrevention`**, saga 1 wants `wal_A, wal_B`; saga 2 wants `wal_B, wal_A`; sorted ordering means both attempt locks in the same order, no deadlock.
+- **`TestLocking_StaleLockReleased`**, kill a worker holding a lock; assert another saga can acquire that wallet's lock after the TTL expires.
 
-### Chaos tests (Rust with turmoil)
+### Chaos tests (Rust comparison, with turmoil)
 
-- **`TurmoilTest_NetworkPartitionMidSaga`** — partition Redis from the worker for 5s during a saga; assert saga eventually completes correctly.
-- **`TurmoilTest_RedisRestartMidSaga`** — restart Redis; assert worker reconnects and resumes.
-- **`TurmoilTest_DroppedAck`** — drop one `XACK` packet; assert the message is redelivered and the second processing sees the saga in terminal state, just ACKs without re-running.
+- **`TurmoilTest_NetworkPartitionMidSaga`**, partition Redis from the worker for 5s during a saga; assert saga eventually completes correctly.
+- **`TurmoilTest_RedisRestartMidSaga`**, restart Redis; assert worker reconnects and resumes.
+- **`TurmoilTest_DroppedAck`**, drop one `XACK` packet; assert the message is redelivered and the second processing sees the saga in terminal state, just ACKs without re-running.
 
 ### Chaos tests (Go with testcontainers)
 
-- **`ChaosTest_WorkerKillMidSaga`** — `SIGKILL` the worker process between `Debit` and `Credit`; spawn a replacement; assert saga completes correctly.
-- **`ChaosTest_BulkPayoutWorkerCrash`** — kill worker mid-bulk-payout; assert remaining sub-transfers complete correctly under the replacement.
+- **`ChaosTest_WorkerKillMidSaga`**, `SIGKILL` the worker process between `Debit` and `Credit`; spawn a replacement; assert saga completes correctly.
+- **`ChaosTest_BulkPayoutWorkerCrash`**, kill worker mid-bulk-payout; assert remaining sub-transfers complete correctly under the replacement.
 
 ---
 
 ## What this service depends on
 
-- **Redis** — for the job stream (consume), the notify stream (produce), and Redlock (acquire/release).
-- **Postgres** — the source of truth for events, ledger, and saga state. The most write-intensive backend in the system.
-- **API Gateway** — produces the `JobRequested` events this worker consumes.
+- **Redis**, for the job stream (consume), the notify stream (produce), and Redlock (acquire/release).
+- **Postgres**, the source of truth for events, ledger, and saga state. The most write-intensive backend in the system.
+- **API Gateway**, produces the `JobRequested` events this worker consumes.
 
 ## What depends on this service
 
-- **Webhook Worker** — consumes notify-stream messages (`stream:notify-{shard}`) this worker produces.
-- **Fraud Worker** — joins `stream:jobs` with its own `fraud-workers` consumer group; receives the same `JobRequested` events independently and filters for fraud-relevant types.
-- **Reconciliation** — replays the `events` and `ledger_entries` this worker writes to Postgres.
+- **Webhook Worker**, consumes notify-stream messages (`stream:notify-{shard}`) this worker produces.
+- **Fraud Worker**, joins `stream:jobs` with its own `fraud-workers` consumer group; receives the same `JobRequested` events independently and filters for fraud-relevant types.
+- **Reconciliation**, replays the `events` and `ledger_entries` this worker writes to Postgres.
 
 ---
 

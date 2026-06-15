@@ -1,8 +1,10 @@
-# 43 — Benchmark Methodology
+# 43: Benchmark Methodology
 
 > **What this is.** Reference for the benchmark suite that compares the Go and Rust implementations of RRQ. The fairness rules, the scenarios, the reporting format.
 >
 > **Format.** Look-up reference. Read the section for the scenario you're investigating, or the rules section to verify a methodology choice.
+>
+> **Sequencing.** Go is the primary implementation and is benchmarked first; the published numbers are the Go numbers. The Rust implementation is a comparison study built against the working Go reference, and the head-to-head comparison runs once it exists. Until then, "both implementations" in this doc describes the methodology the comparison will follow, not work happening in parallel.
 
 ---
 
@@ -57,7 +59,7 @@ Every benchmark run records:
 Without this metadata, the numbers are not reproducible. Two runs three months apart on different machines compare nothing.
 
 **Rule 5: RSS memory, not virtual memory.**
-For memory metrics, report Resident Set Size (RSS) — actual physical memory in use. Don't report Virtual Memory Size; Go's runtime reserves a large virtual address space that doesn't reflect actual usage. Read RSS from `/proc/<pid>/status` or platform-equivalent.
+For memory metrics, report Resident Set Size (RSS), actual physical memory in use. Don't report Virtual Memory Size; Go's runtime reserves a large virtual address space that doesn't reflect actual usage. Read RSS from `/proc/<pid>/status` or platform-equivalent.
 
 **Rule 6: No runtime tuning.**
 Go runs with `GOGC=100` (the default). Rust runs in `--release` mode with default optimization profile. We do NOT tune the GC, change tracing levels, or apply implementation-specific tricks to make one implementation look better. The benchmark measures what a default deployment would look like.
@@ -71,7 +73,7 @@ If Go wins a scenario, we say so. If Rust wins, we say so. If they tie, we say s
 
 ## Scenarios A through F
 
-### Scenario A — Sustained transfer throughput
+### Scenario A, Sustained transfer throughput
 
 **Question:** What's the steady-state request rate for single transfers?
 
@@ -87,9 +89,9 @@ If Go wins a scenario, we say so. If Rust wins, we say so. If they tie, we say s
 - p50, p95, p99 latency (API response time, not full saga duration).
 - Error rate (should be ~0).
 
-**What we're learning:** the runtime cost of the HTTP request path: parse, validate, JWT verify, idempotency check, XADD, response. This is mostly I/O-bound (Redis writes), so the two implementations should be close — but not identical, due to different request-routing overhead, allocation patterns, and serialization costs.
+**What we're learning:** the runtime cost of the HTTP request path: parse, validate, JWT verify, idempotency check, XADD, response. This is mostly I/O-bound (Redis writes), so the two implementations should be close, but not identical, due to different request-routing overhead, allocation patterns, and serialization costs.
 
-### Scenario B — Bulk payout stress
+### Scenario B, Bulk payout stress
 
 **Question:** How does the system handle fan-out workloads?
 
@@ -106,7 +108,7 @@ If Go wins a scenario, we say so. If Rust wins, we say so. If they tie, we say s
 
 **What we're learning:** the Saga Worker's throughput under fan-out load. The bounded-concurrency semaphore should keep the system responsive; if it's misconfigured, sub-transfers queue up.
 
-### Scenario C — Memory under load
+### Scenario C, Memory under load
 
 **Question:** What's the memory profile under sustained traffic, including GC behavior?
 
@@ -123,7 +125,7 @@ If Go wins a scenario, we say so. If Rust wins, we say so. If they tie, we say s
 
 **What we're learning:** how memory grows under load and whether it returns to baseline after. Rust should have flatter memory; Go should grow more and then reclaim. The interesting metric is the gap.
 
-### Scenario D — Fraud throughput with per-wallet ordering
+### Scenario D, Fraud throughput with per-wallet ordering
 
 **Question:** How fast can the fraud worker process events with the per-wallet ordering constraint?
 
@@ -141,7 +143,7 @@ If Go wins a scenario, we say so. If Rust wins, we say so. If they tie, we say s
 
 **What we're learning:** the cost of two-level dispatch and the relative efficiency of Go's RWMutex vs Rust's DashMap. This is one of the most direct concurrency-model comparisons in the suite.
 
-### Scenario E — Circuit breaker behavior
+### Scenario E, Circuit breaker behavior
 
 **Question:** Does the circuit breaker behave as designed?
 
@@ -150,7 +152,7 @@ If Go wins a scenario, we say so. If Rust wins, we say so. If they tie, we say s
 - Webhook Worker delivering at sustained rate.
 - Toggle the endpoint to fail.
 - Measure: time until breaker opens (should be ~immediately after the 5th consecutive failure).
-- Measure: requests during open state (should be near-zero — they fail-fast without HTTP calls).
+- Measure: requests during open state (should be near-zero, they fail-fast without HTTP calls).
 - Toggle endpoint back to healthy.
 - Measure: time until breaker half-opens (cooldown duration: 30s).
 - Measure: time until breaker closes (1 successful half-open attempt).
@@ -160,7 +162,7 @@ If Go wins a scenario, we say so. If Rust wins, we say so. If they tie, we say s
 
 This is more of a *correctness* benchmark than a performance one. The implementation is correct or it isn't; the timing should match the configured cooldowns.
 
-### Scenario F — Reconciliation at scale
+### Scenario F, Reconciliation at scale
 
 **Question:** How fast can reconciliation process a large event log?
 
@@ -217,7 +219,7 @@ These let anyone reproduce the percentile calculations or compute additional sta
 
 Each scenario gets a paragraph explaining *what the numbers mean*. Example:
 
-> **Scenario C — Memory under load.** Go's RSS peaks at 1.8 GB; Rust at 480 MB. After load ends, Go reclaims down to 600 MB (the runtime holds heap for future allocation); Rust returns to 180 MB. p99 latency during sustain shows Go's GC pauses as 50ms spikes every ~10s; Rust shows no equivalent pattern. The 50ms p99 latency is the price Go pays for managed memory; the absolute number is acceptable for our SLOs, but worth noting.
+> **Scenario C, Memory under load.** Go's RSS peaks at 1.8 GB; Rust at 480 MB. After load ends, Go reclaims down to 600 MB (the runtime holds heap for future allocation); Rust returns to 180 MB. p99 latency during sustain shows Go's GC pauses as 50ms spikes every ~10s; Rust shows no equivalent pattern. The 50ms p99 latency is the price Go pays for managed memory; the absolute number is acceptable for our SLOs, but worth noting.
 
 The narrative is where the benchmark says something useful. Numbers alone are just numbers.
 

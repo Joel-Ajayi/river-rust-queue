@@ -1,4 +1,4 @@
-# 41 — Event Catalog
+# 41: Event Catalog
 
 > **What this is.** Reference for every event type in RRQ. Schema, emitters, consumers, when emitted.
 >
@@ -10,14 +10,36 @@
 
 Every event is written to `events` with:
 
-- `event_type` — the dotted name like `transfer.completed`.
-- `aggregate_type` and `aggregate_id` — what the event is about.
-- `correlation_id` — saga_id linking related events.
-- `causation_id` — predecessor event_id.
-- `payload` — JSONB conforming to a specific Protobuf message (defined in `proto/events/events.proto`).
-- `occurred_at` — when the event happened (application time).
+- `event_type`, the dotted name like `transfer.completed`.
+- `aggregate_type` and `aggregate_id`, what the event is about.
+- `correlation_id`, saga_id linking related events.
+- `causation_id`, predecessor event_id.
+- `payload`, JSONB conforming to a specific Protobuf message (defined in `proto/events/events.proto`).
+- `occurred_at`, when the event happened (application time).
 
 This appendix describes the *meaningful* payload contents per event type. The full Protobuf definitions are the source of truth.
+
+---
+
+## Event flow at a glance
+
+Who emits what, and who reads it:
+
+```mermaid
+graph LR
+    GW["API Gateway"] -->|job.requested| SW["Saga Worker"]
+    GW -->|job.requested| FW["Fraud Worker"]
+    SW -->|"saga.* · ledger.* "| ES[("events")]
+    SW -->|"saga.completed / failed"| WW["Webhook Worker"]
+    FW -->|"fraud.suspected · wallet.frozen"| ES
+    WW -->|"webhook.delivered / failed"| ES
+    REC["Reconciliation"] -->|"reconciliation.completed / alert"| ES
+    DASH["Admin Dashboard"] -->|"operator.action · merchant.* · wallet.* · operator.seeded_wallet"| ES
+    ES -.->|replayed by| REC
+    ES -.->|projected to| LED[("ledger_entries / cache")]
+```
+
+Every box writes to the single append-only `events` table. The arrows into `events` are the system's whole write story; everything else is a projection or a read.
 
 ---
 
@@ -105,7 +127,7 @@ The saga reached terminal failure after compensation.
 The saga reached unrecoverable state (compensation itself failed).
 
 **Emitted by:** Saga Worker
-**Consumed by:** none; surfaced via admin CLI
+**Consumed by:** none; surfaced in the Admin Dashboard
 
 ---
 
@@ -157,7 +179,7 @@ A compensating credit was applied to undo a prior debit.
 ```json
 {
   "wallet_id": "wal_...",
-  "amount": 500000,                  // positive — restoring funds
+  "amount": 500000,                  // positive, restoring funds
   "saga_id": "sg_...",
   "step_name": "compensation_credit", // same name as the ledger entry's step
   "reason": "credit_failed_destination_frozen"
@@ -165,6 +187,44 @@ A compensating credit was applied to undo a prior debit.
 ```
 
 The `reason` field documents *why* the compensation happened. Useful for ops investigations.
+
+---
+
+## Merchant events
+
+### `merchant.created`
+
+A merchant was onboarded by an operator. The raw API key is never recorded here (see [`../services/16-MERCHANT-WALLET-LIFECYCLE.md`](../services/16-MERCHANT-WALLET-LIFECYCLE.md)).
+
+**Aggregate:** `merchant` / `merchant_id`
+**Emitted by:** Admin Dashboard
+**Consumed by:** none directly; audit log
+
+**Payload:**
+```json
+{
+  "merchant_id": "m_...",
+  "name": "...",
+  "tier": "standard",
+  "created_by": "operator_<id>"
+}
+```
+
+### `merchant.api_key_rotated`
+
+A merchant's API key was rotated by an operator. The key itself is never recorded.
+
+**Aggregate:** `merchant` / `merchant_id`
+**Emitted by:** Admin Dashboard
+**Consumed by:** none directly; audit log
+
+**Payload:**
+```json
+{
+  "merchant_id": "m_...",
+  "rotated_by": "operator_<id>"
+}
+```
 
 ---
 
@@ -176,7 +236,7 @@ A wallet's status changed to frozen.
 
 **Aggregate:** `wallet` / `wallet_id`
 **Correlation:** may be empty (operator-initiated) or saga_id (fraud-worker-initiated)
-**Emitted by:** Fraud Worker (auto-freeze on velocity threshold) or Admin CLI (operator action)
+**Emitted by:** Fraud Worker (auto-freeze on velocity threshold) or Admin Dashboard (operator action)
 **Consumed by:** none directly; Saga Worker reads `wallets.status` as part of Validate.
 
 **Payload:**
@@ -192,7 +252,7 @@ A wallet's status changed to frozen.
 
 The inverse. Operator-initiated.
 
-**Emitted by:** Admin CLI
+**Emitted by:** Admin Dashboard
 **Payload:**
 ```json
 {
@@ -206,7 +266,19 @@ The inverse. Operator-initiated.
 
 A new wallet was provisioned for a merchant.
 
-**Emitted by:** Wallet management API (out of scope for v1; assumed pre-provisioned).
+**Aggregate:** `wallet` / `wallet_id`
+**Emitted by:** Admin Dashboard, on wallet provisioning (see [`../services/16-MERCHANT-WALLET-LIFECYCLE.md`](../services/16-MERCHANT-WALLET-LIFECYCLE.md)).
+
+**Payload:**
+```json
+{
+  "wallet_id": "wal_...",
+  "merchant_id": "m_...",
+  "wallet_type": "merchant_operational" | "customer" | "escrow",
+  "currency": "NGN",
+  "external_ref": "..."             // present only for customer wallets; opaque to RRQ
+}
+```
 
 ---
 
@@ -303,7 +375,7 @@ A reconciliation run finished.
 A discrepancy was found.
 
 **Emitted by:** Reconciliation worker
-**Consumed by:** Alerting (via metric); operator (via admin CLI)
+**Consumed by:** Alerting (via metric); operator (via the Admin Dashboard)
 
 **Payload:**
 ```json
@@ -324,18 +396,20 @@ The `delta` is signed: positive means the ledger has more than events explain.
 
 ### `operator.action`
 
-Any mutating action taken by an operator via the admin CLI.
+Any mutating action taken by an operator via the Admin Dashboard.
 
 **Aggregate:** the entity affected (DLQ entry, saga, wallet)
-**Emitted by:** Admin CLI
+**Emitted by:** Admin Dashboard
 **Consumed by:** none directly; comprehensive audit log
 
-**Payload:**
+**Payload:** (same shape as the example in [`../services/15-ADMIN-DASHBOARD.md`](../services/15-ADMIN-DASHBOARD.md))
 ```json
 {
   "operator_id": "ops_<id>",
-  "command": "dlq replay" | "wallet freeze" | "saga abort" | ...,
-  "args": { ... },                  // arguments to the command
+  "action": "dlq.replay" | "wallet.freeze" | "saga.abort" | ...,
+  "target_type": "dlq_entry" | "wallet" | "saga",
+  "target_id": "...",
+  "params": { ... },                // arguments to the action
   "outcome": "success" | "failure",
   "before_state": { ... },          // entity state before the action
   "after_state": { ... }            // entity state after
@@ -344,17 +418,32 @@ Any mutating action taken by an operator via the admin CLI.
 
 These events are what makes operator actions auditable. Every freeze, every replay, every override is recorded.
 
+### `operator.seeded_wallet`
+
+An operator credited a wallet with starting funds (dev/staging only). See [`../services/16-MERCHANT-WALLET-LIFECYCLE.md`](../services/16-MERCHANT-WALLET-LIFECYCLE.md) (Funding). The matching ledger entry uses `saga_id = 'SEED_<run_id>'`.
+
+**Aggregate:** `wallet` / `wallet_id`
+**Emitted by:** Admin Dashboard (only when `ALLOW_WALLET_SEEDING` is true)
+**Consumed by:** Reconciliation (recognizes the `SEED_*` prefix); audit log
+
+**Payload:**
+```json
+{
+  "wallet_id": "wal_...",
+  "amount": 10000000,
+  "reason": "demo setup",
+  "seeded_by": "operator_<id>",
+  "environment": "dev" | "staging"
+}
+```
+
 ---
 
-## v2 events (designed, not implemented)
+## Chargeback events (designed, not yet built)
 
 ### `dispute.initiated`, `dispute.escrow_funded`, `dispute.escalated`, `dispute.response_received`, `dispute.resolved`
 
-Chargeback / dispute saga events. See [`../deferred/30-CHARGEBACKS.md`](../deferred/30-CHARGEBACKS.md).
-
-### `fx.rate_fetched`, `fx.transfer_completed`
-
-FX settlement events. See [`../deferred/31-FX-SETTLEMENT.md`](../deferred/31-FX-SETTLEMENT.md).
+Chargeback / dispute saga events. See [`../services/18-CHARGEBACKS.md`](../services/18-CHARGEBACKS.md).
 
 ---
 
@@ -364,7 +453,7 @@ Backward-compatible changes (adding fields, adding new types) are always safe. O
 
 Breaking changes (removing fields, changing meanings) require versioning: emit `event_type.v2` going forward; keep readers compatible with v1 for historical replay.
 
-The protobuf definitions in `proto/events/events.proto` are the source of truth. Changes there propagate to both Go and Rust via codegen.
+The protobuf definitions in `proto/events/events.proto` are the source of truth. Changes there propagate to Go via codegen, and to the Rust comparison implementation in the Rust comparison once it is built.
 
 ---
 
