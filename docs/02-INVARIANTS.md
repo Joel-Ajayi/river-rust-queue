@@ -12,7 +12,7 @@
 
 A common failure mode in system design documents is to describe *what the system does* without ever saying *what must always be true*. Without invariants, "is this correct?" has no answer. With invariants, every code change has a checklist: which invariants does this affect, are they still upheld, where's the test that proves it.
 
-The invariants below are deliberately small in number. Eight of them. Each is a single English sentence. Each is checked by a specific test or class of tests. If one is violated, RRQ has a bug, and the violation is the precise specification of what's broken.
+The invariants below are deliberately small in number. Nine of them. Each is a single English sentence. Each is checked by a specific test or class of tests. If one is violated, RRQ has a bug, and the violation is the precise specification of what's broken.
 
 A reviewer who reads only this document plus `00-OVERVIEW.md` knows what RRQ promises and how to verify it. That's the whole point.
 
@@ -177,6 +177,28 @@ In English: when the system gives up on a message, it gives up *visibly*. The DL
 
 ---
 
+## Invariant I9: Tenant isolation
+
+> No merchant can observe or affect another merchant's data. Every wallet-mutating request is rejected unless the source wallet is owned by the authenticated merchant (`from_wallet.merchant_id = jwt.sub`), and every read returns only rows owned by the authenticated merchant.
+
+In English: a merchant is sealed inside its own data. It cannot transfer *from* a wallet it doesn't own, cannot read another merchant's wallets, ledger, transfers, or webhook history, and cannot even confirm that another merchant's resources exist.
+
+**Why it matters.** Cross-tenant access is the highest-severity failure in a multi-merchant payment system: one merchant draining or reading another's money. Every other invariant protects value *within* the system's own logic; this one protects the boundary *between* mutually-distrusting tenants. It is the one correctness property whose violation is also a security incident.
+
+**How it's enforced.**
+1. The API Gateway authorizes every wallet-mutating request against the JWT's `sub` claim. A `POST /v1/transfers` whose `from_wallet` is not owned by `sub` is rejected with `403 WALLET_NOT_OWNED` before any work is enqueued. Ownership is immutable (a wallet's owner never changes), so the gateway checks it from a short-TTL cache at the edge; the *mutable* wallet state (frozen status, balance) is re-read fresh by the saga's Validate step, not the gateway.
+2. Every read endpoint is scoped to `sub`. A merchant querying another merchant's wallet, job, or ledger receives `404` (not `403`), so the response does not even leak the existence of the resource.
+3. Ownership is a column, not a convention: `wallets.merchant_id` is the authority, checked on the same path that validates the request.
+
+**How it's tested.**
+- Authorization test: merchant A submits a transfer whose `from_wallet` belongs to merchant B; assert `403 WALLET_NOT_OWNED` and that no `JobRequested` event was written.
+- Read-isolation test: merchant A requests merchant B's `job_id`, `wallet_id`, and ledger window; assert `404` for each and that no row belonging to B appears in any list endpoint for A.
+- Property test: a population of merchants issuing random operations; assert no event, ledger entry, or API response ever attributes one merchant's wallet activity to another.
+
+**Subtlety.** Isolation is enforced at the gateway; the workers downstream trust that a `JobRequested` event was authorized when it was accepted. That trust is sound because the gateway is the only writer to the job stream and the only holder of the auth check. Any future path that can write to the job stream (an internal admin tool, a backfill script) must re-establish the same ownership check, or this invariant silently weakens from "enforced" to "assumed."
+
+---
+
 ## What's not an invariant (and why)
 
 It is worth being explicit about what RRQ does *not* guarantee, to avoid implicit-promise drift.
@@ -187,7 +209,7 @@ It is worth being explicit about what RRQ does *not* guarantee, to avoid implici
 
 **Not an invariant: low latency under load.** RRQ is designed to handle 1,000 TPS sustained on a single machine, but no SLO is defined. Latency degrades gracefully under load (via queue lag, not request failures); request failures only happen if the system is unable to *durably accept* work, not because internal queues are full.
 
-**Not an invariant: zero-downtime upgrades.** Rolling deploys are designed for, but a deploy can briefly fail in-flight requests if it coincides with a precise moment in saga lifecycles. Operationally, deploys happen during low-traffic windows and the API gateway's health checks ensure new pods are healthy before old ones are killed. RRQ does not claim true zero-downtime; the preStop drain hooks that would get it closer are a known gap.
+**Not an invariant: zero-downtime upgrades.** Rolling deploys are designed for, but a deploy can briefly fail in-flight requests if it coincides with a precise moment in saga lifecycles. Operationally, deploys happen during low-traffic windows and the API gateway's health checks ensure new pods are healthy before old ones are killed. The preStop drain hooks that get a deploy closer to zero-downtime are designed (see [`deep-dives/29-KUBERNETES.md`](deep-dives/29-KUBERNETES.md)). RRQ still does not claim *true* zero-downtime: the absence of hot-standby database replicas (the actual known gap, per [`deep-dives/28-OPERATIONS.md`](deep-dives/28-OPERATIONS.md)) bounds how close it gets.
 
 **Not an invariant: fairness among merchants.** A merchant submitting 10x the load gets 10x the share of worker capacity. Per-merchant fairness is handled only as far as Kong's edge rate limiting goes; the workers themselves do not arbitrate fairness, so a heavy merchant can still crowd the queues.
 

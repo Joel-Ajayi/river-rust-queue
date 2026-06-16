@@ -10,7 +10,7 @@
 
 help: ## List available targets
 	@echo "RRQ targets:"
-	@echo "  make dev      Start local infra (Postgres, Redis, Jaeger, Prometheus, Grafana)"
+	@echo "  make dev      Bring up a local kind cluster with the stack (Postgres, Redis, Jaeger, Prometheus, Grafana)"
 	@echo "  make migrate  Apply schema migrations to local Postgres"
 	@echo "  make build    Build the Go implementation"
 	@echo "  make test     Run the Go test suite with -race, including the scenario suite"
@@ -19,8 +19,8 @@ help: ## List available targets
 	@echo
 	@echo "Most targets are not wired up yet. See STATUS.md for what exists."
 
-dev: ## Start local infrastructure (not yet wired: docker-compose.yml does not exist yet)
-	@echo "make dev: not yet wired up. docker-compose.yml has not been added. See STATUS.md."
+dev: ## Bring up a local kind cluster with the dev overlay (not yet wired: k8s/ overlays are placeholders)
+	@echo "make dev: not yet wired up. Will run 'kind create cluster' and apply k8s/overlays/dev (via skaffold). See STATUS.md."
 
 migrate: ## Apply schema migrations (not yet wired: migrations/ is empty)
 	@echo "make migrate: not yet wired up. migrations/ is empty. See docs/appendices/40-DATA-MODEL.md."

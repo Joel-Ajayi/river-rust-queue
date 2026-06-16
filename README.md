@@ -7,12 +7,12 @@ show what each language gives you when you take distributed-systems
 correctness seriously.
 
 > **Project status: design complete, implementation not yet started.**
-> A full system design exists in [`docs/`](docs/), with eight named
+> A full system design exists in [`docs/`](docs/), with nine named
 > correctness invariants, an explicit failure-mode analysis, and a simulation
 > harness that exercises the whole pipeline without real merchants. The
 > repository tree is laid out (proto, migrations, service, and tooling
 > directories), but those directories are placeholders: the schemas, migrations,
-> compose file, and CI are not written yet. Implementation begins in Go. See
+> Kubernetes manifests, and CI are not written yet. Implementation begins in Go. See
 > [`STATUS.md`](STATUS.md) for the precise state.
 
 ---
@@ -46,7 +46,7 @@ read [`docs/01-PROBLEM.md`](docs/01-PROBLEM.md).
 
 ## What RRQ guarantees
 
-Eight invariants, stated precisely enough to be tested:
+Nine invariants, stated precisely enough to be tested:
 
 1. **Conservation of value.** Every debit is paired with either a corresponding
    credit or a corresponding reversal. No floating debits or credits.
@@ -64,6 +64,9 @@ Eight invariants, stated precisely enough to be tested:
    or is observable as stuck by operational tooling.
 8. **DLQ entries are recoverable.** Messages exhausting automatic retry are
    persisted with full context for operator replay, never silently dropped.
+9. **Tenant isolation.** A merchant can never observe or affect another
+   merchant's wallets, jobs, or data; cross-tenant requests are rejected at
+   the gateway before any work is enqueued.
 
 For the testable form of each invariant, including how they're enforced and
 how they're validated, see [`docs/02-INVARIANTS.md`](docs/02-INVARIANTS.md).

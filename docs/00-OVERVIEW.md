@@ -18,6 +18,8 @@ The interesting word in that sentence is **durably**. On a single machine, execu
 
 RRQ does not hold custody of real funds. It does not connect to card networks, banks, or mobile money providers. It does not perform KYC, AML, or sanctions screening. It does not price foreign exchange. It is the **correctness-critical core** of a payment system, the part that, if implemented wrong, silently loses money, without the regulatory and integration surface area that would take a real payment company years to build.
 
+Concretely, RRQ is a **closed-loop ledger**. Value enters only when an operator funds a wallet ([→ `16-MERCHANT-WALLET-LIFECYCLE.md`](services/16-MERCHANT-WALLET-LIFECYCLE.md)), and it never leaves to the outside world: there is no bank or card off-ramp. Every transfer moves existing value between two wallets *inside* the system. Getting money into and out of the real world is precisely the integration surface this project scopes out, which is what lets the design concentrate on the part where correctness is hard.
+
 This scoping is deliberate. The core is the part where distributed-systems craft matters. The integrations are mostly glue.
 
 ## The merchant's view

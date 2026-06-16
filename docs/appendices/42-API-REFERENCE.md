@@ -200,6 +200,19 @@ Content-Type: application/json
 
 ---
 
+## Refunds and reversals
+
+RRQ has no dedicated refund endpoint. A merchant-initiated refund is expressed as an ordinary transfer in the opposite direction (`POST /v1/transfers` from the original destination back to the original source), carrying the merchant's own `reference` to link the two. The system treats it as a normal transfer: same idempotency, same invariants, same `transfer.completed` webhook.
+
+This is distinct from two reversal paths that *are* built in:
+
+- **Saga compensation.** If a transfer fails after the debit, the saga writes `DebitReversed` automatically (see [`../services/11-SAGA-WORKER.md`](../services/11-SAGA-WORKER.md)). Internal, not a merchant action.
+- **Chargebacks.** Bank-initiated disputes refund from escrow (see [`../services/18-CHARGEBACKS.md`](../services/18-CHARGEBACKS.md)). Designed, not yet built.
+
+A first-class `POST /v1/refunds` that links to an `original_job_id` and emits a `transfer.reversed` webhook is deliberately out of scope: the reverse-transfer pattern covers the need without adding an operation.
+
+---
+
 ## `GET /v1/jobs/{id}`
 
 Query the status of a job. Read directly from the event store; strongly consistent.

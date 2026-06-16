@@ -16,7 +16,7 @@
 | Design, deep-dives                                           | In progress                  |
 | Design, simulation harness and merchant-sim                  | Complete (see doc 17)        |
 | Design, chargebacks and Kubernetes deployment               | Complete (docs 18, 29)       |
-| Implementation, scaffold (proto, migrations, compose, CI)    | Not started (dirs are placeholders) |
+| Implementation, scaffold (proto, migrations, k8s overlays, CI) | Not started (dirs are placeholders) |
 | Implementation (Go), API Gateway                             | Not started                  |
 | Implementation (Go), Saga Worker                             | Not started                  |
 | Implementation (Go), Webhook Worker                          | Not started                  |
@@ -37,7 +37,7 @@
 
 **A simulation harness design.** `docs/services/17-SIMULATION-HARNESS.md` specifies `merchant-sim`, the simulated merchant and end-user population that lets the whole pipeline run without real integrators. This is the part that turns a set of services into a system you can watch work. Designed, not yet built.
 
-**Repository tree.** The monorepo layout exists (`proto/`, `migrations/`, `v-go/`, `v-rust/`, `tools/merchant-sim/`, `k8s/`, `scripts/`, `benchmarks/`), and each directory names a real part of the system. Being honest about state: most of these directories are empty placeholders. The protobuf schemas, SQL migrations, `docker-compose.yml`, and CI are designed in the docs but **not written yet**. The one exception is `v-rust/`, which has its Cargo workspace manifests.
+**Repository tree.** The monorepo layout exists (`proto/`, `migrations/`, `v-go/`, `v-rust/`, `tools/merchant-sim/`, `k8s/`, `scripts/`, `benchmarks/`), and each directory names a real part of the system. Being honest about state: most of these directories are empty placeholders. The protobuf schemas, SQL migrations, Kubernetes manifests (Kustomize base plus `dev`/`prod` overlays and the Argo CD Application), and CI are designed in the docs but **not written yet**. The one exception is `v-rust/`, which has its Cargo workspace manifests.
 
 **Workspace files.** `v-rust/Cargo.toml` declares the Rust workspace (for the comparison study) and its crate manifests are in place. `v-go/` does not yet contain a `go.mod`; the Go tree is empty pending the first service.
 
@@ -53,7 +53,9 @@
 
 **Benchmarks.** No k6 results, no comparison numbers. The methodology is designed (`docs/appendices/43-BENCHMARK-METHODOLOGY.md`) but no measurement has been taken.
 
-**Deployment.** No deploy, no public demo URL. RRQ deploys to Kubernetes (design in `docs/deep-dives/29-KUBERNETES.md`), with Kong at the edge; the manifests in `k8s/` are not written yet and nothing has been applied to a cluster.
+**Deployment.** No deploy, no public demo URL. RRQ deploys to Kubernetes (design in `docs/deep-dives/29-KUBERNETES.md`): a local `kind` cluster for development and DigitalOcean Kubernetes for production, with Kong at the edge and Argo CD syncing the `prod` overlay. The Kustomize overlays in `k8s/` and the Argo CD Application are not written yet and nothing has been applied to a cluster.
+
+**Dispute operations tooling.** Chargebacks are designed (`docs/services/18-CHARGEBACKS.md`), but only the dispute *engine* is. The operator surface is missing: the Admin Dashboard cannot yet inspect or override a dispute, and the playbook for "merchant successfully appeals after a default refund" is not written. This is the one part of the pipeline whose service design is ahead of its operator design.
 
 ---
 

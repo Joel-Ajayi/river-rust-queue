@@ -346,7 +346,7 @@ Before deploying RRQ to production for the first time, verify:
 - [ ] Daily Postgres backups are running.
 - [ ] Restore from backup has been tested in staging.
 - [ ] All migrations have been tested against a production-shape dataset.
-- [ ] All Kubernetes secrets are managed (External Secrets Operator or equivalent).
+- [ ] All Kubernetes secrets are SealedSecrets (encrypted in git, decrypted in-cluster).
 - [ ] Resource requests and limits are set on every container.
 - [ ] Liveness and readiness probes are configured.
 - [ ] preStop hooks are in place for saga, webhook, fraud workers.

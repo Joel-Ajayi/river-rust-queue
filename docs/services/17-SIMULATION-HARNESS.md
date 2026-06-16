@@ -165,9 +165,9 @@ sequenceDiagram
 
 ## What this gives you for "production-ready"
 
-You set three bars for done: clone and `docker compose up` shows a live system, a public demo URL anyone can click, and tests that prove the eight invariants. `merchant-sim` is what makes all three real.
+You set three bars for done: clone and `make dev` (a local `kind` cluster) shows a live system, a public demo URL anyone can click, and tests that prove the nine invariants. `merchant-sim` is what makes all three real.
 
-- **Clone and run.** `docker compose up` brings up RRQ plus `merchant-sim` in steady mode. Within seconds, the dashboard shows merchants, wallets with moving balances, completing sagas, and arriving webhooks. The system is demonstrably running, not just compiling.
+- **Clone and run.** `make dev` brings up a local `kind` cluster running RRQ plus `merchant-sim` in steady mode, the same manifests that run in production. Within seconds, the dashboard shows merchants, wallets with moving balances, completing sagas, and arriving webhooks. The system is demonstrably running, not just compiling.
 - **Public demo URL.** RRQ, the dashboard, and `merchant-sim` deploy together to the Kubernetes cluster (per [`../deep-dives/29-KUBERNETES.md`](../deep-dives/29-KUBERNETES.md)). The simulator runs in steady mode in the background, so a visitor to the dashboard URL sees a live system without doing anything. The demo scenario buttons let them trigger failures and watch recovery.
 - **Invariant proof.** The scenario engine runs in CI and asserts the documented recovery for each failure mode, end to end through the public API. That is the strongest possible evidence that the invariants hold, because it tests the assembled system, not mocked parts.
 

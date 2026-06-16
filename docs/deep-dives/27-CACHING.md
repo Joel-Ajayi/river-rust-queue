@@ -140,7 +140,7 @@ Worth being explicit about access patterns that *don't* have caches, because eve
 
 **Event log queries.** Events are read at scale during reconciliation (a million events per nightly run) but not at request-time. The reads are batch-oriented; caching individual rows wouldn't help. The proper optimizations are indexes (which we have) and streaming queries (we read row-by-row, not into memory).
 
-**Wallet records.** A wallet's metadata (currency, status, owning merchant) is read on every saga's Validate step. We don't cache this. Reasons: (a) reads are point lookups on the primary key, extremely fast in Postgres; (b) status changes are infrequent but matter, caching introduces staleness in a value that affects correctness (a frozen wallet's freeze status must be respected immediately).
+**Wallet records.** A wallet's *mutable* metadata (currency, status, balance inputs) is read on every saga's Validate step. We don't cache that. Reasons: (a) reads are point lookups on the primary key, extremely fast in Postgres; (b) status changes are infrequent but matter, caching introduces staleness in a value that affects correctness (a frozen wallet's freeze status must be respected immediately). The exception is **ownership**: a wallet's owning merchant never changes, so the API Gateway *can* cache `wallet → merchant_id` and check `from_wallet` ownership at the edge (upholding I9) without the staleness risk that rules out caching status or balance.
 
 The status change case is interesting. Why don't we cache wallet status? Because:
 - A frozen wallet must reject new transfers immediately. If the cache says "active" for up to 60 seconds, transfers from a frozen wallet sneak through during that window. This is a correctness gap, not just a staleness one.

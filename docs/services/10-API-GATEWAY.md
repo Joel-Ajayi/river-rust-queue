@@ -15,12 +15,12 @@ The API Gateway is the _only_ synchronous component in the merchant's request pa
 It does five things, and only five (with TLS already terminated by Kong at the edge, see below):
 
 1. **Receives** the forwarded request from Kong.
-2. **Authenticates** the request via full JWT verification (Kong did only a coarse signature check).
+2. **Authenticates and authorizes** the request: full JWT verification (Kong did only a coarse signature check), plus a check that the merchant is active and **owns the `from_wallet`**. Ownership is immutable, so it is a cacheable `wallet → merchant_id` lookup at the edge; this is *authorization*, not a business rule, and it upholds **I9** (tenant isolation) by rejecting a cross-tenant request with `403 WALLET_NOT_OWNED` before any work is enqueued. Mutable wallet state (frozen status, balance) is left to the saga.
 3. **Validates** the request structure (well-formed JSON, required fields, syntactically valid wallet IDs and amounts). It does _not_ validate business rules, that's the saga's job.
 4. **Enforces idempotency** by atomic SETNX on the merchant's `Idempotency-Key`. First request with a given key wins; subsequent retries either see "in progress" or get the cached response.
 5. **Emits one event** (`JobRequested`) to the Redis job stream, then returns `202 Accepted` to the merchant.
 
-That's the entire job. The gateway does not touch Postgres in the request path. It does not wait for the saga. It does not check wallet balances. It does not score fraud. Every operation it skips is an operation that _cannot_ contribute latency or coupled-failure risk to the merchant's request.
+That's the entire job. The gateway keeps Postgres off the hot path: its only request-path reads are the cacheable authorization lookups (merchant status, wallet ownership), served from a short-TTL Redis cache that falls through to Postgres on a miss. It does not wait for the saga. It does not check wallet balances and it does not score fraud, those are business decisions the saga and fraud worker own. Every operation it skips is an operation that _cannot_ contribute latency or coupled-failure risk to the merchant's request.
 
 The design tension behind the whole service is **speed vs. durability**. Speed: respond in under 50ms p99 so the merchant's API call feels fast. Durability: never lose an accepted request. Reconciling these is the whole game. The answer: the only durable write in the request path is the `XADD` to Redis Streams (with AOF `appendfsync everysec`), and after that the gateway considers its job done.
 
@@ -73,7 +73,7 @@ So everything below this section describes the **API Gateway**, the piece behind
 - If `XADD` succeeds, the gateway returns 202. The system owns the work from that moment.
 - If `XADD` fails, the gateway returns 5xx and **no event has been emitted**. The merchant retries safely.
 - For any `(merchant_id, idempotency_key)` pair, exactly one `JobRequested` event is ever written to the stream, regardless of how many requests arrive with that key. (This upholds **I3** in [`../02-INVARIANTS.md`](../02-INVARIANTS.md).)
-- The gateway does not consult Postgres on the request path. Its availability is decoupled from the database.
+- The gateway consults only the short-TTL authorization cache on the request path (merchant status, wallet ownership), falling through to Postgres on a miss. Its availability is decoupled from the database for the cache-TTL window: a Postgres outage degrades gracefully (serve from cache, then 503) rather than failing instantly.
 
 **Non-guarantees**
 
@@ -251,7 +251,7 @@ Authentication succeeds (signature is valid), but the merchant's account status 
 - The gateway looks up the merchant's status from a **short-TTL cache** (e.g., Redis `merchant:m_M:status` with 60s TTL). If the cache is missing, it queries Postgres.
 - If status is not `active`, return `403 Forbidden` with code `MERCHANT_FROZEN`.
 
-This is one place where the gateway _does_ touch Postgres-or-cache in the request path. It's necessary because we can't accept work from frozen merchants. The 60-second cache TTL bounds the time between a freeze and the gateway honoring it.
+This merchant-status check, together with the immutable `from_wallet` ownership check (I9), is where the gateway _does_ touch cache-or-Postgres in the request path. Both are authorization, not business validation. The 60-second cache TTL bounds the time between a freeze and the gateway honoring it; ownership, being immutable, can be cached for longer.
 
 ---
 

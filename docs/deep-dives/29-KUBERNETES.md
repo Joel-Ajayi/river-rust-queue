@@ -16,6 +16,58 @@ The edge is **Kong**, sitting in front of the custom API Gateway. Kong handles T
 
 ---
 
+## Two environments, one set of manifests
+
+RRQ runs the *same* manifests in two places, which is the reason to standardize on Kubernetes for local development as well as production:
+
+- **Development: a local `kind` cluster.** `kind` (Kubernetes in Docker) runs a real cluster on a laptop. `make dev` creates the cluster and applies the dev overlay, so what you exercise locally is the same set of objects that run in production, not a parallel `docker-compose` stack that drifts away from it.
+- **Production: DigitalOcean Kubernetes (DOKS).** A managed control plane and node pool, with a DigitalOcean LoadBalancer in front of Kong and managed Postgres/Redis.
+
+The manifests are layered with **Kustomize**: a `base/` that holds the Deployments, Services, CronJob, HPA, and Ingress described below, and two overlays that patch it per environment.
+
+```
+k8s/
+  base/                # shared objects (Deployments, Services, CronJob, HPA, Ingress)
+  overlays/
+    dev/               # kind: 1 replica, in-cluster Postgres/Redis, no TLS, port-forward
+    prod/              # DOKS: full replicas, managed DB, cert-manager TLS, DO LoadBalancer
+```
+
+| Concern        | dev (kind)                            | prod (DOKS)                  |
+| -------------- | ------------------------------------- | ---------------------------- |
+| Cluster        | `kind create cluster`                 | DigitalOcean Kubernetes      |
+| Postgres/Redis | in-cluster StatefulSet                | managed DO database          |
+| Images         | `kind load docker-image`              | pulled from GHCR             |
+| Kong / ingress | kind extraPortMappings / port-forward | DigitalOcean LoadBalancer    |
+| TLS            | off / self-signed                     | cert-manager + Let's Encrypt |
+| Replicas / HPA | 1×, HPA off                           | full replicas, HPA on        |
+
+Only the overlay differs. The base never knows which environment it is in.
+
+---
+
+## Delivery: GitOps with Argo CD
+
+Production is **pull-based**. Argo CD runs in the DOKS cluster, watches this repository, and reconciles the live state toward `k8s/overlays/prod`. A deploy is a git commit: CI builds and pushes images to GHCR and updates the image tag in the overlay, Argo CD notices the change and syncs it. There is no `kubectl apply` from a laptop into production and no cluster credentials handed to CI.
+
+```mermaid
+graph LR
+    dev["developer"] -->|git push| repo[("Git repo<br/>k8s/overlays/*")]
+    repo --> ci["CI (GitHub Actions)<br/>go test, build, push"]
+    ci -->|image| ghcr[("GHCR")]
+    ci -->|bump image tag| repo
+    repo -->|watches| argo["Argo CD<br/>(in DOKS)"]
+    argo -->|"sync overlays/prod"| doks["DOKS cluster"]
+    ghcr -->|pull| doks
+    dev -.->|"skaffold dev (fast loop)"| kind["local kind cluster"]
+```
+
+Locally the GitOps loop is too slow for inner-loop work (commit, then wait for a sync). Development uses **Skaffold** instead: it builds the images, `kind load`s them, applies `overlays/dev`, and re-applies on file change. Argo CD owns prod; Skaffold owns the laptop. Both apply the same Kustomize base.
+
+**Database migrations** run as an Argo CD **PreSync hook**, a `Job` that runs to completion before the new pods roll, so the schema is in place before any pod that depends on it starts. Locally the same migration `Job` runs as part of `make dev`.
+
+---
+
 ## The deployment shape
 
 Each RRQ service runs as a Kubernetes `Deployment`:
@@ -233,7 +285,7 @@ stringData:
 
 Deployments reference these via environment variables. Pods get the config injected at startup.
 
-The secrets are managed externally (via Vault, AWS Secrets Manager, Sealed Secrets, External Secrets Operator). The design uses `External Secrets Operator` so secrets in K8s are synced from a real secret store; raw secrets are never in the manifest YAML.
+Secrets are committed to git as **SealedSecrets**, which is what makes GitOps possible without leaking credentials. You encrypt a plain `Secret` with the cluster's public key (`kubeseal`), commit the resulting `SealedSecret` to the repo, and the Sealed Secrets controller in the cluster decrypts it back into a real `Secret` at apply time. Argo CD only ever sees the encrypted object, so everything it needs is in git and no plaintext secret ever is. The `${...}` placeholders above are what you feed `kubeseal` locally; the manifest that lands in git is the encrypted `SealedSecret`, and each environment (kind, DOKS) seals against its own cluster key.
 
 ---
 

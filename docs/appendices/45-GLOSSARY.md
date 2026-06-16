@@ -122,7 +122,7 @@
 
 **Init container.** A Kubernetes container that runs to completion before the main container starts. RRQ uses init containers to wait for database migrations to complete before application pods start.
 
-**Invariant.** A property that the system always maintains. RRQ has 8 invariants, defined in `02-INVARIANTS.md` (I1 through I8).
+**Invariant.** A property that the system always maintains. RRQ has 9 invariants, defined in `02-INVARIANTS.md` (I1 through I9).
 
 ---
 

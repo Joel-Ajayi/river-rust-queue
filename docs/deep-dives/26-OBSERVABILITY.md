@@ -93,7 +93,7 @@ Components:
 - **OTel Collector** receives spans from applications, batches them, forwards to backends. Runs as a sidecar or standalone process; configured via YAML.
 - **Jaeger** (or Tempo, or Honeycomb, or Datadog APM, or any OTel-compatible backend) stores traces and provides the query UI.
 
-For local development, we run the all-in-one Jaeger container in docker-compose. Production would use a more scalable backend.
+For local development, the all-in-one Jaeger runs in the `kind` cluster (deployed by the dev overlay). Production runs a more scalable backend in the DOKS cluster.
 
 ### Propagating trace context
 
@@ -400,7 +400,7 @@ A few concrete details on how observability is wired:
 
 **Trace context in Postgres:** OTel automatic instrumentation (`pgx-otel` for Go, `sqlx` with `tracing` for Rust) wraps every database call in a span. The span propagates through the application's context object.
 
-**Local development:** Jaeger and Prometheus run in docker-compose. The metric endpoints are scraped automatically. Traces appear in Jaeger within seconds of being emitted.
+**Local development:** Jaeger and Prometheus run in the `kind` cluster (the dev overlay deploys them, kube-prometheus-stack for metrics). The metric endpoints are scraped automatically. Traces appear in Jaeger within seconds of being emitted.
 
 The setup is well-trodden territory; the value is in *using* it consistently, not in inventing new patterns.
 
