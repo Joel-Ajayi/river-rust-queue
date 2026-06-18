@@ -780,8 +780,6 @@ Each delivery attempt goes through the stack: timeout enforcement → breaker ch
 ## Where to read next
 
 - The fraud detection service consuming the same job stream → [`13-FRAUD-WORKER.md`](13-FRAUD-WORKER.md)
-- Resilience patterns in depth (breaker, jitter, DLQ) → [`../deep-dives/24-RESILIENCE.md`](../deep-dives/24-RESILIENCE.md)
-- Ordering mechanisms across the system → [`../deep-dives/22-ORDERING.md`](../deep-dives/22-ORDERING.md)
 
 ---
 

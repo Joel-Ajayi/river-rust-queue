@@ -18,7 +18,7 @@ In payment systems, a chargeback is when a customer (or their bank) disputes a t
 4. If the merchant does respond, evaluate evidence and decide.
 5. Notify all parties of the outcome.
 
-The interesting characteristic for system design: **the deadline is on the order of days, not milliseconds.** A 72-hour merchant response window is typical. A saga that needs to *wait three days* between steps is structurally different from a Transfer saga that completes in milliseconds.
+The interesting characteristic for system design: **the deadline is on the order of days, not milliseconds.** A 72-hour merchant response window is typical. A saga that needs to _wait three days_ between steps is structurally different from a Transfer saga that completes in milliseconds.
 
 This is the hardest saga in RRQ to build well. The patterns required (durable timers spanning days) are genuinely different from the rest of the system, which is why it is designed in full here and built after the core money-movement system, rather than fitted in retroactively.
 
@@ -54,7 +54,7 @@ stateDiagram-v2
 
 **DebitMerchant.** Move the disputed amount from the merchant's wallet to an escrow wallet. The merchant temporarily loses access to the funds. If the merchant doesn't have sufficient funds, the system has options: deduct from a security deposit, attempt to withdraw from their linked bank, or flag the merchant for manual review.
 
-**AwaitResponse.** Wait up to 72 hours for the merchant to respond. *This is the durable timer step.* During this period, the saga is in a paused state in `saga_state` with `deadline_at = NOW() + 72h`.
+**AwaitResponse.** Wait up to 72 hours for the merchant to respond. _This is the durable timer step._ During this period, the saga is in a paused state in `saga_state` with `deadline_at = NOW() + 72h`.
 
 **EvaluateResponse.** Merchant submitted evidence (a delivery receipt, signed contract, whatever). System logic, initially manual review by ops, eventually automated rules, evaluates whether the evidence is sufficient. Outcome: customer wins (refund) or merchant wins (release escrow).
 
@@ -106,13 +106,13 @@ A few non-obvious challenges:
 
 **Merchant response can arrive at any time.** Including during the gap between the deadline and the scheduler's next poll. Handling: when a response arrives, the saga's `Respond` step checks `deadline_at` against `NOW()`. If we're past the deadline, the response is rejected with `DEADLINE_EXCEEDED`. If we're within, the response is accepted and the saga transitions to `EvaluateResponse`. The check is in the saga step's transactional update, so the race is resolved at the database level.
 
-**The merchant can respond multiple times.** Some merchants submit evidence in stages. The saga accepts the *first* response that arrives and locks out subsequent ones. (A more elaborate design could accumulate evidence until the deadline; the design starts simple: first response wins.)
+**The merchant can respond multiple times.** Some merchants submit evidence in stages. The saga accepts the _first_ response that arrives and locks out subsequent ones. (A more elaborate design could accumulate evidence until the deadline; the design starts simple: first response wins.)
 
 ---
 
 ## Data model additions
 
-Chargebacks reuse the `escrow` wallet type already defined in [`../appendices/40-DATA-MODEL.md`](../appendices/40-DATA-MODEL.md) and [`16-MERCHANT-WALLET-LIFECYCLE.md`](16-MERCHANT-WALLET-LIFECYCLE.md); no change to the `wallets` table is needed. The only new structure is a `disputes` table:
+Chargebacks reuse the `escrow` wallet type already defined in [`16-MERCHANT-WALLET-LIFECYCLE.md`](16-MERCHANT-WALLET-LIFECYCLE.md); no change to the `wallets` table is needed. The only new structure is a `disputes` table:
 
 ```sql
 -- New table for disputes. Escrow wallets are owned by the system, not merchants.
@@ -208,8 +208,7 @@ If chargebacks come up in a call, the questions are predictable:
 ## Where to read next
 
 - The Saga Worker that executes this saga → [`11-SAGA-WORKER.md`](11-SAGA-WORKER.md)
-- The data model the design adds to → [`../appendices/40-DATA-MODEL.md`](../appendices/40-DATA-MODEL.md)
 
 ---
 
-*Pass 4 of the architecture series. Designed in full; not yet built.*
+_Pass 4 of the architecture series. Designed in full; not yet built._

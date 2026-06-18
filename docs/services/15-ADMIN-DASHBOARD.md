@@ -280,7 +280,6 @@ The scenario tests are valuable because they're integration tests in disguise, e
 - The merchant/wallet flows the dashboard drives → [`16-MERCHANT-WALLET-LIFECYCLE.md`](16-MERCHANT-WALLET-LIFECYCLE.md)
 - The simulator that drives traffic and triggers the demo scenarios → [`17-SIMULATION-HARNESS.md`](17-SIMULATION-HARNESS.md)
 - The funding model the dashboard implements → [`16-MERCHANT-WALLET-LIFECYCLE.md`](16-MERCHANT-WALLET-LIFECYCLE.md) (Funding)
-- The operations docs for things the dashboard helps with → [`../deep-dives/28-OPERATIONS.md`](../deep-dives/28-OPERATIONS.md)
 
 ---
 

@@ -15,7 +15,7 @@ The API Gateway is the _only_ synchronous component in the merchant's request pa
 It does five things, and only five (with TLS already terminated by Kong at the edge, see below):
 
 1. **Receives** the forwarded request from Kong.
-2. **Authenticates and authorizes** the request: full JWT verification (Kong did only a coarse signature check), plus a check that the merchant is active and **owns the `from_wallet`**. Ownership is immutable, so it is a cacheable `wallet → merchant_id` lookup at the edge; this is *authorization*, not a business rule, and it upholds **I9** (tenant isolation) by rejecting a cross-tenant request with `403 WALLET_NOT_OWNED` before any work is enqueued. Mutable wallet state (frozen status, balance) is left to the saga.
+2. **Authenticates and authorizes** the request: full JWT verification (Kong did only a coarse signature check), plus a check that the merchant is active and **owns the `from_wallet`**. Ownership is immutable, so it is a cacheable `wallet → merchant_id` lookup at the edge; this is _authorization_, not a business rule, and it upholds **I9** (tenant isolation) by rejecting a cross-tenant request with `403 WALLET_NOT_OWNED` before any work is enqueued. Mutable wallet state (frozen status, balance) is left to the saga.
 3. **Validates** the request structure (well-formed JSON, required fields, syntactically valid wallet IDs and amounts). It does _not_ validate business rules, that's the saga's job.
 4. **Enforces idempotency** by atomic SETNX on the merchant's `Idempotency-Key`. First request with a given key wins; subsequent retries either see "in progress" or get the cached response.
 5. **Emits one event** (`JobRequested`) to the Redis job stream, then returns `202 Accepted` to the merchant.
@@ -38,13 +38,13 @@ graph LR
     K -->|"202 / 429"| M
 ```
 
-| Concern | Owner | Why |
-| --- | --- | --- |
-| TLS termination | Kong | Generic edge work; no reason to hand-roll it. |
-| Rate limiting (per `merchant_id`/`tier`) | Kong | Token bucket at the edge protects everything behind it. Returns `429` before a request ever reaches the gateway. |
-| Coarse JWT signature check | Kong | Reject obviously-bad tokens early. |
-| **Full JWT verification, claims extraction** | **API Gateway** | The gateway is the trust boundary for business identity. |
-| **Idempotency claim (`SETNX`) + `XADD`** | **API Gateway** | The correctness-critical part. No off-the-shelf gateway does this; it is the reason the custom gateway exists. |
+| Concern                                      | Owner           | Why                                                                                                              |
+| -------------------------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------- |
+| TLS termination                              | Kong            | Generic edge work; no reason to hand-roll it.                                                                    |
+| Rate limiting (per `merchant_id`/`tier`)     | Kong            | Token bucket at the edge protects everything behind it. Returns `429` before a request ever reaches the gateway. |
+| Coarse JWT signature check                   | Kong            | Reject obviously-bad tokens early.                                                                               |
+| **Full JWT verification, claims extraction** | **API Gateway** | The gateway is the trust boundary for business identity.                                                         |
+| **Idempotency claim (`SETNX`) + `XADD`**     | **API Gateway** | The correctness-critical part. No off-the-shelf gateway does this; it is the reason the custom gateway exists.   |
 
 So everything below this section describes the **API Gateway**, the piece behind Kong. Kong is real infrastructure but it is not where the interesting correctness work lives, which is exactly why it is delegated to an off-the-shelf component.
 
@@ -528,15 +528,3 @@ All tests use real Postgres and real Redis in `testcontainers`. No mocks, the bo
 - **Saga Worker** consumes `JobRequested` from the job stream.
 - **Fraud Worker** also consumes from the job stream (different consumer group).
 - Nothing else reads from this service directly.
-
----
-
-## Where to read next
-
-- The service that consumes this service's output → [`11-SAGA-WORKER.md`](11-SAGA-WORKER.md)
-- The deep mechanics of idempotency → [`../deep-dives/20-IDEMPOTENCY.md`](../deep-dives/20-IDEMPOTENCY.md)
-- The merchant-facing API contract → [`../appendices/42-API-REFERENCE.md`](../appendices/42-API-REFERENCE.md)
-
----
-
-_Pass 2 of the architecture series. Last updated pre-implementation._

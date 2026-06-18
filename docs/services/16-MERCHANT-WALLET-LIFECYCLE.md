@@ -132,7 +132,7 @@ The flow:
 1. The operator submits a wallet creation request:
     - `merchant_id` (the owning merchant)
     - `currency` (ISO 4217)
-    - `wallet_type` (operational, customer, escrow, platform)
+    - `wallet_type` (`merchant_operational`, `customer`, `escrow`)
     - Optional: external reference (e.g., a customer ID from the merchant's system, for `customer` wallets)
 2. System validates: the merchant exists and is active; the currency is supported; the wallet_type is valid for this context.
 3. Generates `wallet_id` (`wal_` + ULID).
@@ -307,7 +307,6 @@ All testable via the dashboard plus automated assertions.
 
 - The dashboard that drives these flows → [`15-ADMIN-DASHBOARD.md`](15-ADMIN-DASHBOARD.md)
 - The simulator that bootstraps merchants and wallets through these flows → [`17-SIMULATION-HARNESS.md`](17-SIMULATION-HARNESS.md)
-- The data model with type additions → [`../appendices/40-DATA-MODEL.md`](../appendices/40-DATA-MODEL.md)
 
 ---
 

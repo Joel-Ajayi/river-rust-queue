@@ -768,7 +768,6 @@ The Go-vs-Rust comparison here is one of the most direct: same architecture, dif
 ## Where to read next
 
 - The reconciliation job that closes the loop on detection → [`14-RECONCILIATION.md`](14-RECONCILIATION.md)
-- The ordering mechanisms across the system in depth → [`../deep-dives/22-ORDERING.md`](../deep-dives/22-ORDERING.md)
 
 ---
 

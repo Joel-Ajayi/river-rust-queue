@@ -12,7 +12,7 @@
 
 Reconciliation answers one question: **do the ledger entries agree with the event log?**
 
-Every saga, when it succeeds, writes two things in the same database transaction: an event to the event log (`DebitApplied`, `CreditApplied`, etc.) and a ledger entry. They should always agree. If they ever don't, the system has a bug, and the bug is the kind that silently loses or creates money. Reconciliation runs nightly on a Kubernetes CronJob (manifest documented in [`../deep-dives/29-KUBERNETES.md`](../deep-dives/29-KUBERNETES.md)), replays the event log for the previous 24 hours, computes derived balances, compares them to the ledger, and emits a `ReconciliationAlert` for any wallet where the two diverge.
+Every saga, when it succeeds, writes two things in the same database transaction: an event to the event log (`DebitApplied`, `CreditApplied`, etc.) and a ledger entry. They should always agree. If they ever don't, the system has a bug, and the bug is the kind that silently loses or creates money. Reconciliation runs nightly on a Kubernetes CronJob, replays the event log for the previous 24 hours, computes derived balances, compares them to the ledger, and emits a `ReconciliationAlert` for any wallet where the two diverge.
 
 A few things make this service interesting:
 
@@ -558,7 +558,7 @@ fn derive_balance(db: &PgPool, wallet_id: &str, cutoff: DateTime<Utc>) -> Result
 - **GC pressure.** Go's GC handles short-lived per-goroutine allocations well, but a high-throughput batch like this can push it into more frequent collections. The p99 latency of individual wallet checks may show GC pause spikes in Go but not Rust.
 - **Parallelism efficiency.** Rayon's work-stealing scheduler tends to keep all cores at 100% utilization better than a fixed-size Go worker pool. For embarrassingly parallel work like this, Rayon wins by a measurable margin.
 
-This is exactly the benchmark scenario where the comparison says something. Scenario F in `docs/appendices/43-BENCHMARK-METHODOLOGY.md` is specifically this run, measured.
+This is exactly the benchmark scenario where the comparison says something. The reconciliation benchmark scenario is specifically this run, measured.
 
 ---
 
@@ -610,7 +610,6 @@ The benchmark is the published comparison number for the reconciliation service.
 ## Where to read next
 
 - The operator tooling that surfaces alerts → [`15-ADMIN-DASHBOARD.md`](15-ADMIN-DASHBOARD.md)
-- The event store design that makes this verification possible → [`../deep-dives/25-EVENT-STORE.md`](../deep-dives/25-EVENT-STORE.md)
 
 ---
 

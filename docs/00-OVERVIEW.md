@@ -250,7 +250,7 @@ sequenceDiagram
     end
 ```
 
-The merchant sees identical responses for identical retries. The system performs the underlying transfer **at most once**, no matter how many retries. The full mechanism is in [`20-IDEMPOTENCY.md`](deep-dives/20-IDEMPOTENCY.md).
+The merchant sees identical responses for identical retries. The system performs the underlying transfer **at most once**, no matter how many retries.
 
 ## The services, in one paragraph each
 
@@ -299,14 +299,14 @@ The boring parts (HTTP routing, JWT validation, JSON serialization, Postgres con
 
 The interesting parts, and where the docs go deep:
 
-- **Saga state machine + crash-resumability.** Getting "resume from the right step after a crash" right requires careful thought about what state is durable, what's in-flight, and what's the boundary between the two. ([→ `21-SAGAS.md`](deep-dives/21-SAGAS.md))
-- **Idempotency under concurrency.** Two requests with the same key arriving at the same instant, what wins, what waits, what the second one sees. ([→ `20-IDEMPOTENCY.md`](deep-dives/20-IDEMPOTENCY.md))
-- **The three different ordering problems** (per-saga atomicity, per-merchant webhooks, per-wallet fraud), each solved by a different mechanism. ([→ `22-ORDERING.md`](deep-dives/22-ORDERING.md))
-- **Distributed locks that actually work**, Redlock, why it's not just "SET NX," what fencing tokens are for. ([→ `23-LOCKING.md`](deep-dives/23-LOCKING.md))
-- **The event store as a substrate**, append-only design, idempotency via unique constraints on (saga_id, step), how reconciliation uses this. ([→ `25-EVENT-STORE.md`](deep-dives/25-EVENT-STORE.md))
-- **Resilience patterns**, circuit breakers, jitter, DLQs, not as buzzwords but as concrete mechanisms that turn predictable failures into automatic recoveries. ([→ `24-RESILIENCE.md`](deep-dives/24-RESILIENCE.md))
+- **Saga state machine + crash-resumability.** Getting "resume from the right step after a crash" right requires careful thought about what state is durable, what's in-flight, and what's the boundary between the two.
+- **Idempotency under concurrency.** Two requests with the same key arriving at the same instant, what wins, what waits, what the second one sees.
+- **The three different ordering problems** (per-saga atomicity, per-merchant webhooks, per-wallet fraud), each solved by a different mechanism.
+- **Distributed locks that actually work**, Redlock, why it's not just "SET NX," what fencing tokens are for.
+- **The event store as a substrate**, append-only design, idempotency via unique constraints on (saga_id, step), how reconciliation uses this.
+- **Resilience patterns**, circuit breakers, jitter, DLQs, not as buzzwords but as concrete mechanisms that turn predictable failures into automatic recoveries.
 
-If this document has done its job, you can already sketch how each of these works. The deep-dives sharpen the sketches.
+If this document has done its job, you can already sketch how each of these works.
 
 ## Where to read next
 

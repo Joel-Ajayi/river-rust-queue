@@ -46,7 +46,7 @@ In English: the system does not let wallets go negative. Frozen or closed wallet
 
 **Why it matters.** A wallet going negative means the system extended credit it didn't have, the equivalent of letting a customer withdraw money they don't own. Real payment systems strictly forbid this on most wallet types.
 
-**How it's enforced.** The Saga Worker's `Validate` step computes the derived balance of the source wallet and rejects the transfer if it would go negative. The check is performed *under the wallet's Redlock*, so no other concurrent saga can debit between the check and the actual `DebitApplied`. ([→ `23-LOCKING.md`](deep-dives/23-LOCKING.md) explains why the lock is necessary for this check.)
+**How it's enforced.** The Saga Worker's `Validate` step computes the derived balance of the source wallet and rejects the transfer if it would go negative. The check is performed *under the wallet's Redlock*, so no other concurrent saga can debit between the check and the actual `DebitApplied`.
 
 **How it's tested.**
 - Integration test: submit two concurrent transfers from a wallet with balance 100, each for 60. Without the lock, one of them might bypass the check. With the lock, exactly one succeeds and the other fails with `InsufficientBalance`. Assert balance > 0 throughout.
@@ -64,7 +64,7 @@ In English: a merchant can retry the same operation a million times with the sam
 
 **Why it matters.** This is the duplicate-protection invariant. The merchant's expected behavior is "if I retry, nothing bad happens", they don't want to think about whether their retry might double-charge their customer. RRQ guarantees that thinking is unnecessary.
 
-**How it's enforced.** The API Gateway's idempotency middleware uses an atomic `SET NX` on the key; only the first request with a given key wins the race. Subsequent requests either see "in progress" (return 409) or get the cached response. ([→ `20-IDEMPOTENCY.md`](deep-dives/20-IDEMPOTENCY.md) for the full mechanism, including the request-body-hash check that prevents key reuse with different payloads.)
+**How it's enforced.** The API Gateway's idempotency middleware uses an atomic `SET NX` on the key; only the first request with a given key wins the race. Subsequent requests either see "in progress" (return 409) or get the cached response.
 
 **How it's tested.**
 - Concurrency test: fire 100 simultaneous requests with the same idempotency key; assert exactly one `JobRequested` event was written and exactly one saga ran.
@@ -103,7 +103,7 @@ In English: a merchant sees their webhooks in the order things happened. They wi
 
 **Why it matters.** Merchants build state machines on top of webhooks. If the order is unpredictable, those state machines either become very defensive (treating every webhook as potentially-out-of-order) or break.
 
-**How it's enforced.** The notify stream is partitioned into N shards by `hash(merchant_id) mod N`. Within a shard, the consumer group guarantees that one consumer at a time processes the messages, Redis Streams' consumer-group semantics give us this for free within a shard. All of merchant M's events land on the same shard, so they're delivered serially. ([→ `22-ORDERING.md`](deep-dives/22-ORDERING.md))
+**How it's enforced.** The notify stream is partitioned into N shards by `hash(merchant_id) mod N`. Within a shard, the consumer group guarantees that one consumer at a time processes the messages, Redis Streams' consumer-group semantics give us this for free within a shard. All of merchant M's events land on the same shard, so they're delivered serially.
 
 **Caveats.**
 - "Attempts to deliver in order" is not "successfully delivers in order." If `E1`'s delivery is failing and getting retried while `E2`'s delivery is queued, `E2` waits for `E1`'s next attempt or DLQ-routing. Per-merchant ordering is preserved at the *attempt* level. This is the right tradeoff because head-of-line blocking is bounded by the retry policy.
@@ -209,7 +209,7 @@ It is worth being explicit about what RRQ does *not* guarantee, to avoid implici
 
 **Not an invariant: low latency under load.** RRQ is designed to handle 1,000 TPS sustained on a single machine, but no SLO is defined. Latency degrades gracefully under load (via queue lag, not request failures); request failures only happen if the system is unable to *durably accept* work, not because internal queues are full.
 
-**Not an invariant: zero-downtime upgrades.** Rolling deploys are designed for, but a deploy can briefly fail in-flight requests if it coincides with a precise moment in saga lifecycles. Operationally, deploys happen during low-traffic windows and the API gateway's health checks ensure new pods are healthy before old ones are killed. The preStop drain hooks that get a deploy closer to zero-downtime are designed (see [`deep-dives/29-KUBERNETES.md`](deep-dives/29-KUBERNETES.md)). RRQ still does not claim *true* zero-downtime: the absence of hot-standby database replicas (the actual known gap, per [`deep-dives/28-OPERATIONS.md`](deep-dives/28-OPERATIONS.md)) bounds how close it gets.
+**Not an invariant: zero-downtime upgrades.** Rolling deploys are designed for, but a deploy can briefly fail in-flight requests if it coincides with a precise moment in saga lifecycles. Operationally, deploys happen during low-traffic windows and the API gateway's health checks ensure new pods are healthy before old ones are killed. The preStop drain hooks that get a deploy closer to zero-downtime are designed, and Postgres runs a hot standby with automatic failover (CloudNativePG). RRQ still does not claim *true* zero-downtime, because a deploy can briefly fail in-flight requests at a precise saga-lifecycle moment; that timing edge, not the infrastructure, is the limit.
 
 **Not an invariant: fairness among merchants.** A merchant submitting 10x the load gets 10x the share of worker capacity. Per-merchant fairness is handled only as far as Kong's edge rate limiting goes; the workers themselves do not arbitrate fairness, so a heavy merchant can still crowd the queues.
 
@@ -219,11 +219,9 @@ These non-invariants are not bugs; they are scope decisions. Each is documented 
 
 ## How invariants flow through the rest of the docs
 
-When the service docs (`services/*`) and deep-dives (`deep-dives/*`) describe a mechanism, they reference invariants by ID. For example:
+When the service docs (`services/*`) describe a mechanism, they reference invariants by ID. For example:
 
 > "The Saga Worker acquires a Redlock on both wallet IDs before the Debit step. This is what makes I2 (no negative balance) and I4 (per-wallet ordering) hold under concurrent transfers.", from `services/11-SAGA-WORKER.md`
-
-> "The atomic SETNX on the idempotency key is what makes I3 (at-most-once execution) hold even under concurrent retries.", from `deep-dives/20-IDEMPOTENCY.md`
 
 This cross-referencing is deliberate. It means anyone tracing a correctness question can follow it from the invariant statement here, to the mechanism that enforces it, to the test that validates it, and back. The whole doc set forms a directed graph rooted at this file.
 
@@ -234,7 +232,6 @@ This cross-referencing is deliberate. It means anyone tracing a correctness ques
 - The system shape that upholds these invariants → [`00-OVERVIEW.md`](00-OVERVIEW.md)
 - The *why* behind each invariant, in narrative form → [`01-PROBLEM.md`](01-PROBLEM.md)
 - A specific service implementation → `services/`
-- A specific mechanism in depth → `deep-dives/`
 
 ---
 
