@@ -15,10 +15,11 @@
 | Design, system, services, invariants                        | Complete (see `docs/`)       |
 | Design, deep-dives                                           | In progress                  |
 | Design, simulation harness and merchant-sim                  | Complete (see doc 17)        |
-| Design, chargebacks and Kubernetes deployment               | Complete (docs 18, 29)       |
+| Design, scaling & availability (HA, horizontal scale-out, one logical ledger) | Complete (doc 03) |
+| Design, deployment & operations                             | Complete (doc 28)            |
 | Implementation, scaffold (proto, migrations, k8s overlays, CI) | Not started (dirs are placeholders) |
 | Implementation (Go), API Gateway                             | Not started                  |
-| Implementation (Go), Saga Worker                             | Not started                  |
+| Implementation (Go), Ledger Worker + outbox relay            | Not started                  |
 | Implementation (Go), Webhook Worker                          | Not started                  |
 | Implementation (Go), Fraud Worker                            | Not started                  |
 | Implementation (Go), Reconciliation                          | Not started                  |
@@ -33,7 +34,7 @@
 
 ## What exists right now
 
-**A complete design specification.** See `docs/00-OVERVIEW.md` for the system in one read. The design covers six services, the invariants they uphold, the failure modes they handle, and the data model. Read this before reading anything else.
+**A complete design specification.** See `docs/00-OVERVIEW.md` for the system in one read. The design covers six services plus the outbox relay, the invariants they uphold, the failure modes they handle, and the data model. Read this before reading anything else.
 
 **A simulation harness design.** `docs/services/17-SIMULATION-HARNESS.md` specifies `merchant-sim`, the simulated merchant and end-user population that lets the whole pipeline run without real integrators. This is the part that turns a set of services into a system you can watch work. Designed, not yet built.
 
@@ -53,9 +54,9 @@
 
 **Benchmarks.** No k6 results, no comparison numbers. The methodology is designed (`docs/appendices/43-BENCHMARK-METHODOLOGY.md`) but no measurement has been taken.
 
-**Deployment.** No deploy, no public demo URL. RRQ deploys to Kubernetes (design in `docs/deep-dives/29-KUBERNETES.md`): a local `kind` cluster for development and DigitalOcean Kubernetes for production, with Kong at the edge and Argo CD syncing the `prod` overlay. The Kustomize overlays in `k8s/` and the Argo CD Application are not written yet and nothing has been applied to a cluster.
+**Deployment.** No deploy, no public demo URL. RRQ deploys to Kubernetes (design in `docs/deep-dives/28-DEPLOYMENT-AND-OPERATIONS.md`): a local `kind` cluster for development and DigitalOcean Kubernetes for production, with Kong at the edge and Argo CD syncing the `prod` overlay. The Kustomize overlays in `k8s/` and the Argo CD Application are not written yet and nothing has been applied to a cluster.
 
-**Dispute operations tooling.** Chargebacks are designed (`docs/services/18-CHARGEBACKS.md`), but only the dispute *engine* is. The operator surface is missing: the Admin Dashboard cannot yet inspect or override a dispute, and the playbook for "merchant successfully appeals after a default refund" is not written. This is the one part of the pipeline whose service design is ahead of its operator design.
+**Dispute operations tooling.** Dispute resolution and chargebacks are a future extension. The operator surface is missing: the Admin Dashboard cannot yet inspect or override a dispute, and the playbook for "merchant successfully appeals after a default refund" is not written.
 
 ---
 
@@ -71,9 +72,9 @@ This file is the third option. State plainly what's done, what's not, and what's
 
 Go first, driven to a deployed and demonstrable state before the Rust port begins.
 
-1. API Gateway in Go: HTTP server, idempotency middleware, JWT validation, write `JobRequested` to Redis Streams.
-2. Saga Worker happy path in Go: Transfer saga, no compensation yet.
-3. Saga Worker failure handling and compensation in Go.
+1. API Gateway in Go: HTTP server, durable idempotency (Postgres `UNIQUE`), JWT validation, write the `jobs` row + `job.requested` outbox event in one transaction; plus the outbox relay that publishes events to Kafka.
+2. Ledger Worker happy path in Go: post a transfer as one serializable transaction (both legs atomic).
+3. Ledger Worker failure handling in Go: terminal-vs-retryable classification, idempotent redelivery, poison-message DLQ routing.
 4. Webhook Worker, Fraud Worker, and Reconciliation in Go.
 5. Admin Dashboard in Go.
 6. merchant-sim: merchant client, webhook receiver, end-user population, traffic driver, scenario engine.

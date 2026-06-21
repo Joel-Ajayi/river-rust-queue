@@ -1,12 +1,8 @@
 # 12: Webhook Worker
 
 > **What this is.** The service document for the Webhook Worker. Explains how RRQ delivers signed notifications to merchants with per-merchant ordering, exponential backoff with full jitter, per-merchant circuit breakers, and DLQ routing for terminal failures.
-
-## FAQ
-
-The FAQ for this document has been moved to `docs/faq/12-WEBHOOK-WORKER-FAQ.md`.
-
-> **Prerequisites.** Read [`11-SAGA-WORKER.md`](11-SAGA-WORKER.md), webhooks consume what sagas produce.
+>
+> **Prerequisites.** Read [`11-LEDGER-WORKER.md`](11-LEDGER-WORKER.md), webhooks consume what the ledger posts (via the outbox relay).
 
 ---
 
@@ -16,7 +12,7 @@ The Webhook Worker delivers signed HTTPS notifications to merchant endpoints. Wh
 
 It does five things:
 
-1. **Consumes** messages from the partitioned notify stream (`stream:notify-0` through `stream:notify-15`).
+1. **Consumes** messages from the Kafka notify topic.
 2. **Signs** the payload with HMAC-SHA256 using the merchant's per-merchant secret.
 3. **Delivers** the signed payload via HTTPS POST to the merchant's configured URL.
 4. **Retries** failures with exponential backoff and full jitter, gated by a per-merchant circuit breaker.
@@ -24,7 +20,7 @@ It does five things:
 
 The interesting design tensions are:
 
-- **Per-merchant ordering** vs. **horizontal scalability**. A merchant expects their webhooks in order, they're building state machines on top of them. But naive parallelism (consumer group balances across N consumers) would deliver out of order. The answer is stream partitioning.
+- **Per-merchant ordering** vs. **horizontal scalability**. A merchant expects their webhooks in order, they're building state machines on top of them. But naive parallelism (a simple consumer group balancing messages across N replicas) would deliver out of order. The answer is **Kafka topic partitioning by merchant**: partitions keep a merchant's events together, and Kafka's consumer group protocol makes exactly one live worker read each partition, so order survives across replicas.
 - **Retry persistence** vs. **operational simplicity**. Retries can span minutes (a 5xx that recovers quickly) to 45+ minutes (10 attempts with exponential backoff). The worker can't hold retries in memory; they have to survive process restarts. The answer is a Postgres-backed retry queue.
 - **One bad merchant shouldn't break the system**. A merchant whose endpoint is permanently broken will exhaust retries forever if you let it. The circuit breaker per-merchant is what bounds the damage.
 
@@ -34,7 +30,7 @@ The interesting design tensions are:
 
 **Inputs**
 
-- Messages from `stream:notify-{shard}` for some `shard ∈ [0, 16)`. Each shard is consumed by exactly one consumer at a time within the `webhook-workers` consumer group.
+- Messages from assigned Kafka partitions. Each partition is consumed by **exactly one live worker at a time** — enforced by Kafka's native consumer group protocol.
 - Webhook delivery records from `webhook_deliveries` (read by the retry scheduler).
 - Merchant configuration (webhook URL, signing secret, status) from Postgres with short-TTL Redis cache.
 
@@ -74,26 +70,28 @@ Per-merchant ordering with horizontal scalability is the core problem. Here's wh
 
 **Approach 3: stream per merchant.** Create `stream:notify:m_A`, `stream:notify:m_B`, etc. Each stream has its own consumer. Ordering preserved per merchant; parallelism across merchants. Problem: number of streams grows with merchant count. Thousands of streams is operationally awkward, Redis handles it but tooling, monitoring, and consumer-process count become unwieldy.
 
-**Approach 4 (chosen): N partitioned streams, hash by merchant.** Create `stream:notify-0` through `stream:notify-15` (16 shards). When emitting, write to `stream:notify-{hash(merchant_id) mod 16}`. Each shard is consumed by exactly one consumer at a time (within the consumer group, one of the N workers owns each shard). All of merchant M's events land on the same shard, same consumer, same serial processing. Different merchants land on (potentially) different shards and run in parallel.
+**Approach 4 (chosen): Kafka topic, partitioned by merchant.** The `notify` topic has N partitions (e.g., 16). The **outbox relay** publishes each `transfer.completed`/`transfer.failed` event (written by the Ledger Worker to the `events` table) to the `notify` topic using `merchant_id` as the message key, in `events.id` order. Kafka's partitioner ensures all events for merchant M land on the same partition.
 
-This is the standard pattern for "per-key ordering with horizontal scaling." It's how Kafka works fundamentally (partitions). 16 shards is a tunable; the rule of thumb is 4x the number of worker replicas, so 4 workers handle 16 shards = 4 shards each.
+Kafka consumer groups guarantee that **exactly one live worker reads each partition at a time**. Kafka handles the partition assignment and rebalancing natively. If a worker dies, Kafka detects the heartbeat failure and reassigns its partitions to surviving workers. The only ordering-relevant window is the brief rebalance delay, during which the partition is paused, never reordered.
+
+Kafka solves the "exclusive shard ownership" problem out-of-the-box, providing exactly the semantics we need without custom lease coordination in the application layer. The rule of thumb is 4× the worker replica count (4 workers → 16 partitions).
 
 ### Delivery lifecycle, in one diagram
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant SW as Saga Worker (producer)
-    participant NS as Redis (notify stream)
+    participant SW as Outbox Relay (producer)
+    participant NS as Kafka (notify topic)
     participant WW as Webhook Worker
     participant CB as Circuit Breaker (per merchant)
     participant DB as Postgres (webhook_deliveries)
     participant ME as Merchant endpoint
 
-    Note over SW: saga reaches terminal state
-    SW->>NS: XADD stream:notify-<shard> *
+    Note over SW: Ledger Worker posted transfer.completed to the events outbox
+    SW->>NS: Publish notify (key=merchant_id)
 
-    WW->>NS: XREADGROUP webhook-workers <consumer> COUNT 10 BLOCK 2000ms
+    WW->>NS: Poll Kafka (assigned partitions)
     NS-->>WW: messages
 
     loop per message
@@ -104,7 +102,7 @@ sequenceDiagram
         alt breaker is open
             Note over WW: skip immediate attempt
             WW->>DB: INSERT webhook_deliveries (attempt=0, next_retry_at = breaker_cooldown_end)
-            WW->>NS: XACK
+            WW->>NS: Commit offset
         else breaker is closed or half-open
             WW->>WW: compute HMAC-SHA256 signature
             WW->>ME: POST URL with signed payload (10s timeout)
@@ -113,12 +111,12 @@ sequenceDiagram
                 WW->>CB: record success (close breaker if half-open)
                 WW->>DB: INSERT webhook_deliveries (status=delivered, ...)
                 WW->>DB: INSERT events (event_type=webhook.delivered, ...)
-                WW->>NS: XACK
+                WW->>NS: Commit offset
             else non-2xx or timeout
                 ME-->>WW: 500 / timeout / connection refused
                 WW->>CB: record failure (may open breaker)
                 WW->>DB: INSERT webhook_deliveries (status=pending, attempt=1, next_retry_at=NOW + jittered_backoff)
-                WW->>NS: XACK
+                WW->>NS: Commit offset
             end
         end
     end
@@ -150,7 +148,7 @@ Two loops in one worker:
 - **The stream-consumer loop** handles freshly-arriving notifications. First-attempt deliveries happen here.
 - **The retry-scheduler loop** polls Postgres for due retries. Subsequent attempts happen here.
 
-These two loops are separated because retries need to span minutes-to-hours, far longer than a stream message should sit unacked. ACKing the stream message immediately and tracking retries in Postgres is what makes long retry windows possible.
+These two loops are separated because retries need to span minutes-to-hours, far longer than a Kafka message should sit uncommitted. Committing the Kafka offset immediately and tracking retries in Postgres is what makes long retry windows possible.
 
 ### Signing and what we put in the payload
 
@@ -283,9 +281,9 @@ Key property: **breaker state is per-merchant**, keyed `breaker:webhook:{merchan
 
 A `transfer.completed` event needs to be delivered to merchant `m_M`'s endpoint at `https://merchant.example/webhooks/rrq`.
 
-1. **Saga Worker emits.** Saga reaches terminal `Completed` state, computes `shard = hash("m_M") mod 16 = 7`, runs `XADD stream:notify-7 * event_type=transfer.completed event_id=ev_42 merchant_id=m_M payload=<...>`.
+1. **Outbox relay publishes.** The Ledger Worker's posting transaction wrote a `transfer.completed` event to the `events` outbox; the relay publishes it to the Kafka `notify` topic with message key `merchant_id=m_M`, payload=`<...>`.
 
-2. **Webhook Worker picks up.** A worker assigned to shard 7 calls `XREADGROUP webhook-workers <consumer-id> COUNT 10 BLOCK 2000 STREAMS stream:notify-7 >`. Receives the message.
+2. **Webhook Worker picks up.** The worker assigned to the partition containing `m_M` polls Kafka. No other worker in the group reads from this partition. Receives the message.
 
 3. **Merchant lookup.** Worker checks Redis cache `merchant:m_M`. Cache miss. Queries Postgres: `SELECT webhook_url, webhook_secret, status FROM merchants WHERE id = 'm_M'`. Caches result with 60s TTL. Status is `active`. URL is `https://merchant.example/webhooks/rrq`. Secret is `<bytes>`.
 
@@ -336,7 +334,7 @@ A `transfer.completed` event needs to be delivered to merchant `m_M`'s endpoint 
 
 8. **Update breaker.** `record_success(m_M)`, if breaker was half-open, transition to closed. Reset consecutive-failure counter to zero.
 
-9. **ACK.** `XACK stream:notify-7 webhook-workers <message-id>`.
+9. **Commit.** Kafka offset is committed.
 
 Total time on a healthy merchant: 50–200ms depending on their endpoint's latency.
 
@@ -353,7 +351,7 @@ The most common failure case. Sequence:
 3. Compute next retry delay: `random(0, min(300, 1 * 2^0)) = random(0, 1)` ≈ 0.5s.
 4. `INSERT INTO webhook_deliveries` with `attempt_count=1`, `next_retry_at = NOW() + 500ms`, `last_status=500`, `last_error='HTTP 500'`, `status='pending'`.
 5. Update breaker: `record_failure(m_M)`. Consecutive failures = 1 (below threshold).
-6. `XACK` the stream message. The delivery now lives in `webhook_deliveries`; the stream's job is done.
+6. Commit the Kafka offset. The delivery now lives in `webhook_deliveries`; the topic's job is done.
 
 Later, the retry-scheduler loop:
 
@@ -411,7 +409,7 @@ The retry scheduler depends on Postgres heavily, every poll queries the table. I
 4. During the gap, no new retries are attempted, but no work is lost, the deliveries are still in `webhook_deliveries` with their `next_retry_at` set.
 5. When Postgres recovers, the scheduler picks up where it left off. Some retries may be late (their `next_retry_at` is in the past), which is fine.
 
-The stream-consumer loop is independent. If Postgres is down but Redis is up, fresh notifications arrive in the stream and... the worker can't process them, because it needs to write to `webhook_deliveries`. So the stream-consumer loop also stalls. Stream backs up; consumer lag grows; alerting fires; operator intervenes.
+The stream-consumer loop is independent. If Postgres is down but Kafka is up, fresh notifications arrive from Kafka and... the worker can't process them, because it needs to write to `webhook_deliveries`. So the consumer loop also stalls. Consumer lag grows; alerting fires; operator intervenes.
 
 ### F6: Worker pod restart in the middle of retry processing
 
@@ -431,7 +429,7 @@ No work is lost because every retry's state lives in Postgres, not in worker mem
 // Package webhook implements the Webhook Worker.
 //
 // Invariants upheld here:
-//   I5 (per-merchant webhook ordering), via stream partitioning + per-shard consumer.
+//   I5 (per-merchant webhook ordering), via Kafka topic partitioning + native consumer group assignment.
 //   I8 (DLQ entries are recoverable), via DLQ routing on retry exhaustion.
 
 type Worker struct {
@@ -442,19 +440,16 @@ type Worker struct {
     httpClient  *http.Client       // 10s timeout
     metrics     *Metrics
 
-    shardAssignments []int          // which shards this replica owns
 }
 
 // Run launches the two main loops: stream consumer and retry scheduler.
 func (w *Worker) Run(ctx context.Context) error {
     g, gctx := errgroup.WithContext(ctx)
 
-    for _, shard := range w.shardAssignments {
-        shard := shard  // capture
-        g.Go(func() error {
-            return w.consumeShard(gctx, shard)
-        })
-    }
+    // Kafka handles partition assignment natively.
+    g.Go(func() error {
+        return w.consumeKafka(gctx)
+    })
 
     g.Go(func() error {
         return w.retryScheduler(gctx)
@@ -463,71 +458,49 @@ func (w *Worker) Run(ctx context.Context) error {
     return g.Wait()
 }
 
-func (w *Worker) consumeShard(ctx context.Context, shard int) error {
-    stream := fmt.Sprintf("stream:notify-%d", shard)
-    consumerID := fmt.Sprintf("webhook-%s-%d", os.Hostname(), shard)
-
-    // Ensure consumer group exists.
-    _ = w.redis.XGroupCreateMkStream(ctx, stream, "webhook-workers", "$").Err()
-
+func (w *Worker) consumeKafka(ctx context.Context) error {
     for {
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        default:
+        msg, err := w.kafkaConsumer.ReadMessage(ctx)
+        if err != nil {
+            return err
         }
 
-        msgs, err := w.redis.XReadGroup(ctx, &redis.XReadGroupArgs{
-            Group:    "webhook-workers",
-            Consumer: consumerID,
-            Streams:  []string{stream, ">"},
-            Count:    10,
-            Block:    2 * time.Second,
-        }).Result()
-        if err != nil && err != redis.Nil {
-            // Log, backoff, retry.
-            continue
-        }
-
-        for _, stream := range msgs {
-            for _, msg := range stream.Messages {
-                w.handleMessage(ctx, stream.Stream, msg)
-            }
-        }
+        w.handleMessage(ctx, msg)
     }
 }
 
-func (w *Worker) handleMessage(ctx context.Context, stream string, msg redis.XMessage) {
-    // Parse event from message values.
-    merchantID := msg.Values["merchant_id"].(string)
-    eventID := msg.Values["event_id"].(string)
-    payload := []byte(msg.Values["payload"].(string))
+func (w *Worker) handleMessage(ctx context.Context, msg kafka.Message) {
+    // Parse event from message payload.
+    // The message key is the merchant_id, ensuring order per merchant.
+    merchantID := string(msg.Key)
+    var payload map[string]interface{}
+    json.Unmarshal(msg.Value, &payload)
+    eventID := payload["event_id"].(string)
 
     merchant, err := w.merchants.Get(ctx, merchantID)
     if err != nil {
         // Can't deliver without merchant config. Log and DLQ?
-        // For a real production system, this is a serious bug, every event
-        // has a merchant_id that should exist. Send to DLQ.
+        // For a real production system, this is a serious bug. Send to DLQ.
         w.routeToDLQ(ctx, msg, "merchant_lookup_failed: "+err.Error())
-        w.ack(ctx, stream, msg.ID)
+        w.kafkaConsumer.CommitMessages(ctx, msg)
         return
     }
 
     breaker := w.breakers.For(merchantID)
 
     result, err := breaker.Execute(func() (interface{}, error) {
-        return w.attemptDelivery(ctx, merchant, eventID, payload, /*attempt=*/1)
+        return w.attemptDelivery(ctx, merchant, eventID, msg.Value, /*attempt=*/1)
     })
 
     if err != nil {
         // Either delivery failed or breaker is open.
-        w.scheduleRetry(ctx, merchant, eventID, payload, /*attempt=*/1, err)
+        w.scheduleRetry(ctx, merchant, eventID, msg.Value, /*attempt=*/1, err)
     } else {
         statusCode := result.(int)
         w.recordSuccess(ctx, merchant.ID, eventID, statusCode, /*attempt=*/1)
     }
 
-    w.ack(ctx, stream, msg.ID)
+    w.kafkaConsumer.CommitMessages(ctx, msg)
 }
 
 func (w *Worker) attemptDelivery(ctx context.Context, m *Merchant, eventID string, payload []byte, attempt int) (int, error) {
@@ -610,115 +583,6 @@ Key implementation points:
 
 ---
 
-## Code skeleton (Rust reference)
-
-The Rust version uses Tower middleware for the breaker, hyper for HTTP, and tokio tasks per shard.
-
-```rust
-//! Webhook Worker.
-//!
-//! Invariants upheld here:
-//!   I5 (per-merchant ordering), via shard-per-consumer-task.
-//!   I8 (no silent drops), via DLQ routing.
-
-pub struct Worker {
-    redis: redis::Client,
-    db: PgPool,
-    merchants: MerchantLookup,
-    breakers: BreakerRegistry,        // DashMap<MerchantId, CircuitBreaker>
-    http_client: hyper::Client<HttpsConnector>,
-    shard_assignments: Vec<u8>,
-}
-
-impl Worker {
-    pub async fn run(self: Arc<Self>) -> Result<()> {
-        let mut tasks = JoinSet::new();
-
-        for shard in &self.shard_assignments {
-            let me = self.clone();
-            let shard = *shard;
-            tasks.spawn(async move {
-                me.consume_shard(shard).await
-            });
-        }
-
-        let me = self.clone();
-        tasks.spawn(async move {
-            me.retry_scheduler().await
-        });
-
-        while let Some(result) = tasks.join_next().await {
-            result??;
-        }
-        Ok(())
-    }
-
-    async fn consume_shard(&self, shard: u8) -> Result<()> {
-        let stream = format!("stream:notify-{}", shard);
-        let consumer_id = format!("webhook-{}-{}", hostname(), shard);
-
-        // Ensure consumer group.
-        let _ = self.redis.xgroup_create_mkstream(&stream, "webhook-workers", "$").await;
-
-        loop {
-            let msgs: Vec<StreamMessage> = self.redis.xreadgroup_block(
-                "webhook-workers", &consumer_id, &[&stream], ">",
-                /*count=*/10, /*block_ms=*/2000,
-            ).await?;
-
-            for msg in msgs {
-                self.handle_message(&stream, msg).await;
-            }
-        }
-    }
-
-    async fn handle_message(&self, stream: &str, msg: StreamMessage) {
-        let merchant_id = msg.field("merchant_id");
-        let event_id = msg.field("event_id");
-        let payload = msg.field_bytes("payload");
-
-        let merchant = match self.merchants.get(merchant_id).await {
-            Ok(m) => m,
-            Err(e) => {
-                self.route_to_dlq(&msg, &format!("merchant_lookup_failed: {e}")).await;
-                self.ack(stream, &msg.id).await;
-                return;
-            }
-        };
-
-        let breaker = self.breakers.for_merchant(&merchant.id);
-
-        match breaker.call(|| self.attempt_delivery(&merchant, &event_id, &payload, 1)).await {
-            Ok(status_code) => {
-                self.record_success(&merchant.id, event_id, status_code, 1).await;
-            }
-            Err(BreakerError::Open) => {
-                self.schedule_retry(&merchant, event_id, &payload, 1, "circuit_open").await;
-            }
-            Err(BreakerError::Inner(err)) => {
-                self.schedule_retry(&merchant, event_id, &payload, 1, &err.to_string()).await;
-            }
-        }
-
-        self.ack(stream, &msg.id).await;
-    }
-}
-```
-
-The Rust version reads similarly to the Go version because the shape of the work is the same. The differences are in idioms (Tower middleware, `Arc<Self>`, `JoinSet`), not in architecture.
-
-The circuit breaker in Rust is implemented as a Tower middleware layer. The HTTP client stack composes:
-
-```rust
-ServiceBuilder::new()
-    .layer(TimeoutLayer::new(Duration::from_secs(10)))
-    .layer(CircuitBreakerLayer::new(breaker_config))
-    .service(hyper_client)
-```
-
-Each delivery attempt goes through the stack: timeout enforcement → breaker check → actual HTTP request. The breaker's state is owned by the layer; we don't have to call `record_success` / `record_failure` manually.
-
----
 
 ## Test plan
 
@@ -727,6 +591,7 @@ Each delivery attempt goes through the stack: timeout enforcement → breaker ch
 - **`TestOrdering_PerMerchant`**, emit 100 events for merchant M in order; assert merchant's endpoint receives them in the same order (mock endpoint records arrival).
 - **`TestOrdering_MultipleMerchants`**, emit interleaved events for M1, M2, M3; assert each merchant's sequence is preserved internally.
 - **`TestOrdering_SlowMerchantDoesntBlockOthers`**, M1's endpoint sleeps 3s per request; M2's responds instantly; assert M2's webhooks aren't delayed by M1's.
+- **`TestOrdering_SurvivesPartitionRebalance`**, emit a known sequence for merchant M, then kill the worker owning M's Kafka partition mid-stream; assert Kafka reassigns the partition to a peer, and M's endpoint still receives the full sequence in order with no reorder across the handoff. This is the test that proves I5 holds across replicas, not just within one process.
 
 ### Validates I8 (DLQ recovery)
 
@@ -759,14 +624,16 @@ Each delivery attempt goes through the stack: timeout enforcement → breaker ch
 
 - **`ChaosTest_WorkerKillMidBatch`**, kill worker while processing 100 due retries; assert all 100 are eventually delivered (or DLQ'd) by survivors.
 - **`ChaosTest_RedisRestart`**, restart Redis mid-operation; assert worker reconnects and resumes.
-- **`TurmoilTest_NetworkPartition`** (Rust comparison), partition merchant endpoints from worker for 30s; assert breaker opens, deliveries queue, breaker closes after partition heals, queue drains.
+
+
 
 ---
 
 ## What this service depends on
 
-- **Saga Worker**, produces the notify-stream messages.
-- **Redis**, partitioned notify streams; per-merchant circuit breaker state.
+- **Outbox Relay**, publishes the `transfer.completed`/`transfer.failed` notify events (written by the Ledger Worker) to Kafka.
+- **Kafka**, partitioned notify topic.
+- **Redis**, per-merchant circuit breaker state.
 - **Postgres**, webhook_deliveries (retry state), merchants (lookup), events (delivery records), dlq_entries (terminal failures).
 - **Merchant endpoints**, out of our control; the whole resilience story exists because of them.
 
@@ -779,7 +646,8 @@ Each delivery attempt goes through the stack: timeout enforcement → breaker ch
 
 ## Where to read next
 
-- The fraud detection service consuming the same job stream → [`13-FRAUD-WORKER.md`](13-FRAUD-WORKER.md)
+- How Kafka partition routing fits the fleet model → [`../03-SCALING-AND-AVAILABILITY.md`](../03-SCALING-AND-AVAILABILITY.md)
+- The fraud detection service consuming the same Kafka `jobs` topic → [`13-FRAUD-WORKER.md`](13-FRAUD-WORKER.md)
 
 ---
 

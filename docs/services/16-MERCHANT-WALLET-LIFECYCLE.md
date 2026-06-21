@@ -10,12 +10,12 @@
 
 ## What this service does
 
-The other services (Gateway, Saga, Webhook, Reconciliation) assume merchants and wallets already exist. They don't address how those entities are created in the first place. This service does.
+The other services (Gateway, Ledger, Webhook, Reconciliation) assume merchants and wallets already exist. They don't address how those entities are created in the first place. This service does.
 
 Three flows:
 
 1. **Merchant onboarding.** Create a merchant record. Issue an API key. Configure the webhook URL and signing secret.
-2. **Wallet provisioning.** Create wallets for a merchant. Mark wallet type (operational, customer, escrow). Optionally seed with initial funds (for testing).
+2. **Wallet provisioning.** Create wallets for a merchant. Mark wallet type (operational or customer). Optionally seed with initial funds (for testing).
 3. **JWT issuance.** Exchange an API key for a short-lived JWT used to call the merchant API.
 
 These flows are all driven from the **Admin Dashboard** (the operator dashboard described in [`15-ADMIN-DASHBOARD.md`](15-ADMIN-DASHBOARD.md)). RRQ does not expose self-service merchant registration via a public API; merchants are created by operators.
@@ -32,11 +32,10 @@ The original data model had a single `wallets` table with no type distinction. T
 | --- | --- | --- | --- |
 | `merchant_operational` | The merchant's own revenue / float | The merchant | The system (settlements) |
 | `customer` | A wallet the merchant manages on behalf of an end-user | The merchant (acting for the user) | Other wallets (deposits) |
-| `escrow` | Held funds during a dispute | The system | The system |
 
-The `wallet_type` column on `wallets` carries this distinction. The Saga Worker's Validate step uses it for authorization: a customer wallet can only be debited by transfers initiated by its owning merchant; an escrow wallet can only be touched by the system during a dispute.
+The `wallet_type` column on `wallets` carries this distinction. The Ledger Worker's posting transaction uses it for authorization: a customer wallet can only be debited by transfers initiated by its owning merchant.
 
-Most traffic uses `merchant_operational` and `customer`. `escrow` is used by the chargeback flow ([`18-CHARGEBACKS.md`](18-CHARGEBACKS.md)).
+Most traffic uses `merchant_operational` and `customer`.
 
 ---
 
@@ -132,7 +131,7 @@ The flow:
 1. The operator submits a wallet creation request:
     - `merchant_id` (the owning merchant)
     - `currency` (ISO 4217)
-    - `wallet_type` (`merchant_operational`, `customer`, `escrow`)
+    - `wallet_type` (`merchant_operational`, `customer`)
     - Optional: external reference (e.g., a customer ID from the merchant's system, for `customer` wallets)
 2. System validates: the merchant exists and is active; the currency is supported; the wallet_type is valid for this context.
 3. Generates `wallet_id` (`wal_` + ULID).
@@ -151,16 +150,15 @@ Every wallet starts with zero balance. Transfers between wallets require positiv
 
 In real production: it doesn't, from RRQ's perspective. RRQ moves value between wallets that represent claims on real funds held elsewhere (a bank account, a card network, etc.). External integrations credit wallets when money arrives at the bank; debit wallets when money leaves. RRQ is the ledger; the bank is the vault.
 
-RRQ doesn't have bank integration. So for development and demos, we need a way to seed wallets with starting balances. That's an explicit, deliberate operator action, not a transfer, not a transaction, just "this wallet now has X for testing purposes."
+RRQ has no bank integration, so it models the outside world as a single reserved **external source wallet** (`wal_external_source`, owned by a system merchant). Value enters the ledger as a normal **transfer from that wallet** — which means funding uses the *exact same* single-transaction posting path as every other movement, and double-entry conservation still holds globally: the external wallet simply goes increasingly negative as value enters, and reconciliation's "the whole ledger sums to zero" check (I1) stays true. The external source wallet is the one wallet exempt from the no-negative-balance rule (I2), because it represents value that has entered from outside the system.
 
-The mechanism: a special operator action `seed_wallet` that:
+For development and demos, the operator's **Seed wallet** action is just a funding transfer from `wal_external_source`:
 
-1. Takes a wallet_id and an amount.
-2. Writes an `operator.seeded_wallet` event with explicit reasoning ("seeded for dev/test by operator_X").
-3. Inserts a ledger entry attributed to the seed (not to any saga): `(wallet_id, amount, balance_after, saga_id='SEED_<run_id>', step_name='seed', event_id=...)`.
-4. The `saga_id = 'SEED_*'` is recognizable; reconciliation knows it's not a normal saga.
+1. Operator submits `(wallet_id, amount, reason)`.
+2. The dashboard posts a funding transfer (`from = wal_external_source`, `to = wallet_id`, `amount`) through the ordinary Ledger path, with a `tf_seed_<ulid>` transfer id.
+3. An `operator.action` audit event records the seeding operator's identity and reason.
 
-This is *unambiguous* in audit logs. Anyone reviewing the wallet's history sees "seeded by operator X on date Y for reason Z" not "transfer from nowhere." The seed is its own thing.
+This is *unambiguous* in audit logs. Anyone reviewing the wallet's history sees a transfer from the external source wallet, with the `operator.action` event explaining who did it and why — not "money from nowhere." It is the same shape real funding rails would use: they'd credit via the same external-source transfer, triggered by a bank webhook instead of an operator.
 
 **This action is disabled in production deployments.** A feature flag (`ALLOW_WALLET_SEEDING`) is `true` only in dev/staging environments. Production has the flag `false`; the dashboard hides the seed button; the API returns 403 if called.
 
@@ -177,11 +175,11 @@ Three reasons it earns its own treatment:
 - **A test environment is promoted to staging by accident.** The seeded balances flow with the data. Reconciliation does *not* flag this (the seed events and ledger entries are real); the audit log shows the seeds. A human reviewing recognizes the environmental mix-up. This is the correct result.
 - **An attacker finds the seed endpoint in production.** They can't use it. The flag is read at startup, the dashboard doesn't render the action, and the API returns 403.
 - **A bug allows seeding in production.** That's a code-review failure. Defense in depth: every seed event records the environment from a runtime check, so a production seed is immediately visible in dashboards. Bad, but visible.
-- **A merchant disputes an unexplained credit.** The operator opens the wallet's events and sees `operator.seeded_wallet` with the seeding operator's identity and reason. Explained or escalated.
+- **A merchant disputes an unexplained credit.** The operator opens the wallet's events and sees `operator.action` with the seeding operator's identity and reason. Explained or escalated.
 
 ### The demo setup
 
-For developing and demoing, the seed action is used constantly. A typical setup: create a few test merchants, create an operational wallet each, seed each with ₦10,000,000 (reason: "demo setup"). That is a five-minute, one-time setup; the state persists in the dev database. For load tests, the seed scripts in `scripts/seed/` create test data at volume through the same `operator.seeded_wallet` events.
+For developing and demoing, the seed action is used constantly. A typical setup: create a few test merchants, create an operational wallet each, seed each with ₦10,000,000 (reason: "demo setup"). That is a five-minute, one-time setup; the state persists in the dev database. For load tests, the seed scripts in `scripts/seed/` create test data at volume through the same external-source funding-transfer path.
 
 ### What funding is deliberately not
 
@@ -234,7 +232,7 @@ stateDiagram-v2
 
 The transitions:
 
-- **Operator freeze** (via dashboard): `active → frozen` with reason. Writes `wallet.frozen` event. Subsequent transfers from this wallet rejected by the saga's Validate step.
+- **Operator freeze** (via dashboard): `active → frozen` with reason. Writes `wallet.frozen` event. Subsequent transfers from this wallet are rejected by the Ledger Worker's posting transaction (which re-reads status under the row lock).
 - **Operator unfreeze** (via dashboard): `frozen → active`. Writes `wallet.unfrozen` event with reason.
 - **Fraud auto-freeze** (Fraud Worker): same as operator freeze but emitted by the system.
 - **Closure** (via dashboard, rare): `active → closed`. A closed wallet cannot send or receive. The balance must be zero before closure (drain the wallet first). One-way transition; closed wallets cannot be reopened.
@@ -243,30 +241,15 @@ Closure exists for merchant-initiated shutdown of an end-user account. The state
 
 ---
 
-## Schema additions
+## Schema columns this service relies on
 
-The original `wallets` table needs:
+These columns are part of the base schema in [`../appendices/40-DATA-MODEL.md`](../appendices/40-DATA-MODEL.md); recapped here for the lifecycle context:
 
-```sql
-ALTER TABLE wallets ADD COLUMN wallet_type TEXT NOT NULL DEFAULT 'merchant_operational'
-    CHECK (wallet_type IN ('merchant_operational', 'customer', 'escrow'));
+- `wallets.wallet_type` — `merchant_operational` \| `customer`, used by the Ledger Worker's authorization check.
+- `wallets.external_ref` — for customer wallets, the merchant's reference to the end-user this wallet represents; indexed `(merchant_id, external_ref)`.
+- `merchants.tier` — carried in the JWT; used by Kong for per-tier rate limiting and for feature flags.
 
-ALTER TABLE wallets ADD COLUMN external_ref TEXT;
--- For customer wallets: the merchant's reference to the end-user this wallet represents.
--- Indexed for merchant lookups.
-
-CREATE INDEX wallets_external_ref_idx ON wallets (merchant_id, external_ref)
-    WHERE external_ref IS NOT NULL;
-```
-
-The `merchants` table needs:
-
-```sql
-ALTER TABLE merchants ADD COLUMN tier TEXT NOT NULL DEFAULT 'standard';
--- Carried in the JWT; used by Kong for per-tier rate limiting, and for feature flags.
-```
-
-No new tables. The audit events (`merchant.created`, `merchant.api_key_rotated`, `wallet.created`, `operator.seeded_wallet`) land in the existing `events` table.
+No new tables. The audit events (`merchant.created`, `merchant.api_key_rotated`, `wallet.created`, `operator.action`) land in the existing `events` table.
 
 ---
 
@@ -283,7 +266,7 @@ All testable via the dashboard plus automated assertions.
 - **`TestAuth_ExpiredKey`**, rotated key (now invalid); attempts to exchange; 401.
 - **`TestWallet_CreationAndType`**, create wallets of each type; assert correct `wallet_type` stored; assert balance zero.
 - **`TestWallet_SeedingDevOnly`**, in dev env, seed succeeds. In prod env (flag off), 403.
-- **`TestWallet_SeedingAuditTrail`**, seed; assert `operator.seeded_wallet` event written with operator identity and reasoning.
+- **`TestWallet_SeedingAuditTrail`**, seed; assert `operator.action` event written with operator identity and reasoning.
 - **`TestListEndpoints_Pagination`**, emit many wallets/transfers; assert pagination works; assert results scoped to merchant.
 - **`TestListEndpoints_CrossMerchantIsolation`**, merchant A queries; assert merchant B's data not visible.
 - **`TestWallet_Closure`**, close wallet with zero balance; succeeds. Try with nonzero; fails. Try to send from closed; fails.
@@ -298,7 +281,7 @@ All testable via the dashboard plus automated assertions.
 ## What depends on this service
 
 - **API Gateway**, looks up merchants by api_key_hash; verifies JWTs against issued claims.
-- **Saga Worker**, validates wallet ownership and status at saga start.
+- **Ledger Worker**, validates wallet ownership and status inside its posting transaction.
 - Everything else, transitively (they all assume merchants/wallets exist).
 
 ---

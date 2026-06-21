@@ -10,7 +10,7 @@
 
 ## What this does
 
-The Admin Dashboard is a web application that lets a privileged operator inspect and manage the system. It's where DLQ entries get replayed, stuck sagas get investigated, wallets get frozen, merchants get onboarded, and the system gets demonstrated.
+The Admin Dashboard is a web application that lets a privileged operator inspect and manage the system. It's where DLQ entries get replayed, stuck jobs get investigated, wallets get frozen, merchants get onboarded, and the system gets demonstrated.
 
 It serves two audiences:
 
@@ -19,7 +19,7 @@ It serves two audiences:
 
 These overlap heavily. The same actions an operator uses to recover from incidents (replay a DLQ entry) are useful for demo (show what DLQ replay looks like). Same code, same surface, same data, but with authentication gating it from public access.
 
-The dashboard is **not the test suite**. Automated unit and integration tests run via `go test` in CI on every commit (and `cargo test` once the Rust comparison is built). The dashboard is for *manual* exercise of the system, exploratory testing, demos, ops. Both layers exist for different reasons.
+The dashboard is **not the test suite**. Automated unit and integration tests run via `go test` in CI on every commit . The dashboard is for *manual* exercise of the system, exploratory testing, demos, ops. Both layers exist for different reasons.
 
 ---
 
@@ -46,15 +46,14 @@ Functional surface, organized by what an operator/demo viewer wants to do:
 ### Transfer operations
 - Submit a transfer (single).
 - Submit a bulk payout (multiple recipients in one operation).
-- View transfer status, including saga state and current step.
+- View transfer status: the job's status, its two ledger legs (debit/credit with `balance_after`), and the related events.
 - View transfer history (filterable by merchant, status, time window).
 
-### Saga inspection
-- List active sagas.
-- List stuck sagas (deadline expired, not yet terminal).
-- View saga detail: state machine position, step history, locked resources.
-- Force-abort a saga (with reason, requires confirmation).
-- Retry compensation on a dead-lettered saga.
+### Job inspection
+- List active jobs (status `pending`).
+- List stuck jobs (a `pending` job past its expected completion — usually a poison message awaiting the DLQ).
+- View job detail: status, the transfer(s) it produced, the ledger entries posted, and the full event timeline (`correlation_id`).
+- Replay a DLQ'd job (re-emits the original `job.requested`; the deterministic `transfer_id` makes the replay idempotent — see I8).
 
 ### Webhook operations
 - View recent webhook deliveries (per merchant).
@@ -84,12 +83,12 @@ Functional surface, organized by what an operator/demo viewer wants to do:
 ### Demo controls (dev/staging only)
 - "Run scenario" buttons that exercise specific behaviors:
   - Submit 100 transfers in parallel.
-  - Simulate a worker crash mid-saga.
+  - Simulate a worker crash mid-posting.
   - Trigger a webhook failure cascade.
   - Trigger a fraud freeze.
   - Drive a reconciliation discrepancy and observe detection.
 
-The demo controls are the project's strongest interview asset. A reviewer clicks "Trigger fraud freeze," watches 51 transfers complete, sees the wallet freeze, sees the next transfer rejected, that's a memorable thirty seconds of demo.
+
 
 ---
 
@@ -107,20 +106,20 @@ The dashboard is structured as:
                ▼
 ┌────────────────────────────────┐
 │       Admin API Service        │
-│  (Go or Rust HTTP server)      │
+│  (Go HTTP server)              │
 │  Handles auth, RBAC,           │
 │  business logic                │
 └──────────────┬─────────────────┘
                │
                ├──► Postgres (reads + audit writes)
                ├──► Redis (reads + breaker reset writes)
-               └──► Saga Worker / Webhook Worker
+               └──► Ledger Worker / Webhook Worker
                     (via shared DB; no RPC)
 ```
 
 The frontend is a single-page app. The backend is a small HTTP server (one of the languages, picking the one you're faster in for the implementation work).
 
-**The backend uses the same database and Redis as the rest of the system**, not a separate one. It's not "calling into" services; it's reading and writing the same shared state. This works because RRQ is event-driven, the saga worker doesn't need to know the dashboard exists; it just reads from streams and writes to the database.
+**The backend uses the same database and Redis as the rest of the system**, not a separate one. It's not "calling into" services; it's reading and writing the same shared state. This works because RRQ is event-driven, the ledger worker doesn't need to know the dashboard exists; it just consumes from Kafka and writes to the database.
 
 For mutating operations (freeze a wallet, replay a DLQ entry), the dashboard:
 1. Validates the operator's permission for this action.
@@ -176,7 +175,7 @@ Since all production verification happens via the dashboard, the dashboard needs
 **What the dashboard can do that automated tests can't:**
 
 - **Manual scenario walking.** A reviewer wants to see what happens when a webhook endpoint fails. They click "Toggle Mock Merchant to 500." They click "Submit Transfer." They watch the dashboard show the retry being scheduled, the breaker opening, the DLQ entry appearing.
-- **Long-running observation.** Watch a saga progress through its states over seconds. See locks acquired and released. See events written.
+- **Long-running observation.** Watch a job move from `pending` to `completed`. See the ledger legs and events written, and webhooks arrive.
 - **Demo-quality narrative.** A storyteller-friendly interface that walks through scenarios rather than just asserting "the test passed."
 
 **What automated tests can do that the dashboard can't:**
@@ -198,8 +197,8 @@ The dashboard has a section called "Scenarios" that drives specific demonstratio
 Concrete scenarios to implement:
 
 - **"Happy path transfer"**, single transfer, completes cleanly, webhook delivered.
-- **"Failed saga"**, transfer where destination wallet is frozen; saga compensates.
-- **"Worker crash recovery"**, kill the saga worker mid-saga; show replacement resumes.
+- **"Failed transfer"**, transfer where the destination wallet is frozen; the posting transaction commits `failed` and no money moves (nothing to compensate).
+- **"Worker crash recovery"**, kill the Ledger Worker mid-posting; show the transaction roll back and a peer reprocess with no double-post.
 - **"Webhook breaker"**, merchant endpoint returns 500s; show breaker opening and cooling.
 - **"Bulk payout"**, 50 sub-transfers, some succeed, some fail.
 - **"Fraud freeze"**, 51 transfers in 60 seconds from one wallet; wallet freezes; next transfer rejected.
@@ -220,7 +219,7 @@ metadata:
   name: rrq-dashboard
   namespace: rrq
 spec:
-  replicas: 1                       # single replica is fine; dashboard is low-traffic
+  replicas: 2                       # >=2 for HA (no single-instance components anywhere); it is stateless, so this is free
   selector:
     matchLabels:
       app: rrq-dashboard
@@ -252,7 +251,7 @@ The dashboard's Ingress is behind the cluster's authentication layer, which here
 
 For RRQ specifically, HTMX is probably the right answer. Operator dashboards don't need rich client-side interactivity; they need fast page loads and clear data display. HTMX delivers that with minimal JS. But pick what you're fastest in.
 
-**Backend choice.** The dashboard backend can be either Go or Rust. It doesn't have to match the service implementation (Go first, with Rust as a comparison study). The dashboard is one piece; pick one language. Probably whichever has the better web framework story for your needs.
+**Backend choice.** The dashboard backend is built in Go. It can share library code with the rest of the services.
 
 ---
 

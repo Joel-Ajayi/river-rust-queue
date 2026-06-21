@@ -1,179 +1,160 @@
 # 02: Invariants
 
-> **What this is.** The precise, testable statements about what RRQ guarantees. Not slogans. Statements that can be falsified by a test, and that *are* falsified by a test in the test suite.
+> **What this is.** The precise, testable statements about what RRQ guarantees. Not slogans. Statements that can be falsified by a test, and that _are_ falsified by a test in the test suite.
 >
 > **Reading time.** ~10 minutes.
 >
-> **Audience.** Anyone reasoning about correctness, author, reviewer, future-you debugging an incident. Each invariant has a name (`I1`, `I2`, ...) used elsewhere in the docs to reference it.
-
----
-
-## Why a separate doc for this
-
-A common failure mode in system design documents is to describe *what the system does* without ever saying *what must always be true*. Without invariants, "is this correct?" has no answer. With invariants, every code change has a checklist: which invariants does this affect, are they still upheld, where's the test that proves it.
-
-The invariants below are deliberately small in number. Nine of them. Each is a single English sentence. Each is checked by a specific test or class of tests. If one is violated, RRQ has a bug, and the violation is the precise specification of what's broken.
-
-A reviewer who reads only this document plus `00-OVERVIEW.md` knows what RRQ promises and how to verify it. That's the whole point.
+> **Audience.** Anyone reasoning about correctness — author, reviewer, future-you debugging an incident. Each invariant has a name (`I1`, `I2`, …) used elsewhere in the docs to reference it.
 
 ---
 
 ## Invariant I1: Conservation of value
 
-> For every `DebitApplied(wallet=W, amount=X, saga_id=S)` event, exactly one of the following also exists in the event log:
->   (a) `CreditApplied(wallet=W', amount=X, saga_id=S)` for some `W' ≠ W`, or
->   (b) `DebitReversed(wallet=W, amount=X, saga_id=S)`.
+> Every transfer posts exactly one `debit` leg and one `credit` leg, of equal magnitude, to two distinct wallets, in a single transaction. For every `transfer_id` there is exactly one `(transfer_id, 'debit')` and one `(transfer_id, 'credit')` row in `ledger_entries`, with `|debit.amount| = credit.amount`.
 
-In English: every debit is paired with either a corresponding credit (the saga succeeded) or a corresponding reversal (the saga compensated). There are no floating debits, money never enters or leaves the system without a matching entry.
+In English: money is never created or destroyed. Every movement out of one wallet is exactly a movement into another, recorded as two halves of one indivisible posting.
 
-**Why it matters.** This is the financial soundness invariant. A violation means the system has either created or destroyed value; in a real system, this is a regulatory incident.
+**Why it matters.** This is the financial soundness invariant. A violation means the system created or destroyed value — in a real system, a regulatory incident. The classic way to violate it is a worker that debits, then crashes before crediting, leaving money in limbo.
 
-**How it's enforced.** The Saga Worker writes `DebitApplied` and `CreditApplied` (or `DebitApplied` and `DebitReversed`) within the same logical saga, and persists `saga_state` so that a crash between the two is recoverable. Reconciliation (§14 service doc) verifies this invariant nightly by replaying the event log and asserting the pairing for every saga_id.
+**How it's enforced.** Both legs are written in **one serializable Postgres transaction** ([→ `services/11-LEDGER-WORKER.md`](services/11-LEDGER-WORKER.md)). They commit together or not at all, so the limbo state cannot exist — not even for a microsecond, because no other transaction can observe a half-applied posting. The `UNIQUE (transfer_id, leg)` constraint guarantees a redelivered job cannot add a third leg. Reconciliation ([→ `services/14-RECONCILIATION.md`](services/14-RECONCILIATION.md)) re-verifies the pairing nightly by replaying `ledger_entries`.
 
 **How it's tested.**
-- Unit test: replay engine asserts every `DebitApplied` has a matching credit or reversal in the same saga_id.
-- Integration test: submit 1,000 transfers under chaos (random worker kills); after all sagas terminate, run the replay engine and assert I1.
-
-**Known recovery scenarios.** Worker crash after `DebitApplied` but before `CreditApplied`: a replacement worker reads `saga_state`, sees state=`Debited`, attempts `Credit`. If `Credit` succeeds → I1 holds via (a). If `Credit` is unrecoverable → compensation runs, writes `DebitReversed` → I1 holds via (b).
+- Unit test: for every `transfer_id`, assert exactly one debit + one credit of equal magnitude.
+- Chaos test: submit 1,000 transfers while randomly killing the Ledger Worker; after the queue drains, assert I1 holds for every transfer (a killed transaction simply rolled back — there is no partial posting to find).
 
 ---
 
 ## Invariant I2: No negative balance on active wallets
 
-> For every wallet `W` with `status = active` at any point in time, the derived balance of `W` (sum of ledger amounts for `W`) is greater than or equal to zero.
+> For every wallet `W` with `status = active`, the derived balance of `W` (sum of `ledger_entries.amount` for `W`) is greater than or equal to zero at every point in the entry sequence.
 
-In English: the system does not let wallets go negative. Frozen or closed wallets are exempt because they may have been frozen *because* of a discovered discrepancy that put them temporarily negative.
+In English: the system does not let an active wallet go negative. Frozen or closed wallets are exempt because they may have been frozen *because* of a discovered discrepancy.
 
-**Why it matters.** A wallet going negative means the system extended credit it didn't have, the equivalent of letting a customer withdraw money they don't own. Real payment systems strictly forbid this on most wallet types.
+**Why it matters.** A negative active wallet means the system extended credit it didn't have — letting a customer spend money they don't own.
 
-**How it's enforced.** The Saga Worker's `Validate` step computes the derived balance of the source wallet and rejects the transfer if it would go negative. The check is performed *under the wallet's Redlock*, so no other concurrent saga can debit between the check and the actual `DebitApplied`.
+**How it's enforced.** The posting transaction takes a `SELECT … FOR UPDATE` row lock on the source wallet, computes its current balance from `ledger_entries` *under that lock*, and aborts the transfer if the debit would take it below zero. Because the check and the debit are in the same locked transaction, no concurrent transfer can slip a debit in between. This is the entire concurrency-control story — an in-transaction row lock, not a distributed lease.
 
 **How it's tested.**
-- Integration test: submit two concurrent transfers from a wallet with balance 100, each for 60. Without the lock, one of them might bypass the check. With the lock, exactly one succeeds and the other fails with `InsufficientBalance`. Assert balance > 0 throughout.
-- Property test: random sequence of transfers with random amounts; assert balance never goes negative on any active wallet at any point in the event stream.
-
-**Subtlety.** "The derived balance" must include all in-flight committed events, not just events from terminal sagas. If saga S1 has written `DebitApplied(W, 50)` but not yet completed, that 50 is *spent* from W's perspective even though the saga isn't done. The balance check uses the event store directly, not the eventually-consistent projection.
+- Concurrency test: wallet balance 100; fire two concurrent transfers of 60. Assert exactly one succeeds, one fails with `INSUFFICIENT_BALANCE`, and the balance never goes negative. This is the core test for the row-lock guarantee.
+- Property test: random sequence of transfers with random amounts; assert no active wallet's running balance is ever negative.
 
 ---
 
 ## Invariant I3: At-most-once execution per idempotency key
 
-> For each `(merchant_id, idempotency_key)` pair where the API has accepted a request, exactly one `JobRequested` event exists in the job stream, and exactly one chain of saga events derives from it.
+> For each `(merchant_id, idempotency_key)` the API has accepted, exactly one `jobs` row exists, and at most one set of postings derives from it.
 
-In English: a merchant can retry the same operation a million times with the same idempotency key; the underlying transfer happens at most once.
+In English: a merchant can retry the same operation a million times with the same key; the underlying transfer happens at most once.
 
-**Why it matters.** This is the duplicate-protection invariant. The merchant's expected behavior is "if I retry, nothing bad happens", they don't want to think about whether their retry might double-charge their customer. RRQ guarantees that thinking is unnecessary.
+**Why it matters.** The merchant's expected behavior is "if I retry, nothing bad happens." RRQ guarantees that thinking about double-charges is unnecessary.
 
-**How it's enforced.** The API Gateway's idempotency middleware uses an atomic `SET NX` on the key; only the first request with a given key wins the race. Subsequent requests either see "in progress" (return 409) or get the cached response.
+**How it's enforced.** Durably, in Postgres. The gateway does `INSERT INTO jobs … ON CONFLICT (merchant_id, idempotency_key) DO NOTHING`. The first request inserts the row and proceeds; every retry conflicts, reads back the existing `job_id`, and returns the same response. The `UNIQUE (merchant_id, idempotency_key)` constraint is the single source of truth — there is no Redis cache that could lose the claim on a node failure.
 
 **How it's tested.**
-- Concurrency test: fire 100 simultaneous requests with the same idempotency key; assert exactly one `JobRequested` event was written and exactly one saga ran.
-- Sequential retry test: fire 10 sequential requests with the same key; assert all 10 receive the same job_id in the response.
-- Different-payload test: fire two requests with the same key but different bodies; assert the second receives 422.
-
-**Edge case to be aware of.** The idempotency cache has a TTL (24 hours by default). After the TTL expires, the same key behaves as a new request. This is documented in the merchant-facing API. If a merchant's retry strategy spans more than 24 hours, they need to use a different key for each retry, which is unusual but possible.
+- Concurrency test: fire 100 simultaneous requests with the same key; assert exactly one `jobs` row and one set of postings.
+- Sequential retry test: fire 10 sequential requests with the same key; assert all 10 receive the same `job_id`.
+- Different-payload test: same key, different body; assert the second receives `422` (detected via `request_hash`).
 
 ---
 
-## Invariant I4: Per-wallet event ordering
+## Invariant I4: Per-wallet entry ordering
 
-> For any wallet `W`, events affecting `W` appear in the event store in causal order. If event `E1` causally precedes event `E2` (i.e., `E2`'s preconditions depend on `E1`'s effects), then `E1.id < E2.id` in the event store.
+> For any wallet `W`, its `ledger_entries` are totally ordered by `id`, and that order is causal: an entry never depends on the effects of an entry with a higher `id`.
 
-In English: events for a given wallet are linearly ordered. A `CreditApplied` cannot appear before the `DebitApplied` it pairs with. A `WalletFrozen` cannot precede the `FraudSuspected` event that triggered it. The history of any wallet is reconstructible by reading events in event-id order and applying them sequentially.
+In English: a wallet's history is a clean, replayable sequence. Reading its entries in `id` order and applying them reconstructs its balance at every point.
 
-**Why it matters.** Reconciliation, audit, and any state-machine logic that depends on order need this. If events for a wallet were unordered, you couldn't reliably replay them to derive the wallet's history.
+**Why it matters.** Reconciliation, audit, and balance derivation all depend on a single, well-defined order per wallet.
 
 **How it's enforced.**
-1. Causally-related events are written by the same saga, sequentially. The saga's step machine writes `DebitApplied` before `CreditApplied` and waits for the first INSERT to commit before issuing the second.
-2. Each saga holds the wallet's Redlock during its mutating section, preventing other sagas from interleaving writes to the same wallet.
-3. The event store assigns IDs from a single monotonic sequence (Postgres `bigserial`), so any two events written serially get strictly increasing IDs.
+1. `ledger_entries.id` is a single `BIGSERIAL` sequence on one logical primary, so any two entries written serially get strictly increasing ids.
+2. Concurrent transfers touching the same wallet are serialized by the `FOR UPDATE` row lock (I2), so their entries can't interleave incoherently.
+3. A transfer's two legs are written in one transaction, so a credit can never be ordered before the debit it pairs with.
+
+**Holds across replicas.** Many Ledger Worker replicas can run at once; ordering still holds because the ordering authority (the sequence and the row lock) lives in the shared database, not in any worker's memory. This is why the worker scales horizontally without weakening I4. See [`03-SCALING-AND-AVAILABILITY.md`](03-SCALING-AND-AVAILABILITY.md).
 
 **How it's tested.**
-- Replay test: for every wallet in the test corpus, fetch all events in event-id order, apply them to a fresh state, and assert no operation is invalid given prior state (e.g., no Credit before Debit; no second Freeze when already frozen).
+- Replay test: for every wallet, fetch entries in `id` order, apply them to a fresh balance, assert no leg is invalid given prior state (no debit below zero on an active wallet; no credit before its paired debit).
 
-**Note.** This invariant is *per wallet*, not global. Two different wallets' events can be interleaved arbitrarily; RRQ doesn't promise any global ordering, because doing so would serialize the entire system on a single sequence point. Per-wallet ordering is what's needed for correctness, and it's what RRQ provides.
+**Note.** This is *per wallet*. Two different wallets' entries may interleave arbitrarily; RRQ makes no global-ordering promise, because that would serialize the whole system on one point.
 
 ---
 
 ## Invariant I5: Per-merchant webhook ordering
 
-> For any merchant `M`, webhook deliveries for events affecting `M` are attempted in the order those events were emitted. If event `E1` was emitted before event `E2`, the system attempts to deliver `E1`'s webhook before `E2`'s.
+> For any merchant `M`, webhook deliveries are *attempted* in the order their source events occurred.
 
-In English: a merchant sees their webhooks in the order things happened. They will see `transfer.completed(job_42)` before `transfer.completed(job_43)` if `job_42`'s saga finished first.
+In English: a merchant sees their webhooks in the order things happened. `transfer.completed(job_42)` is attempted before `transfer.completed(job_43)` if `job_42` finished first.
 
-**Why it matters.** Merchants build state machines on top of webhooks. If the order is unpredictable, those state machines either become very defensive (treating every webhook as potentially-out-of-order) or break.
+**Why it matters.** Merchants build state machines on webhooks. Unpredictable order forces them to be defensive or breaks them.
 
-**How it's enforced.** The notify stream is partitioned into N shards by `hash(merchant_id) mod N`. Within a shard, the consumer group guarantees that one consumer at a time processes the messages, Redis Streams' consumer-group semantics give us this for free within a shard. All of merchant M's events land on the same shard, so they're delivered serially.
+**How it's enforced.** The outbox relay publishes `transfer.completed`/`transfer.failed` events to the Kafka `notify` topic, keyed by `merchant_id`, in `events.id` order. All of `M`'s events therefore land on one partition, and Kafka's consumer-group protocol assigns each partition to **exactly one live worker at a time**. One partition per merchant + one consumer per partition ⇒ `M`'s deliveries are attempted serially, across any number of replicas. The mechanism and its failover are specified in [`03-SCALING-AND-AVAILABILITY.md`](03-SCALING-AND-AVAILABILITY.md) and [`services/12-WEBHOOK-WORKER.md`](services/12-WEBHOOK-WORKER.md).
 
 **Caveats.**
-- "Attempts to deliver in order" is not "successfully delivers in order." If `E1`'s delivery is failing and getting retried while `E2`'s delivery is queued, `E2` waits for `E1`'s next attempt or DLQ-routing. Per-merchant ordering is preserved at the *attempt* level. This is the right tradeoff because head-of-line blocking is bounded by the retry policy.
-- Different merchants make no ordering promise. Merchant M's events and merchant M''s events are unordered relative to each other.
+- "Attempts in order" is not "succeeds in order." If `E1` is failing and retrying while `E2` is queued, `E2` waits. Ordering is preserved at the *attempt* level; head-of-line blocking is bounded by the retry policy.
+- Different merchants make no ordering promise relative to each other.
 
 **How it's tested.**
-- Integration test: emit 100 events for each of 10 merchants in a known sequence; assert each merchant's webhook endpoint receives them in the same sequence (mock endpoint records arrival order).
-- Adversarial test: same but with one merchant's endpoint slow (3-second delay per request); assert that merchant's order is preserved despite the slowdown, and that other merchants are not affected.
+- Integration test: emit 100 events for each of 10 merchants in a known sequence; assert each merchant's endpoint receives them in that sequence.
+- Adversarial test: one merchant's endpoint is slow (3 s/request); assert its order is preserved and other merchants are unaffected.
+- Failover test: kill the worker owning `M`'s partition mid-stream; assert Kafka reassigns it and the sequence resumes with no reorder.
 
 ---
 
-## Invariant I6: Immutable event history
+## Invariant I6: Immutable history
 
-> Once a row exists in the `events` table, it is never updated and never deleted by any application code, ever, for any reason.
+> Once a row exists in `ledger_entries` or `events`, application code never updates or deletes it. (The relay's single allowed write — stamping `events.published_at` — is an append-only bookkeeping flag, not a rewrite of a fact.)
 
-In English: events are facts. Facts don't change. If a fact is wrong, you record a new fact correcting it. You don't go back and modify history.
+In English: financial postings and business facts are permanent. A wrong fact is corrected by recording a new fact, never by editing the old one.
 
-**Why it matters.** The entire correctness story rests on the event log being trustworthy. If events can be modified or deleted, then the log is no longer evidence of what actually happened, it's just another piece of mutable state that might lie. Reconciliation, audit, and replay all become unreliable.
+**Why it matters.** The whole correctness story rests on these logs being trustworthy evidence. If they can be mutated, they stop being evidence and become just more mutable state that might lie.
 
 **How it's enforced.**
-1. The Postgres role used by application services has `INSERT` and `SELECT` permission on the `events` table, but not `UPDATE` or `DELETE`. A bug that tries to update would fail at the database with a permission error, not silently corrupt history. (DBAs operating with elevated roles can still do anything; this guards against application bugs, not malicious operators.)
-2. Code review enforces the rule: any PR that adds an `UPDATE events ...` or `DELETE FROM events ...` is rejected. The architecture forbids it.
-3. Corrections are new event types: `WalletAdjustment` for manual operator corrections after a reconciliation alert, etc. The new event records what was wrong and the new authoritative state, but the original event remains.
+1. The app Postgres role has `INSERT, SELECT` on `ledger_entries` and `events`, but not `UPDATE`/`DELETE`. A bug that tries to rewrite history fails at the database. (`events.published_at` is `UPDATE`-able only by the separate relay role.)
+2. Code review rejects any `UPDATE`/`DELETE` against these tables.
+3. Corrections are new rows: an operator fixing a discrepancy posts an adjustment transfer and records an `operator.action` event; the original entries remain.
 
 **How it's tested.**
-- Schema test: the migration that creates the role asserts the role lacks `UPDATE` and `DELETE` on `events`.
-- Integration test: attempt to `UPDATE events` from application code; assert it fails.
+- Schema test: assert the app role lacks `UPDATE`/`DELETE` on `ledger_entries` and `events`.
+- Integration test: attempt an `UPDATE events` from app code; assert it fails.
 
-**Why this is harder than it sounds.** Some "obvious" features secretly want to mutate events. "Anonymize PII after 90 days" wants to update events. "Delete a customer's data on GDPR request" wants to delete events. RRQ's answer: those features need a separate system that operates on derived projections, not on the event store. The event store is a sealed log; what you show users and what's in the log are different things.
+**Why this is harder than it sounds.** Some "obvious" features secretly want to mutate history — "anonymize PII after 90 days," "delete a customer on GDPR request." RRQ's answer: those operate on derived projections, not on the immutable logs. What you show users and what's in the log are different things.
 
 ---
 
-## Invariant I7: Saga termination
+## Invariant I7: Job termination
 
-> Every saga that has been started either reaches a terminal state (`Completed`, `Failed`, or `DeadLettered`) within finite time, or is observable as "stuck" via the operational tooling.
+> Every accepted job reaches a terminal state (`completed`, `failed`, or is routed to the DLQ) within bounded time, or is observable as "stuck" via operational tooling.
 
-In English: no saga runs forever invisibly. Either it finishes, or it's clearly stuck and an operator can find it.
+In English: no job runs forever invisibly. Either it finishes, or it's clearly stuck and an operator can find it.
 
-**Why it matters.** A saga that is silently in-flight is invisible to the system: it's not done, not failed, not surfaced for operator attention. In an incident, you can't tell whether a transfer is "still working" or "lost." This invariant says: there is no such ambiguous state.
+**Why it matters.** A silently in-flight job is invisible: not done, not failed, not surfaced. In an incident you can't tell whether a transfer is "still working" or "lost." This invariant says there is no such ambiguous state.
 
-**How it's enforced.**
-- Every saga has a `deadline_at` column on `saga_state`. A saga that exceeds its deadline is logged at WARN, surfaced in the Admin Dashboard's stuck-sagas view, and emits a Prometheus metric.
-- Crashed-worker recovery: `XPENDING` and `XAUTOCLAIM` reassign messages whose worker died, so a saga doesn't sit "in-flight" indefinitely just because the worker holding it crashed.
-- Saga steps that hit retryable errors retry with exponential backoff, but with a bounded total retry duration (typically 5 minutes per step). After that, the step is treated as terminal-failure for the saga.
-- Saga steps that hit terminal errors (validation, permission denied) move the saga immediately to `Failed`, no retry.
+**How it's enforced.** A transfer is one transaction, so the worker's own crash is not a recovery problem — Postgres rolls the transaction back and Kafka redelivers the job; the `UNIQUE (transfer_id, leg)` guard makes the reprocess safe. The genuine failure modes are bounded:
+- A *terminal* error (insufficient balance, frozen/closed wallet, bad currency) commits a `failed` job + `transfer.failed` event immediately — no retry.
+- A *retryable* error (transient DB unavailability) retries with bounded backoff. After the budget is exhausted, the job is a **poison message**: it's written to `dlq_entries` and the Kafka offset is committed, so it leaves the live path and waits for a human (I8).
 
 **How it's tested.**
-- Chaos test: kill the saga worker mid-saga; assert the replacement picks up and the saga reaches a terminal state within the deadline.
-- Stuck-saga test: introduce a permanent error in a saga step (mock the dependency to always fail); assert the saga transitions to `DeadLettered` after retry exhaustion, with the cause recorded.
-
-**Subtle point.** "Within finite time" doesn't mean "within a fixed time budget." A saga can take seconds (Single Transfer) or hours (a hypothetical Chargeback dispute). Each saga type has its own deadline. The invariant is that *some* deadline exists for every saga and that exceeding it is observable.
+- Chaos test: kill the worker mid-post; assert the job is redelivered and reaches a terminal state, with no double posting.
+- Poison-message test: force a job to fail every attempt; assert it lands in `dlq_entries` after the retry budget, with the cause recorded.
 
 ---
 
 ## Invariant I8: DLQ entries are recoverable, not lost
 
-> Every message that exhausts its retry budget in the saga path or webhook path is persisted to the `dlq_entries` table with the original payload, the failure history, and enough context to replay it. No message is silently dropped.
+> Every job or webhook that exhausts its retry budget is persisted to `dlq_entries` with the original payload, the failure history, and enough context to replay it. No message is silently dropped.
 
-In English: when the system gives up on a message, it gives up *visibly*. The DLQ is not a place where things go to die; it's a place where things go to wait for human judgment.
+In English: when the system gives up on a message, it gives up *visibly*. The DLQ is where things wait for human judgment, not where they go to die.
 
-**Why it matters.** Silent message drop is the worst possible failure mode in a payment system: it's the failure mode where money "just disappears" with no trace. A loud failure (DLQ entry, alert, operator paged) is something an engineer can fix. A silent failure is something that surfaces in next quarter's earnings call.
+**Why it matters.** Silent drop is the worst failure mode in a payment system — money "just disappears" with no trace. A loud failure (DLQ row, alert, page) is fixable; a silent one surfaces in next quarter's earnings call.
 
 **How it's enforced.**
-- Saga path: when a saga exceeds its retry budget on a step, the orchestrator writes a row to `dlq_entries` containing the saga_id, the failed step, the error, and the original `JobRequested` payload. Then it ACKs the source stream message (the message is now "owned" by the DLQ table, not the stream).
-- Webhook path: when a webhook delivery exceeds its retry budget, the same, DLQ row first, then ACK.
-- The Admin Dashboard's DLQ replay action re-emits the original payload to the appropriate stream and marks the DLQ row `replayed`. The replayed work has a fresh idempotency key suffix to distinguish it from the original.
+- Ledger path: a job that exhausts its retry budget is written to `dlq_entries` (source `ledger`) with the `job.requested` payload, *then* the Kafka offset is committed — the message is now owned by the DLQ table, not the stream.
+- Webhook path: same shape — DLQ row first, then ACK.
+- The Admin Dashboard's replay re-emits the original payload and marks the row `replayed`. Replayed work re-derives the same deterministic `tf_` id, so a replay that races with a late original cannot double-post.
 
 **How it's tested.**
-- Failure-injection test: send 100 webhooks to an endpoint that always returns 500. After max retries, assert 100 rows exist in `dlq_entries` and the source stream has nothing pending.
-- Replay test: replay a DLQ entry; assert the work executes (against a now-healthy endpoint) and the DLQ row's status flips to `replayed`.
+- Failure-injection: 100 webhooks to an always-500 endpoint; after max retries assert 100 `dlq_entries` rows and no uncommitted offsets.
+- Replay: replay a DLQ entry against a now-healthy path; assert it executes and the row flips to `replayed`.
 
 ---
 
@@ -181,49 +162,39 @@ In English: when the system gives up on a message, it gives up *visibly*. The DL
 
 > No merchant can observe or affect another merchant's data. Every wallet-mutating request is rejected unless the source wallet is owned by the authenticated merchant (`from_wallet.merchant_id = jwt.sub`), and every read returns only rows owned by the authenticated merchant.
 
-In English: a merchant is sealed inside its own data. It cannot transfer *from* a wallet it doesn't own, cannot read another merchant's wallets, ledger, transfers, or webhook history, and cannot even confirm that another merchant's resources exist.
+In English: a merchant is sealed inside its own data. It cannot transfer *from* a wallet it doesn't own, cannot read another merchant's wallets, jobs, ledger, or webhook history, and cannot even confirm another merchant's resources exist.
 
-**Why it matters.** Cross-tenant access is the highest-severity failure in a multi-merchant payment system: one merchant draining or reading another's money. Every other invariant protects value *within* the system's own logic; this one protects the boundary *between* mutually-distrusting tenants. It is the one correctness property whose violation is also a security incident.
+**Why it matters.** Cross-tenant access is the highest-severity failure in a multi-merchant payment system — one merchant draining or reading another's money. It is the one correctness property whose violation is also a security incident.
 
 **How it's enforced.**
-1. The API Gateway authorizes every wallet-mutating request against the JWT's `sub` claim. A `POST /v1/transfers` whose `from_wallet` is not owned by `sub` is rejected with `403 WALLET_NOT_OWNED` before any work is enqueued. Ownership is immutable (a wallet's owner never changes), so the gateway checks it from a short-TTL cache at the edge; the *mutable* wallet state (frozen status, balance) is re-read fresh by the saga's Validate step, not the gateway.
-2. Every read endpoint is scoped to `sub`. A merchant querying another merchant's wallet, job, or ledger receives `404` (not `403`), so the response does not even leak the existence of the resource.
-3. Ownership is a column, not a convention: `wallets.merchant_id` is the authority, checked on the same path that validates the request.
+1. The gateway authorizes every wallet-mutating request against the JWT's `sub`. A `POST /v1/transfers` whose `from_wallet` is not owned by `sub` is rejected with `403 WALLET_NOT_OWNED` before a `jobs` row is written. Ownership is immutable, so the gateway checks it from a short-TTL cache; the *mutable* wallet state (frozen status, balance) is re-read fresh inside the posting transaction.
+2. Every read endpoint is scoped to `sub`. A merchant querying another's job/wallet/ledger gets `404` (not `403`), so the response doesn't even leak existence.
+3. Ownership is a column, not a convention: `wallets.merchant_id` is the authority.
 
 **How it's tested.**
-- Authorization test: merchant A submits a transfer whose `from_wallet` belongs to merchant B; assert `403 WALLET_NOT_OWNED` and that no `JobRequested` event was written.
-- Read-isolation test: merchant A requests merchant B's `job_id`, `wallet_id`, and ledger window; assert `404` for each and that no row belonging to B appears in any list endpoint for A.
-- Property test: a population of merchants issuing random operations; assert no event, ledger entry, or API response ever attributes one merchant's wallet activity to another.
+- Authorization test: merchant A submits a transfer whose `from_wallet` belongs to B; assert `403 WALLET_NOT_OWNED` and no `jobs` row.
+- Read-isolation test: A requests B's `job_id`, `wallet_id`, ledger window; assert `404` for each.
+- Property test: a population of merchants issuing random operations; assert no entry or response ever attributes one merchant's wallet activity to another.
 
-**Subtlety.** Isolation is enforced at the gateway; the workers downstream trust that a `JobRequested` event was authorized when it was accepted. That trust is sound because the gateway is the only writer to the job stream and the only holder of the auth check. Any future path that can write to the job stream (an internal admin tool, a backfill script) must re-establish the same ownership check, or this invariant silently weakens from "enforced" to "assumed."
+**Subtlety.** Isolation is enforced at the gateway; downstream workers trust that a `jobs` row was authorized when written. That trust is sound because the gateway is the only writer of `jobs`. Any future path that can create a job (an internal admin tool, a backfill) must re-establish the same ownership check, or this invariant silently weakens from "enforced" to "assumed."
 
 ---
 
 ## What's not an invariant (and why)
 
-It is worth being explicit about what RRQ does *not* guarantee, to avoid implicit-promise drift.
+Being explicit about non-promises avoids implicit-promise drift.
 
-**Not an invariant: read-your-writes for dashboards.** A merchant submits a transfer at T=0 and queries the dashboard at T=0.5 seconds. The dashboard may not reflect the transfer yet (projection lag). This is intentional. The merchant can poll `GET /v1/jobs/{id}` for strong consistency; dashboards trade strong consistency for query performance and availability.
+**Not an invariant: read-your-writes for dashboards.** A merchant submits at T=0 and queries the dashboard at T=0.5 s; the dashboard may not reflect it yet (projection lag). Intentional — poll `GET /v1/jobs/{id}` for strong consistency; dashboards trade it for query performance.
 
-**Not an invariant: linearizability across merchants.** Two transfers initiated "simultaneously" by different merchants may be ordered differently in the event log than by wall-clock time. The system makes no global ordering promise. Per-wallet and per-merchant ordering are the actual promises (I4, I5).
+**Not an invariant: linearizability across wallets/merchants.** Two transfers on different wallets may be ordered in `ledger_entries` differently than wall-clock time. Per-wallet (I4) and per-merchant (I5) ordering are the actual promises.
 
-**Not an invariant: low latency under load.** RRQ is designed to handle 1,000 TPS sustained on a single machine, but no SLO is defined. Latency degrades gracefully under load (via queue lag, not request failures); request failures only happen if the system is unable to *durably accept* work, not because internal queues are full.
+**Not an invariant: low latency under load.** RRQ sustains its demonstrated throughput (~1,000 TPS on a small cluster, scaling out by adding replicas), but no latency SLO is defined. Under load, latency degrades via queue lag, not request failures; a request fails only if the system cannot *durably accept* it.
 
-**Not an invariant: zero-downtime upgrades.** Rolling deploys are designed for, but a deploy can briefly fail in-flight requests if it coincides with a precise moment in saga lifecycles. Operationally, deploys happen during low-traffic windows and the API gateway's health checks ensure new pods are healthy before old ones are killed. The preStop drain hooks that get a deploy closer to zero-downtime are designed, and Postgres runs a hot standby with automatic failover (CloudNativePG). RRQ still does not claim *true* zero-downtime, because a deploy can briefly fail in-flight requests at a precise saga-lifecycle moment; that timing edge, not the infrastructure, is the limit.
+**Not an invariant: zero-downtime upgrades.** Rolling deploys are designed for, and Postgres runs a hot standby with automatic failover (CloudNativePG), but a deploy can briefly fail in-flight requests at a precise moment. Deploys happen in low-traffic windows; preStop drain hooks get close to zero-downtime; RRQ does not claim *true* zero-downtime.
 
-**Not an invariant: fairness among merchants.** A merchant submitting 10x the load gets 10x the share of worker capacity. Per-merchant fairness is handled only as far as Kong's edge rate limiting goes; the workers themselves do not arbitrate fairness, so a heavy merchant can still crowd the queues.
+**Not an invariant: fairness among merchants.** A merchant submitting 10× the load gets 10× the worker share. Fairness is handled only as far as Kong's edge rate limiting; the workers don't arbitrate it.
 
-These non-invariants are not bugs; they are scope decisions. Each is documented so reviewers know exactly what RRQ promises and exactly what it doesn't.
-
----
-
-## How invariants flow through the rest of the docs
-
-When the service docs (`services/*`) describe a mechanism, they reference invariants by ID. For example:
-
-> "The Saga Worker acquires a Redlock on both wallet IDs before the Debit step. This is what makes I2 (no negative balance) and I4 (per-wallet ordering) hold under concurrent transfers.", from `services/11-SAGA-WORKER.md`
-
-This cross-referencing is deliberate. It means anyone tracing a correctness question can follow it from the invariant statement here, to the mechanism that enforces it, to the test that validates it, and back. The whole doc set forms a directed graph rooted at this file.
+These are scope decisions, not bugs — each documented so reviewers know exactly what RRQ promises and what it doesn't.
 
 ---
 
@@ -235,4 +206,4 @@ This cross-referencing is deliberate. It means anyone tracing a correctness ques
 
 ---
 
-*Pass 1 of the architecture series. Last updated pre-implementation.*
+_Pass 1 of the architecture series. Last updated pre-implementation._

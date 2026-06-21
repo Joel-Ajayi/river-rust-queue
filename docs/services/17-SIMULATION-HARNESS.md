@@ -41,7 +41,7 @@ graph TD
   subgraph rrq["RRQ (the payment core)"]
     api["Public merchant API"]
     admin["Admin API"]
-    core["Saga / ledger / events / webhook worker"]
+    core["Ledger / events / webhook worker"]
   end
 
   operator -->|"onboards merchant, seeds float (one time)"| admin
@@ -118,14 +118,14 @@ Crucially, the receiver has a control knob. It can be told, per scenario, to ret
 
 The driver generates activity so the system looks alive and so load tests have something to measure. Two modes:
 
-- **Steady mode (demo).** A light, in-process loop that posts a few transfers per second between random end-user wallets, with the occasional payout (fan-out to many recipients). Enough that a visitor to the dashboard sees balances moving, sagas completing, and webhooks arriving in real time. This is what makes a deployed demo feel like a running system rather than a screenshot.
-- **Load mode (benchmark).** Heavy load is driven by the existing **k6** scripts in `scripts/`, pointed at the same public API, ramping toward the 1,000 TPS single-machine design target. The simulator's job in this mode is to have provisioned enough wallets and float for k6 to hammer. The numbers go in `benchmarks/`.
+- **Steady mode (demo).** A light, in-process loop that posts a few transfers per second between random end-user wallets, with the occasional payout (fan-out to many recipients). Enough that a visitor to the dashboard sees balances moving, transfers completing, and webhooks arriving in real time. This is what makes a deployed demo feel like a running system rather than a screenshot.
+- **Load mode (benchmark).** Heavy load is driven by the existing **k6** scripts in `scripts/`, pointed at the same public API, ramping toward the demonstrated ~1,000 TPS target on the cluster (a figure the system scales past by adding replicas, not a ceiling). The simulator's job in this mode is to have provisioned enough wallets and float for k6 to hammer. The numbers go in `benchmarks/`.
 
 Keeping demo traffic in-process and load traffic in k6 is deliberate. The in-process loop is simple and always on. k6 is the right tool for measured, repeatable load with latency percentiles, and it is already in the repo.
 
 ### 5. Scenario engine
 
-The scenario engine is the highest-value part for interviews and the cleanest bridge between three things that would otherwise be separate: the dashboard demo buttons, the integration tests, and the failure-mode claims in the other docs.
+The scenario engine is the cleanest bridge between three things that would otherwise be separate: the dashboard demo buttons, the integration tests, and the failure-mode claims in the other docs.
 
 A scenario is a named, scripted sequence that drives RRQ into a specific failure mode and asserts the documented recovery. The same scenario can be triggered three ways: from a dashboard button (manual demo), from `go test` (CI integration test), or from the command line (local check). One implementation, three surfaces.
 
@@ -134,7 +134,7 @@ A scenario is a named, scripted sequence that drives RRQ into a specific failure
 | `retry-storm` | Fire the same idempotency key N times concurrently. | I3, at-most-once per key. | N requests in, one execution, one ledger movement. |
 | `fraud-freeze` | Push one wallet past the velocity threshold. | Fraud auto-freeze, validate-step rejection. | Transfers complete up to the threshold, the wallet freezes, the next transfer is rejected. |
 | `webhook-outage` | Flip the receiver to `500` for a window, then heal. | I5 ordering, breaker, DLQ, drain. | Breaker opens, deliveries queue, breaker closes, the queue drains in order. |
-| `crash-recovery` | Kill a saga worker mid-saga. | I1 conservation, XAUTOCLAIM reclaim. | A surviving worker reclaims the in-flight saga, no money is lost or doubled. |
+| `crash-recovery` | Kill a Ledger Worker mid-posting. | I1 conservation, Kafka consumer rebalance. | The transaction rolls back and a peer reprocesses the job; no money is lost or doubled. |
 | `recon-drift` | Inject a deliberate divergence (dev only). | Reconciliation detection. | The nightly run flags the drift with full context. |
 
 These scenarios are not new test logic invented here. They are the end-to-end realisation of the per-service test plans already written in `12-WEBHOOK-WORKER.md`, `13-FRAUD-WORKER.md`, and the rest. The difference is that here they run against the whole system through the real API, not against one service in isolation.
@@ -144,13 +144,13 @@ sequenceDiagram
     autonumber
     participant Sim as merchant-sim (driver)
     participant API as RRQ API Gateway
-    participant Core as RRQ saga + webhook worker
+    participant Core as RRQ ledger + webhook worker
     participant Recv as merchant-sim (receiver)
 
     Note over Sim,Recv: scenario: webhook-outage
     Sim->>Recv: set receiver mode = 500 for 30s
     Sim->>API: POST /v1/transfers (Jane -> Femi)
-    API->>Core: accept, run saga
+    API->>Core: accept, post transfer
     Core->>Recv: POST webhook (transfer.completed)
     Recv-->>Core: 500
     Note over Core: breaker counts failures, opens, queues deliveries
@@ -167,7 +167,7 @@ sequenceDiagram
 
 You set three bars for done: clone and `make dev` (a local `kind` cluster) shows a live system, a public demo URL anyone can click, and tests that prove the nine invariants. `merchant-sim` is what makes all three real.
 
-- **Clone and run.** `make dev` brings up a local `kind` cluster running RRQ plus `merchant-sim` in steady mode, the same manifests that run in production. Within seconds, the dashboard shows merchants, wallets with moving balances, completing sagas, and arriving webhooks. The system is demonstrably running, not just compiling.
+- **Clone and run.** `make dev` brings up a local `kind` cluster running RRQ plus `merchant-sim` in steady mode, the same manifests that run in production. Within seconds, the dashboard shows merchants, wallets with moving balances, completing transfers, and arriving webhooks. The system is demonstrably running, not just compiling.
 - **Public demo URL.** RRQ, the dashboard, and `merchant-sim` deploy together to the Kubernetes cluster. The simulator runs in steady mode in the background, so a visitor to the dashboard URL sees a live system without doing anything. The demo scenario buttons let them trigger failures and watch recovery.
 - **Invariant proof.** The scenario engine runs in CI and asserts the documented recovery for each failure mode, end to end through the public API. That is the strongest possible evidence that the invariants hold, because it tests the assembled system, not mocked parts.
 
@@ -183,7 +183,7 @@ Restating the boundary as a data-ownership table, because this is the thing to g
 | --- | --- | --- |
 | Merchant record, API key, webhook secret | RRQ | Created via Admin API at bootstrap. |
 | Wallets (operational, customer), balances, ledger | RRQ | The core. `customer` wallets carry `external_ref` only. |
-| Events, sagas, webhook delivery records, DLQ | RRQ | The source of truth. |
+| Events, transfers, ledger entries, webhook delivery records, DLQ | RRQ | The source of truth. |
 | End-user identity (name, id) | `merchant-sim` | RRQ never sees this. |
 | End-user to wallet mapping | `merchant-sim` | One-directional, simulator-only. |
 | "Which transfers I initiated" and "which webhooks I received" | `merchant-sim` | The consumer-side view, used to verify notification completeness and ordering. |
@@ -208,12 +208,6 @@ The simulator is itself tested, separately from the scenarios it drives.
 The scenario tests double as the system's integration suite. They are the reason CI can claim the invariants hold under failure and not just in isolation.
 
 ---
-
-## Language: Go first, Rust as a comparison study
-
-**The system is built in Go.** RRQ's services and `merchant-sim` are built in Go and driven to a deployed, tested, demonstrable state. The Rust implementation is a comparison study, built against the working Go reference, not a parallel effort. Building the system twice before it runs once is the surest way to never ship it. Once the Go system is deployed and the scenarios pass in CI, the Rust port becomes a focused, valuable exercise with a working reference to compare against.
-
-This changes nothing about the architecture. `merchant-sim` talks to RRQ over HTTP, so it is indifferent to whether RRQ is implemented in Go or Rust. When the Rust port exists, the same simulator and the same scenarios run against it unchanged, which is itself part of the comparison.
 
 ---
 
@@ -244,4 +238,4 @@ It sits under `tools/`, not under the service directories, because it is part of
 
 ---
 
-*Pass 6 addition. Builds the outside world that the rest of the docs assumed and that a portfolio system has to provide for itself. Go-first; Rust comparison deferred.*
+*Pass 6 addition. Builds the outside world that the rest of the docs assumed and that a portfolio system has to provide for itself.*

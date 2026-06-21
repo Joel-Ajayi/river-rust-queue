@@ -1,6 +1,6 @@
 # 14: Reconciliation
 
-> **What this is.** The service document for the Reconciliation batch job. Smaller scope than the consumers but architecturally crucial, it's the system's only out-of-band verification that the data is consistent with itself.
+> **What this is.** The service document for the Reconciliation batch job. Smaller scope than the workers but architecturally crucial — it's the system's only out-of-band verification that the ledger is consistent with itself and with the projections derived from it.
 >
 > **Reading time.** ~15 minutes.
 >
@@ -10,108 +10,113 @@
 
 ## What it does
 
-Reconciliation answers one question: **do the ledger entries agree with the event log?**
+Reconciliation answers three questions that the live system should already guarantee but a bug could silently break:
 
-Every saga, when it succeeds, writes two things in the same database transaction: an event to the event log (`DebitApplied`, `CreditApplied`, etc.) and a ledger entry. They should always agree. If they ever don't, the system has a bug, and the bug is the kind that silently loses or creates money. Reconciliation runs nightly on a Kubernetes CronJob, replays the event log for the previous 24 hours, computes derived balances, compares them to the ledger, and emits a `ReconciliationAlert` for any wallet where the two diverge.
+1. **Does value conserve?** Across the whole ledger, every debit has a matching credit — so `SUM(ledger_entries.amount)` over *all* entries must be **exactly zero**, and within each transfer the debit and credit legs must be equal and opposite.
+2. **Are the projections honest?** Each wallet's `wallet_balance_cache` row must equal the balance *derived* from its `ledger_entries`.
+3. **Was an active wallet ever negative?** Replaying a wallet's entries in `id` order, the running balance must never dip below zero while the wallet was active (I2), and each entry's stored `balance_after` must match the running sum.
+
+The Ledger Worker writes both legs of every transfer in one transaction, so by construction these properties hold. Reconciliation exists because "by construction" is a claim about code, and code has bugs. It runs nightly on a Kubernetes CronJob, replays the previous day's activity, and emits a `reconciliation.alert` event for any wallet or transfer that violates the above. **It never corrects** — divergence means a bug, and the failure mode of an incorrect auto-correction is worse than the failure mode of a discrepancy waiting for review.
 
 A few things make this service interesting:
 
-- **It's the only CPU-bound service in the system.** Replaying a million events involves iterating, decoding, accumulating, pure compute. This is where the Go-vs-Rust comparison says something meaningful, because HTTP throughput benchmarks tend to saturate the network before the runtime matters but reconciliation does not.
-- **It's the only service with no real-time pressure.** It runs once a day; if it takes 30 seconds or 5 minutes, the choice doesn't materially affect operations. The runtime is interesting _as a benchmark_, not as an SLO.
-- **It's the system's safety net.** Every other service has subtle ways it could write data inconsistently, a bug in the saga state machine, a transaction that committed events but lost ledger writes, a race during compensation. Reconciliation catches all of these out of band. Without it, those bugs would be invisible until somebody manually noticed.
+- **It's the only CPU-bound service.** Summing and replaying millions of `ledger_entries` is pure compute. This is where performance benchmarks say something meaningful.
+- **It's the only service with no real-time pressure.** Once a day; whether it takes 30 s or 5 minutes barely matters operationally.
+- **It's the safety net.** Without it, a transactional bug that, say, wrote a credit leg with the wrong sign would be invisible until someone noticed money was off.
 
-The service is also small. About 200 lines of code in either language, no consumer loop, no concurrency primitives. The interest is entirely in _what it computes_ and _how it parallelizes the computation_.
+The service is small — about 200 lines, no consumer loop, no concurrency primitives beyond a worker pool. The interest is in *what it computes* and *how it parallelizes*.
 
 ---
 
 ## Inputs, outputs, guarantees
 
 **Inputs**
-
-- Configuration: time window to reconcile (default: previous 24 hours).
-- Events from the `events` table within that window.
-- Current ledger state from `ledger_entries`.
-- Current wallet records from `wallets`.
+- Configuration: the time window to reconcile (default: previous 24 hours, with a safety margin).
+- `ledger_entries`, `transfers`, `wallets`, and `wallet_balance_cache`.
 
 **Outputs**
-
-- A `ReconciliationCompleted` event recording the run.
-- One `ReconciliationAlert` event per wallet that shows divergence.
-- A human-readable report written to stdout (and to a configured file path).
+- A `reconciliation.completed` event recording the run.
+- One `reconciliation.alert` event per wallet or transfer that diverges.
+- A human-readable report to stdout (and a configured file path).
 - Metrics: `reconciliation_run_duration_seconds`, `reconciliation_wallets_checked`, `reconciliation_discrepancies_total`.
 
 **Guarantees**
-
-- **Idempotent.** Running reconciliation twice for the same window produces the same alerts. The events it writes (`ReconciliationCompleted`, `ReconciliationAlert`) are keyed by run_id, but rerunning the same window with a new run_id is safe, alerts are de-duplicated by `(run_id, wallet_id)` at insert.
-- **Read-only over operational data.** Reconciliation does not modify wallets, ledger entries, or saga state. It only writes its own alert events. It cannot break the system; the worst it can do is fail to run.
-- **Complete over the window.** Every wallet that had activity in the window is checked. No sampling, no shortcuts.
+- **Idempotent.** Re-running the same window produces the same alerts (de-duplicated by `(run_id, wallet_id)` at insert).
+- **Read-only over operational data.** It only writes its own alert/completion events. The worst it can do is fail to run.
+- **Complete over the window.** Every wallet with activity in the window is checked. No sampling.
 
 **Non-guarantees**
-
-- **Not real-time.** Discrepancies introduced today may not be detected until tomorrow's run. Faster detection would mean running reconciliation more frequently, or adding inline integrity checks; that is a known tradeoff, not built.
-- **Doesn't fix discrepancies.** If a discrepancy is found, reconciliation only reports it. An operator must investigate and decide what to do. Auto-correction is a deliberate non-feature, the failure mode of an incorrect auto-correction is worse than the failure mode of a discrepancy waiting for review.
+- **Not real-time.** A discrepancy introduced today may not be detected until tomorrow's run.
+- **Doesn't fix discrepancies.** It reports; an operator investigates and decides.
 
 ---
 
 ## The mechanism
 
-### The check, in plain English
+### The checks, in plain English
 
-For a given window `[start, end]`:
+For a window `[start, end - safety_margin]`:
 
-1. For each wallet that had activity in the window: load all events affecting that wallet in chronological order.
-2. Replay the events to derive the wallet's balance at `end`. This is the **event-derived balance**.
-3. Compute the wallet's balance directly from `ledger_entries` (sum of amounts up to `end`). This is the **ledger balance**.
-4. The two numbers should be equal. If they're not, emit a `ReconciliationAlert` with both values and the delta.
+**A. Global conservation (one query, the strongest check).**
+```sql
+SELECT COALESCE(SUM(amount), 0) FROM ledger_entries;   -- must be exactly 0
+```
+Because every transfer writes a `-amount` debit and a `+amount` credit, the entire ledger must sum to zero. A non-zero total means a leg was written without its pair — the single most important number in the system.
 
-The chronological replay matters: a wallet's balance at time T is the sum of all signed amounts in events up to T, applied in order. Out-of-order application would give the wrong answer for any check that depends on intermediate state (e.g., balance must remain ≥ 0 at all times).
+**B. Per-transfer leg balance.** For every transfer that posted in the window, assert exactly one `debit` and one `credit` leg exist with equal magnitude. A missing or mismatched leg is a corruption alert.
 
-In practice, for our event types and our ledger structure, the event-derived balance and the ledger balance are _both_ derived from "sum of signed amounts," so for most wallets the check is just two SUMs that should match. The interesting cases are where they don't, typically because:
+**C. Projection honesty.** For each wallet with activity, compare the **derived balance** (`SUM(ledger_entries.amount)` for the wallet) against its `wallet_balance_cache.balance`. A mismatch means the projector drifted — not a money bug, but a read-path bug worth fixing.
 
-- An event was written but the ledger entry wasn't (a transaction that committed events but the ledger insert was lost, would indicate a transactional bug).
-- A ledger entry exists for a step that produced no event (impossible by design, but worth checking).
-- An amount in an event doesn't match the corresponding ledger entry's amount (would indicate a data-integrity bug in writes).
+**D. Per-wallet replay (ordering + non-negativity).** Replay the wallet's entries in `id` order, accumulating a running balance. Assert each entry's `balance_after` equals the running sum, and that an `active` wallet's running balance never went negative (I2/I4).
+
+The interesting cases are where these fail:
+- A leg written without its pair (check A/B) → a transactional bug in the Ledger Worker.
+- A cache row that doesn't match the derived sum (check C) → a projector bug.
+- A `balance_after` that doesn't match the replay (check D) → a write-path integrity bug.
 
 ### The algorithm in pseudocode
 
 ```
-fn reconcile_window(start: Timestamp, end: Timestamp) -> Report:
+fn reconcile_window(start, end) -> Report:
     run_id = ULID()
-    affected_wallets = SELECT DISTINCT aggregate_id
-                       FROM events
-                       WHERE aggregate_type = 'wallet'
-                         AND occurred_at >= start AND occurred_at < end
+    cutoff = end - safety_margin
 
-    let report = Report::new(run_id, start, end)
+    // A. global conservation
+    total = SELECT COALESCE(SUM(amount),0) FROM ledger_entries WHERE created_at < cutoff
+    if total != 0: report.add_global_discrepancy(total)
 
-    parallel_for wallet_id in affected_wallets:
-        let events = SELECT * FROM events
-                     WHERE aggregate_id = wallet_id
-                       AND occurred_at < end
-                     ORDER BY id ASC
+    affected = SELECT DISTINCT wallet_id FROM ledger_entries
+               WHERE created_at >= start AND created_at < cutoff
 
-        let derived = events.fold(0, |acc, event| acc + signed_amount(event))
+    parallel_for wallet_id in affected:
+        entries = SELECT amount, balance_after FROM ledger_entries
+                  WHERE wallet_id = wallet_id AND created_at < cutoff
+                  ORDER BY id ASC                      // streaming cursor, O(1) memory
 
-        let ledger = SELECT COALESCE(SUM(amount), 0) FROM ledger_entries
-                     WHERE wallet_id = wallet_id
-                       AND created_at < end
+        derived = 0
+        for e in entries:                              // checks D
+            derived += e.amount
+            if e.balance_after != derived: report.add_replay_discrepancy(wallet_id, ...)
 
-        if derived != ledger:
-            report.add_discrepancy(wallet_id, derived, ledger)
+        cached = SELECT balance FROM wallet_balance_cache WHERE wallet_id = wallet_id
+        if derived != cached: report.add_projection_discrepancy(wallet_id, derived, cached)   // check C
 
-    INSERT events (event_type='reconciliation.completed', payload=summary(report))
-    for discrepancy in report.discrepancies:
-        INSERT events (event_type='reconciliation.alert', payload=discrepancy)
+    // B. per-transfer leg balance
+    bad = SELECT transfer_id FROM ledger_entries WHERE created_at < cutoff
+          GROUP BY transfer_id HAVING SUM(amount) != 0 OR COUNT(*) != 2
+    for t in bad: report.add_leg_discrepancy(t)
 
+    INSERT events (reconciliation.completed, summary(report))
+    for d in report.discrepancies: INSERT events (reconciliation.alert, d)
     return report
 ```
 
 A few details:
 
-- **The `parallel_for` is where the runtime comparison lives.** In Rust, `rayon::par_iter()` over the wallets. In Go, a fixed-size worker pool sized to `runtime.NumCPU()`. Both are conceptually doing the same thing, fan out the per-wallet computation across all CPU cores.
-- **Events are ordered by `id`, not `occurred_at`.** The `id` column is a monotonic `BIGSERIAL`; `occurred_at` is a wall-clock timestamp that can drift slightly. For ordering events within a single wallet's history, `id` is authoritative. (See `02-INVARIANTS.md` I4.)
-- **`< end`, not `<= end`.** Half-open intervals avoid double-counting events at the exact boundary if reconciliation runs are themselves chained.
-- **The whole thing is in one read-only Postgres session.** Reconciliation reads a lot of data; it does not need a transaction, just a long-lived connection.
+- **`parallel_for` is where the runtime comparison lives** — a worker pool sized to `runtime.NumCPU()`.
+- **Entries are ordered by `id`, not `created_at`.** `id` is the monotonic `BIGSERIAL`; wall-clock can drift. (See `02-INVARIANTS.md` I4.)
+- **`< cutoff`** applies the safety margin so a transaction that committed right at the boundary is fully visible to every query (see F1).
+- **The whole thing is a read-only Postgres session.** It needs no transaction, just a long-lived connection.
 
 ### The shape of a discrepancy event
 
@@ -122,18 +127,26 @@ A few details:
   "occurred_at": "2026-05-12T01:00:00Z",
   "data": {
     "run_id": "rec_01HQX...",
+    "kind": "projection_drift",
     "wallet_id": "wal_01HQX...",
-    "window_start": "2026-05-11T00:00:00Z",
-    "window_end": "2026-05-12T00:00:00Z",
     "derived_balance": 1500000,
-    "ledger_balance": 1500050,
-    "delta": 50,
-    "delta_explanation": "ledger has 50 more than events explain"
+    "cached_balance": 1500050,
+    "delta": 50
   }
 }
 ```
 
-This event lands in the `events` table like any other, and it's also surfaced in the Admin Dashboard's reconciliation view (recent discrepancies, filterable by time window).
+It lands in the `events` table like any other and is surfaced in the Admin Dashboard's reconciliation view.
+
+---
+
+## Availability and scale-out
+
+Reconciliation is a batch job, but it still obeys the system-wide rule: **the function must not depend on a single pod or node.**
+
+- **Idempotent, so a failed run is just re-run.** A crash mid-run writes no `reconciliation.completed`; the next run redoes the window from scratch and produces the same alerts. No partial state to recover.
+- **≥2 candidates, leader-elected.** The run is guarded by a Postgres advisory lock (`pg_try_advisory_lock`): the CronJob, a manual trigger, and a standby may all be eligible, but exactly one wins and runs while others stand by. `concurrencyPolicy: Forbid` is the same guard at the scheduler level.
+- **Fans out across CPU cores.** With one logical Postgres, a single run replays the window in parallel across cores (the `parallel_for`). Because the ledger is a single logical store, there is **no cross-shard correlation pass** — every transfer's two legs live in the same database, so the conservation check is one global `SUM`. See [`../03-SCALING-AND-AVAILABILITY.md`](../03-SCALING-AND-AVAILABILITY.md).
 
 ---
 
@@ -143,472 +156,226 @@ This event lands in the `events` table like any other, and it's also surfaced in
 flowchart TD
     cron(["CronJob fires 01:00 UTC"]) --> lock{"acquire advisory lock?"}
     lock -->|no| abort["abort: a run is in progress"]
-    lock -->|yes| stream["stream events for the window<br/>(per-wallet cursor, O(1) memory)"]
-    stream --> derive["derive balance per wallet<br/>= SUM(ledger amounts) from events"]
-    derive --> compare{"derived == ledger_entries SUM?"}
+    lock -->|yes| total["SUM(all ledger_entries) == 0 ?"]
+    total --> stream["per wallet: replay ledger_entries (id-ordered, O(1) memory)"]
+    stream --> compare{"derived == cache AND balance_after consistent?"}
     compare -->|match| ok["no discrepancy"]
-    compare -->|diverge| alert["emit ReconciliationAlert<br/>(wallet, derived, ledger, delta)"]
-    ok --> done["emit ReconciliationCompleted, release lock"]
+    compare -->|diverge| alert["emit reconciliation.alert"]
+    ok --> done["emit reconciliation.completed, release lock"]
     alert --> done
 ```
 
-Suppose at 01:00 UTC, the CronJob fires for window `[2026-05-11T00:00:00Z, 2026-05-12T00:00:00Z]`.
+At 01:00 UTC the CronJob fires for window `[2026-05-11, 2026-05-12]`:
 
-1. **Startup.** Reconciliation container starts. Connects to Postgres. Reads configuration.
+1. **Startup.** Connect to Postgres; read config; acquire the advisory lock.
+2. **Global conservation.** `SELECT SUM(amount) FROM ledger_entries` → assert 0.
+3. **Find affected wallets.** `SELECT DISTINCT wallet_id FROM ledger_entries WHERE created_at ∈ window` → say 1,247.
+4. **Fan out.** 8 worker tasks; distribute wallets.
+5. **Per-wallet check.** Each worker derives the balance by replaying entries, checks each `balance_after`, and compares the total to `wallet_balance_cache`.
+6. **Per-transfer legs.** One grouped query flags any transfer whose legs don't sum to zero or aren't a clean pair.
+7. **Write events.** One `reconciliation.completed` with summary stats; one `reconciliation.alert` per discrepancy.
+8. **Report to stdout, exit 0.**
 
-2. **Find affected wallets.**
-
-   ```sql
-   SELECT DISTINCT aggregate_id
-   FROM events
-   WHERE aggregate_type = 'wallet'
-     AND occurred_at >= '2026-05-11T00:00:00Z'
-     AND occurred_at <  '2026-05-12T00:00:00Z'
-   ```
-
-   Returns, say, 1,247 wallet IDs.
-
-3. **Fan out.** Spawn 8 worker tasks (`runtime.NumCPU()`). Distribute the 1,247 wallets across workers as work items.
-
-4. **Per-wallet check.** Each worker, for each wallet assigned to it:
-   - Load all events for the wallet up to window end (`id`-ordered).
-   - Compute derived balance: iterate events, sum signed amounts based on event type (`debit_applied` → negative, `credit_applied` → positive, `debit_reversed` → positive).
-   - Query `SELECT SUM(amount) FROM ledger_entries WHERE wallet_id = $1 AND created_at < $2`.
-   - Compare. If equal, log "OK" and move on. If not equal, append a `Discrepancy` to a thread-safe `Vec`/slice.
-
-5. **Wait for all workers.** Join.
-
-6. **Write reconciliation events.**
-   - One `ReconciliationCompleted` event with summary stats (wallets_checked, discrepancies_found, duration).
-   - One `ReconciliationAlert` event per discrepancy.
-
-7. **Write the human-readable report** to stdout. Format:
-
-   ```
-   Reconciliation run rec_01HQX...
-     window: 2026-05-11T00:00:00Z .. 2026-05-12T00:00:00Z
-     wallets checked: 1247
-     discrepancies:   0
-     duration:        12.4s
-     CPU:             8 cores
-     events scanned:  847,231
-   ```
-
-8. **Exit 0.** CronJob marks the run successful.
-
-For a healthy system, the report has zero discrepancies and the only events written are the `ReconciliationCompleted` record.
+```
+Reconciliation run rec_01HQX...
+  window: 2026-05-11T00:00:00Z .. 2026-05-12T00:00:00Z
+  global conservation:  OK (sum = 0)
+  wallets checked:      1247
+  discrepancies:        0
+  duration:             12.4s   (8 cores, 847,231 entries scanned)
+```
 
 ---
 
 ## What a discrepancy looks like
 
-When a discrepancy is detected, the output looks like:
-
 ```
 Reconciliation run rec_01HQY...
-  window: 2026-05-12T00:00:00Z .. 2026-05-13T00:00:00Z
-  wallets checked: 1283
-  discrepancies:   1
-  duration:        13.1s
+  global conservation:  OK (sum = 0)
+  wallets checked:      1283
+  discrepancies:        1
 
-  DISCREPANCY in wallet wal_01HQZ...
-    derived from events:  1,500,000 kobo (15,000.00 NGN)
-    ledger balance:       1,500,050 kobo (15,000.50 NGN)
-    delta:                +50 kobo (ledger is 50 higher than events explain)
+  DISCREPANCY (projection_drift) in wallet wal_01HQZ...
+    derived from ledger:  1,500,000 kobo (15,000.00 NGN)
+    cached balance:       1,500,050 kobo (15,000.50 NGN)
+    delta:                +50 kobo (cache is 50 higher than the ledger)
 
-    Last 10 events for this wallet:
-      [id=8421] 2026-05-12T14:23:01Z  debit_applied   -50,000  (saga_42)
-      [id=8422] 2026-05-12T14:23:01Z  credit_applied  +50,000  (saga_42)
+    Last 5 ledger entries:
+      [id=8421] 2026-05-12T14:23:01Z  debit  -50,000  (tf_42)
+      [id=8422] 2026-05-12T14:23:01Z  credit +50,000  (tf_43)
       ...
 ```
 
-The output is for operators. The same data is also in the `ReconciliationAlert` event for programmatic consumption.
-
-What would an operator do?
-
-1. Investigate which saga produced the discrepancy. The ledger has an extra 50 kobo, either a credit happened without a corresponding event, or an event existed for a debit that no ledger entry matched.
-2. Query `ledger_entries` directly: which entries exist for this wallet that don't have a corresponding event?
-3. Find the bug. Most likely a recent code change.
-4. Decide whether to manually correct (insert an adjustment event documenting the correction), or revert the bug and let the next reconciliation see whether the issue persists.
-
-The system does _not_ auto-correct. The discrepancy stays in the data until an operator addresses it. Subsequent reconciliations will continue to surface it as long as it exists.
+An operator would: inspect whether it's a *projection* drift (cache wrong, ledger right — re-run the projector for that wallet) or a *ledger* drift (the global `SUM` is non-zero — a far more serious write-path bug). The system does **not** auto-correct; the discrepancy persists until an operator addresses it (typically by fixing the bug and, if needed, posting an adjustment transfer that is itself a normal double-entry movement).
 
 ---
 
 ## Failure walk-throughs
 
-### F1: Reconciliation runs while sagas are in progress at window boundary
+### F1: Reconciliation runs while a transfer commits at the window boundary
+The safety margin handles this. Reconciliation queries up to `end - 60 s`. A posting transaction is atomic, so it is either entirely before the cutoff (both legs visible) or entirely after (neither visible) — there is no torn read of "debit visible, credit not." The 60-second margin is belt-and-suspenders against clock skew between `created_at` values; with posting times in milliseconds it is ample.
 
-The window is `[T1, T2]`. At exactly T2, a saga is in the middle of committing, it has written `DebitApplied` to events but the ledger row hasn't been inserted yet. Reconciliation reads events at T2: includes the DebitApplied. Reads ledger at T2: does not include the matching debit entry. Sees a discrepancy.
+### F2: Postgres reaches its connection limit
+Reconciliation uses a separate Postgres role with a small pool (e.g., 4 connections) shared by the worker tasks, so its long reads can't starve operational queries.
 
-This is a false positive. Mitigation: reconciliation runs with a **safety margin**, querying events and ledger up to `T2 - 60 seconds`. Any saga that committed within the safety margin has had 60 seconds for the transaction to be visible to both queries. With our saga step times measured in milliseconds, 60 seconds is plenty.
-
-The safety margin is a tunable. RRQ uses 60 seconds.
-
-### F2: Postgres reaches connection limit during run
-
-Reconciliation queries are long; if too many run concurrently with operational queries, we could exhaust the connection pool.
-
-Mitigation: reconciliation uses a separate Postgres user with a small connection limit (e.g., 4 connections) for its parallel queries. Even with 8 worker tasks, they share these 4 connections via a small pool. The trade-off: slightly slower reconciliation, but operational queries are protected.
-
-### F3: A wallet has too many events to fit in memory
-
-Theoretical concern. Practical case: a hot wallet with millions of events.
-
-Mitigation: per-wallet event iteration is a streaming cursor, not a `Vec<Event>`. The events are folded into a running sum, one at a time, without keeping the full event list in memory. Memory usage is O(1) per wallet processed.
+### F3: A wallet has too many entries to fit in memory
+Per-wallet iteration is a streaming cursor folded into a running sum, one row at a time — O(1) memory per wallet, regardless of history length.
 
 ### F4: Reconciliation crashes partway through
+No `reconciliation.completed` is written; no alerts are written. Because the run is idempotent, the next run redoes the window from scratch. Restarting is cheap, so no incremental progress is tracked.
 
-If the container crashes (OOM, network issue, whatever) mid-run, the report is incomplete. No `ReconciliationCompleted` event is written; no alerts are written. The next run starts from scratch.
-
-Because reconciliation is idempotent (running it again for the same window produces the same answers), crash recovery is trivial. Just rerun. RRQ doesn't bother with incremental progress because the run is fast enough that restarting is cheap.
-
-### F5: Two reconciliation runs overlap
-
-Possible if a manual run is triggered while the nightly cron is in progress, or if a cron run takes longer than 24 hours.
-
-For the Kubernetes CronJob, `concurrencyPolicy: Forbid` prevents this, the scheduler refuses to start a new run while one is in progress. The requirement is captured in the K8s manifest.
-
-For manual runs triggered from the Admin Dashboard, the run checks an advisory lock in Postgres before starting: `SELECT pg_try_advisory_lock(...)`. If the lock is held, the new run aborts with an error message. Operator can wait or check what's running.
+### F5: Two runs overlap
+`concurrencyPolicy: Forbid` blocks the scheduler; manual runs check `pg_try_advisory_lock` and abort if it's held.
 
 ---
 
 ## Code skeleton (Go reference)
 
-The Go version uses a worker pool sized to `runtime.NumCPU()`.
+A worker pool sized to `runtime.NumCPU()`.
 
 ```go
 // Package recon implements the Reconciliation batch.
 //
 // Invariants verified here:
-//   I1 (conservation of value), I4 (per-wallet ordering),
-//   I6 (immutable history, implicit: only reads are performed on events).
+//   I1 (conservation), I2 (no negative balance), I4 (per-wallet ordering),
+//   I6 (immutable history: only reads are performed on the ledger).
 
 type Runner struct {
-    db             *pgxpool.Pool
-    safetyMarginSec int        // default 60
-    parallelism    int         // default runtime.NumCPU()
-    runID          string
-}
-
-type Discrepancy struct {
-    WalletID       string
-    Derived        int64
-    Ledger         int64
-    Delta          int64
-    LastEvents     []EventSummary  // for the report
+    db              *pgxpool.Pool
+    safetyMarginSec int    // default 60
+    parallelism     int    // default runtime.NumCPU()
+    runID           string
 }
 
 func (r *Runner) Run(ctx context.Context, windowStart, windowEnd time.Time) (*Report, error) {
     r.runID = ulid.New()
-
-    // Apply safety margin to window end.
     cutoff := windowEnd.Add(-time.Duration(r.safetyMarginSec) * time.Second)
 
-    // Acquire advisory lock, prevents concurrent runs.
-    locked, err := r.acquireLock(ctx)
-    if err != nil || !locked {
+    if locked, err := r.acquireLock(ctx); err != nil || !locked {
         return nil, fmt.Errorf("could not acquire reconciliation lock")
     }
     defer r.releaseLock(ctx)
 
-    // Find affected wallets.
-    wallets, err := r.findAffectedWallets(ctx, windowStart, windowEnd)
+    report := &Report{RunID: r.runID, WindowStart: windowStart, WindowEnd: windowEnd}
+
+    // A. global conservation: the whole ledger must net to zero.
+    var total int64
+    if err := r.db.QueryRow(ctx, `
+        SELECT COALESCE(SUM(amount),0) FROM ledger_entries WHERE created_at < $1`,
+        cutoff).Scan(&total); err != nil {
+        return nil, err
+    }
+    if total != 0 {
+        report.Global = &GlobalDiscrepancy{LedgerSum: total}
+    }
+
+    wallets, err := r.findAffectedWallets(ctx, windowStart, cutoff)
     if err != nil {
         return nil, err
     }
+    report.WalletsChecked = len(wallets)
 
-    report := &Report{
-        RunID:           r.runID,
-        WindowStart:     windowStart,
-        WindowEnd:       windowEnd,
-        WalletsChecked:  len(wallets),
-    }
-
-    // Parallel check.
-    var (
-        wg            sync.WaitGroup
-        discrepancies = make(chan Discrepancy, len(wallets))
-        sem           = make(chan struct{}, r.parallelism)
-    )
-
-    for _, walletID := range wallets {
+    // C+D. per-wallet replay and projection check, fanned out across cores.
+    discrepancies := make(chan Discrepancy, len(wallets))
+    sem := make(chan struct{}, r.parallelism)
+    var wg sync.WaitGroup
+    for _, id := range wallets {
         wg.Add(1)
         sem <- struct{}{}
-        go func(walletID string) {
+        go func(id string) {
             defer wg.Done()
             defer func() { <-sem }()
-
-            disc, err := r.checkWallet(ctx, walletID, cutoff)
-            if err != nil {
-                // Log and continue; one wallet failure doesn't fail the run.
-                return
+            if d, _ := r.checkWallet(ctx, id, cutoff); d != nil {
+                discrepancies <- *d
             }
-            if disc != nil {
-                discrepancies <- *disc
-            }
-        }(walletID)
+        }(id)
     }
-
-    go func() {
-        wg.Wait()
-        close(discrepancies)
-    }()
-
+    go func() { wg.Wait(); close(discrepancies) }()
     for d := range discrepancies {
         report.Discrepancies = append(report.Discrepancies, d)
     }
 
-    // Write reconciliation events.
-    if err := r.persistReport(ctx, report); err != nil {
-        return nil, err
-    }
-
-    return report, nil
+    return report, r.persistReport(ctx, report)
 }
 
+// checkWallet replays the wallet's entries (streaming) and compares the
+// derived balance to the cached projection and each stored balance_after.
 func (r *Runner) checkWallet(ctx context.Context, walletID string, cutoff time.Time) (*Discrepancy, error) {
-    derived, err := r.deriveBalance(ctx, walletID, cutoff)
-    if err != nil {
-        return nil, err
-    }
-
-    var ledger int64
-    err = r.db.QueryRow(ctx, `
-        SELECT COALESCE(SUM(amount), 0)
-        FROM ledger_entries
-        WHERE wallet_id = $1 AND created_at < $2
-    `, walletID, cutoff).Scan(&ledger)
-    if err != nil {
-        return nil, err
-    }
-
-    if derived == ledger {
-        return nil, nil  // OK
-    }
-
-    // Diverged. Build discrepancy with context.
-    lastEvents, _ := r.lastNEvents(ctx, walletID, cutoff, 10)
-
-    return &Discrepancy{
-        WalletID:   walletID,
-        Derived:    derived,
-        Ledger:     ledger,
-        Delta:      ledger - derived,
-        LastEvents: lastEvents,
-    }, nil
-}
-
-func (r *Runner) deriveBalance(ctx context.Context, walletID string, cutoff time.Time) (int64, error) {
     rows, err := r.db.Query(ctx, `
-        SELECT event_type, payload
-        FROM events
-        WHERE aggregate_type = 'wallet'
-          AND aggregate_id = $1
-          AND occurred_at < $2
-        ORDER BY id ASC
-    `, walletID, cutoff)
+        SELECT amount, balance_after FROM ledger_entries
+        WHERE wallet_id = $1 AND created_at < $2 ORDER BY id ASC`, walletID, cutoff)
     if err != nil {
-        return 0, err
+        return nil, err
     }
     defer rows.Close()
 
-    var balance int64 = 0
+    var derived int64
     for rows.Next() {
-        var eventType string
-        var payload []byte
-        if err := rows.Scan(&eventType, &payload); err != nil {
-            return 0, err
+        var amount, balanceAfter int64
+        if err := rows.Scan(&amount, &balanceAfter); err != nil {
+            return nil, err
         }
-
-        amount := signedAmount(eventType, payload)
-        balance += amount
+        derived += amount
+        if balanceAfter != derived {
+            return &Discrepancy{Kind: "balance_after", WalletID: walletID,
+                Derived: derived, Stored: balanceAfter}, nil
+        }
     }
 
-    return balance, rows.Err()
-}
-
-func signedAmount(eventType string, payload []byte) int64 {
-    switch eventType {
-    case "ledger.debit_applied":
-        var e events.DebitApplied
-        proto.Unmarshal(payload, &e)
-        return -e.Amount
-    case "ledger.credit_applied":
-        var e events.CreditApplied
-        proto.Unmarshal(payload, &e)
-        return +e.Amount
-    case "ledger.debit_reversed":
-        var e events.DebitReversed
-        proto.Unmarshal(payload, &e)
-        return +e.Amount
-    default:
-        return 0  // Other event types don't affect balance.
+    var cached int64
+    if err := r.db.QueryRow(ctx,
+        `SELECT balance FROM wallet_balance_cache WHERE wallet_id = $1`,
+        walletID).Scan(&cached); err != nil {
+        return nil, err
     }
+    if derived != cached {
+        return &Discrepancy{Kind: "projection_drift", WalletID: walletID,
+            Derived: derived, Cached: cached, Delta: cached - derived}, nil
+    }
+    return nil, nil
 }
 ```
 
-A note on streaming the events: the `rows.Next()` loop processes one event at a time. For a wallet with a million events, this never holds more than one event in memory. Critical for memory bounded-ness.
-
----
-
-## Code skeleton (Rust reference)
-
-The Rust version uses `rayon` for parallel iteration:
-
-```rust
-//! Reconciliation batch.
-//!
-//! Verifies invariants I1 and I4 are preserved across the database.
-
-use rayon::prelude::*;
-use sqlx::PgPool;
-
-pub struct Runner {
-    db: PgPool,
-    safety_margin: Duration,
-    parallelism: usize,
-}
-
-impl Runner {
-    pub async fn run(&self, window_start: DateTime<Utc>, window_end: DateTime<Utc>) -> Result<Report> {
-        let run_id = Ulid::new().to_string();
-        let cutoff = window_end - chrono::Duration::from_std(self.safety_margin)?;
-
-        // Advisory lock, prevents concurrent runs.
-        let _lock = self.acquire_lock().await?;
-
-        let wallets = self.find_affected_wallets(window_start, window_end).await?;
-
-        // Convert wallets to a Vec; rayon needs that interface.
-        // For each wallet, we'll spawn a blocking task to do the per-wallet check
-        // because we want to use rayon's parallelism, which operates on a thread pool.
-        // The async runtime handles dispatching the blocking work.
-
-        let discrepancies: Vec<Discrepancy> = tokio::task::spawn_blocking({
-            let db = self.db.clone();
-            let wallets = wallets.clone();
-            move || {
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(self.parallelism)
-                    .build()
-                    .unwrap()
-                    .install(|| {
-                        wallets
-                            .par_iter()
-                            .filter_map(|wallet_id| {
-                                // Each thread blocks on its own queries.
-                                // For Rust, we use a sync sqlx connection per thread,
-                                // or push the async into a small runtime per thread.
-                                // Implementation detail, abbreviated here.
-                                check_wallet_sync(&db, wallet_id, cutoff).ok().flatten()
-                            })
-                            .collect()
-                    })
-            }
-        }).await?;
-
-        let report = Report {
-            run_id,
-            window_start,
-            window_end,
-            wallets_checked: wallets.len(),
-            discrepancies,
-        };
-
-        self.persist_report(&report).await?;
-        Ok(report)
-    }
-}
-
-fn check_wallet_sync(db: &PgPool, wallet_id: &str, cutoff: DateTime<Utc>) -> Result<Option<Discrepancy>> {
-    let derived = derive_balance(db, wallet_id, cutoff)?;
-    let ledger = ledger_balance(db, wallet_id, cutoff)?;
-
-    if derived == ledger {
-        return Ok(None);
-    }
-
-    let last_events = last_n_events(db, wallet_id, cutoff, 10)?;
-
-    Ok(Some(Discrepancy {
-        wallet_id: wallet_id.to_string(),
-        derived,
-        ledger,
-        delta: ledger - derived,
-        last_events,
-    }))
-}
-
-fn derive_balance(db: &PgPool, wallet_id: &str, cutoff: DateTime<Utc>) -> Result<i64> {
-    // Streaming query equivalent. In sqlx, fetch_many() or a cursor pattern.
-    // Iterate, accumulate, return total.
-    let mut balance: i64 = 0;
-    let mut cursor = db.fetch_events_streaming(wallet_id, cutoff)?;
-    while let Some(event) = cursor.next()? {
-        balance += signed_amount(&event)?;
-    }
-    Ok(balance)
-}
-```
-
-**The Rust-Go runtime difference for this service.** Both spawn many parallel tasks; both make many database queries; the work is roughly the same. The interesting comparisons:
-
-- **Allocation pattern.** Rust's `par_iter()` allocates the result Vec once; Go's goroutine-with-channels pattern allocates a closure per spawn. For a million wallets, the allocation cost adds up.
-- **GC pressure.** Go's GC handles short-lived per-goroutine allocations well, but a high-throughput batch like this can push it into more frequent collections. The p99 latency of individual wallet checks may show GC pause spikes in Go but not Rust.
-- **Parallelism efficiency.** Rayon's work-stealing scheduler tends to keep all cores at 100% utilization better than a fixed-size Go worker pool. For embarrassingly parallel work like this, Rayon wins by a measurable margin.
-
-This is exactly the benchmark scenario where the comparison says something. The reconciliation benchmark scenario is specifically this run, measured.
+Streaming via `rows.Next()` keeps memory O(1) even for a wallet with a million entries.
 
 ---
 
 ## Test plan
 
-### Validates I1 (conservation of value)
+### Validates I1 (conservation)
+- **`TestReconciliation_GlobalSumIsZero`** — seed 1,000 valid transfers; assert `SUM(ledger_entries.amount) = 0` and zero alerts.
+- **`TestReconciliation_DetectsUnpairedLeg`** — inject a single credit leg with no debit; assert the global sum alert fires.
+- **`TestReconciliation_DetectsLegMismatch`** — inject a transfer whose legs have unequal magnitude; assert a per-transfer alert.
 
-- **`TestReconciliation_FindsKnownDiscrepancy`**, manually insert a ledger entry without a matching event; run reconciliation; assert exactly one alert for that wallet.
-- **`TestReconciliation_FindsKnownEventWithoutLedger`**, manually insert an event without a matching ledger entry; assert alert.
-- **`TestReconciliation_HealthySystemHasNoAlerts`**, seed 1000 valid transfers; run reconciliation; assert zero alerts.
+### Validates projection honesty (C) and replay (D)
+- **`TestReconciliation_DetectsProjectionDrift`** — corrupt one `wallet_balance_cache` row; assert a `projection_drift` alert for that wallet.
+- **`TestReconciliation_DetectsBadBalanceAfter`** — corrupt one `balance_after`; assert a `balance_after` alert.
 
-### Validates idempotency
+### Validates idempotency / concurrency
+- **`TestReconciliation_RerunSameWindow`** — run twice; assert identical alerts.
+- **`TestReconciliation_ParallelRunsBlocked`** — start two runs; assert the second aborts on the advisory lock.
 
-- **`TestReconciliation_RerunSameWindow`**, run reconciliation; run again with same window (new run_id); assert second run produces the same alerts as the first.
-- **`TestReconciliation_ParallelRunsBlocked`**, try to start two reconciliation runs concurrently; assert second one aborts on advisory lock.
-
-### Validates safety margin
-
-- **`TestReconciliation_SafetyMarginAvoidsBoundaryFalsePositive`**, start a saga right at window end; finish it inside the safety margin; assert no false positive (the saga's effects are entirely outside the cutoff).
-
-### Validates correctness at scale
-
-- **`TestReconciliation_LargeDataset`**, seed 100,000 events across 1,000 wallets; run reconciliation; assert correctness and measure duration. Used as a smoke test, not a benchmark.
-
-### Benchmarks (scenario F)
-
-Run as part of `make bench`:
-
-- Seed 1,000,000 events across 10,000 wallets with known correctness.
-- Time reconciliation for the Go implementation (and for the Rust comparison implementation once the Rust comparison is built).
-- Report: total duration, CPU utilization, peak memory, events scanned per second.
-
-The benchmark is the published comparison number for the reconciliation service.
+### Validates safety margin and scale
+- **`TestReconciliation_BoundaryNoFalsePositive`** — a transfer committing right at the window end is fully in or out of the cutoff; assert no false positive.
+- **Benchmark (scenario F):** seed 1,000,000 entries across 10,000 wallets; time the run; report duration, CPU utilization, peak memory, entries/sec. This is the published performance number.
 
 ---
 
 ## What this service depends on
 
-- **Postgres**, heavy reads. Events, ledger_entries, wallets.
-- **Kubernetes CronJob** (or simple cron container), schedules the run.
+- **Postgres** — heavy reads of `ledger_entries`, `transfers`, `wallets`, `wallet_balance_cache`.
+- **Kubernetes CronJob** (or a cron container) — schedules the run.
 
 ## What depends on this service
 
-- **Operators**, read the report, investigate alerts, decide actions.
-- **Monitoring**, `reconciliation_discrepancies_total` is the most important business-level metric in the system.
+- **Operators** — read the report, investigate alerts, decide actions.
+- **Monitoring** — `reconciliation_discrepancies_total` is the most important business-level metric in the system.
 
 ---
 
 ## Where to read next
 
+- How reconciliation stays HA → [`../03-SCALING-AND-AVAILABILITY.md`](../03-SCALING-AND-AVAILABILITY.md)
 - The operator tooling that surfaces alerts → [`15-ADMIN-DASHBOARD.md`](15-ADMIN-DASHBOARD.md)
 
 ---

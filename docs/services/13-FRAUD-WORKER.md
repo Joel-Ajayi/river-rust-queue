@@ -1,22 +1,22 @@
 # 13: Fraud Worker
 
-> **What this is.** The service document for the Fraud Worker. The technically most interesting service in RRQ because of the per-key ordering problem at its center, solving it correctly is one of the project's signature talking points.
+> **What this is.** The service document for the Fraud Worker. The interesting twist: it *looks* like a per-wallet ordering problem, and the original design treated it as one — but the velocity computation is order-insensitive, so the real lesson is recognizing when a guarantee you assumed you needed isn't required at all. That recognition is what lets the worker scale to ≥2 replicas the easy way.
 >
 > **Reading time.** ~20 minutes.
 >
-> **Prerequisites.** Read [`11-SAGA-WORKER.md`](11-SAGA-WORKER.md). The fraud worker joins `stream:jobs` with an independent `fraud-workers` consumer group, the same stream the API Gateway populates and the saga worker consumes.
+> **Prerequisites.** Read [`11-LEDGER-WORKER.md`](11-LEDGER-WORKER.md). The fraud worker joins the Kafka `jobs` topic with an independent `fraud-workers` consumer group — the same topic the outbox relay populates and the Ledger Worker consumes.
 
 ---
 
 ## What it does
 
-The Fraud Worker is a **detective control**, not a preventative one. It watches the stream of transfer requests and looks for patterns that suggest abuse, primarily velocity, the pattern where one wallet originates many transfers in a short window. When a threshold is exceeded, it freezes the offending wallet automatically. An operator can then investigate, decide whether the activity is legitimate, and unfreeze.
+The Fraud Worker is a **detective control**, not a preventative one. It watches the topic of transfer requests and looks for patterns that suggest abuse, primarily velocity, the pattern where one wallet originates many transfers in a short window. When a threshold is exceeded, it freezes the offending wallet automatically. An operator can then investigate, decide whether the activity is legitimate, and unfreeze.
 
-The word "detective" matters. The fraud worker does not gate transfers, it reads the same `JobRequested` events from `stream:jobs` as the saga worker (via the independent `fraud-workers` consumer group) and scores requests without blocking them. A preventative fraud system would sit in the request path, scoring each transfer before allowing it to proceed; that's a much harder system (latency-critical, needs synchronous model evaluation) and is deliberately out of scope. Reading `JobRequested` rather than completed-transfer events means the velocity count includes all attempts, even those that later fail validation, which is actually a stronger fraud signal.
+The word "detective" matters. The fraud worker does not gate transfers, it reads the same `job.requested` events from the Kafka `jobs` topic as the Ledger Worker (via the independent `fraud-workers` consumer group) and scores requests without blocking them. A preventative fraud system would sit in the request path, scoring each transfer before allowing it to proceed; that's a much harder system (latency-critical, needs synchronous model evaluation) and is deliberately out of scope. Reading `JobRequested` rather than completed-transfer events means the velocity count includes all attempts, even those that later fail validation, which is actually a stronger fraud signal.
 
-What the fraud worker _does_ solve is the technically interesting part: **per-wallet event ordering under horizontal scaling**. Velocity is a stateful computation over a stream of events for a specific wallet. The events must be processed in order, out-of-order processing produces incorrect counts and false signals. But the system has many wallets, and we want to process different wallets in parallel for throughput. The reconciliation between "per-wallet ordering" and "horizontal parallelism" is the design problem at the heart of this service.
+The technically interesting part is what the fraud worker *doesn't* need. Velocity looks like a per-wallet ordering problem: it's a stateful count over a stream of events for one wallet, and "stateful + per-key" usually screams "process them in order." But the velocity window lives in a **shared Redis sorted set mutated by an atomic Lua script**, so two events for the same wallet processed concurrently — even on two different worker replicas — produce the same final set and the same count, in any order. The count is order-insensitive. So the worker needs **no per-wallet ordering guarantee at all**, which means it scales the easy way: ≥2 replicas in an ordinary consumer group, load-balancing the Kafka `jobs` topic freely. Recognizing that the hard-looking guarantee isn't required is the actual design insight.
 
-The Webhook Worker solves a similar problem with stream partitioning (16 shards by merchant*id). The Fraud Worker could \_not* use the same approach because the cardinality of wallets is much higher than merchants (a merchant has many wallets), and even with high partition count, the load distribution across partitions would be highly uneven, a hot wallet would hash to a single partition and bottleneck its consumer. So the Fraud Worker uses a different mechanism: **two-level dispatch with lazy per-wallet tasks**.
+The Webhook Worker *does* need per-merchant ordering, and pays for it with Kafka partitions (where Kafka ensures exactly one live consumer per partition, see [`12-WEBHOOK-WORKER.md`](12-WEBHOOK-WORKER.md)). The Fraud Worker deliberately does *not* go there: wallet cardinality is far higher than merchant cardinality and load is far more skewed, so wallet-sharded ownership would be costly — and, since the count needs no ordering, pointless. Instead the worker keeps a **two-level dispatch with lazy per-wallet tasks** purely as a *throughput optimization*: batching a wallet's events onto one in-process task cuts Redis round-trips and contention on the hot keys. It is not a correctness mechanism, and nothing breaks if two replicas both touch the same wallet — they funnel into the same atomic Redis state.
 
 ---
 
@@ -24,7 +24,7 @@ The Webhook Worker solves a similar problem with stream partitioning (16 shards 
 
 **Inputs**
 
-- `JobRequested` events from `stream:jobs`, consumed by the `fraud-workers` consumer group. The fraud worker joins the same job stream as the saga worker but as a _different_ consumer group, both groups receive every message independently. Non-transfer job types (e.g. bulk payout orchestration messages) are filtered out by the dispatcher.
+- `job.requested` events from the Kafka `jobs` topic, consumed by the `fraud-workers` consumer group. The fraud worker joins the same job topic as the Ledger Worker but as a _different_ consumer group, so both groups receive every message independently. Non-transfer job types are filtered out by the dispatcher.
 - Wallet status from Postgres (to check whether a wallet is already frozen).
 
 **Outputs**
@@ -37,35 +37,37 @@ The Webhook Worker solves a similar problem with stream partitioning (16 shards 
 
 **Guarantees**
 
-- **Per-wallet event ordering**: events for wallet W are processed in their order of arrival on the stream. (Required for correctness of stateful detection.)
-- **At-least-once processing**: a crash before ACK results in redelivery and reprocessing. Velocity state in Redis is keyed by event_id, so duplicate processing of the same event doesn't double-count.
-- **No false negatives within the threshold**: if N transfers occur for wallet W within window T, the system observes them in order and trips the threshold exactly when N is reached.
+- **Correct velocity counts regardless of order**: because the window is a shared Redis sorted set updated by an atomic script (keyed by `event_id`), concurrent or out-of-order processing of a wallet's events — across any number of replicas — yields the same count. Per-wallet ordering is *not* required and *not* claimed.
+- **At-least-once processing**: a crash before commit results in redelivery and reprocessing. Velocity state in Redis is keyed by event_id, so duplicate processing of the same event doesn't double-count.
+- **No false negatives within the threshold**: if N transfers occur for wallet W within window T, the system observes all N (in any order) and trips the threshold exactly when the count reaches N.
 
 **Non-guarantees**
 
 - **No false positives prevention**. Legitimate high-velocity activity (a payment processor with many recipients) will trip the threshold and freeze the wallet. The system errs on the side of false positive (freeze + investigate) rather than false negative (let fraud through). Operators unfreeze legitimate wallets after review.
-- **No global event ordering**. Events for wallet W1 and wallet W2 may be processed in either order; only per-wallet ordering matters.
+- **No event ordering of any kind**. Events for different wallets, and even events for the *same* wallet, may be processed in any order; the count is order-insensitive, so none of it matters.
 - **No detection of preventative fraud signals**. Out of scope; this is a post-hoc detection only.
 
 ---
 
 ## The mechanism
 
-### Why partitioning doesn't work here, and why lazy per-wallet tasks do
+### Why ordering isn't required here, and what the dispatch is actually for
 
-To understand the design, see why the simpler approaches break:
+Start from the thing that makes this service unusual: **the velocity count does not depend on order.** The window is a Redis sorted set updated by an atomic Lua script (`ZADD` keyed by `event_id`, trim, `ZCARD`); processing a wallet's events in any order, on any replica, yields the same membership and the same count. So unlike the webhook worker, the fraud worker has no ordering guarantee to protect. That frees it to scale the easy way, and it changes what the in-process dispatch is *for*.
 
-**Approach 1: single consumer.** One consumer, processes all events serially in order. Trivially correct for ordering. Problem: throughput bounded by one consumer. Doesn't scale.
+Walking the options with that in mind:
 
-**Approach 2: consumer group with N consumers, no partitioning.** Multiple consumers pull from the same stream and balance load. Throughput scales. Problem: ordering destroyed, two events for wallet W1 can be processed by two different consumers concurrently, and the second one might run first.
+**Single consumer.** Serial, simple. Problem: throughput bounded by one consumer. (Ordering is a non-issue, so this buys nothing the others don't.)
 
-**Approach 3: stream partitioned by wallet_id (like webhooks).** Each shard owns a subset of wallets. Within a shard, events for the same wallet are serial. Problem: wallet cardinality is high (thousands or millions of wallets per merchant) and _load_ per wallet is highly skewed. A merchant's main funding wallet might generate 1000 events/sec while most wallets generate one event per day. Hashing wallets to shards distributes the _number_ of wallets evenly but distributes the _load_ unevenly, the shard with the hot wallet becomes the bottleneck. Adding more shards doesn't help because the hot wallet still hashes to one shard.
+**Consumer group, N replicas, no partitioning.** Throughput scales; a wallet's events may be processed concurrently by different replicas. For a system that needed per-wallet order this would be fatal, but here it's *fine*, because the shared atomic Redis state is the single writer, not any process. **This is the baseline the fraud worker uses.**
 
-**Approach 4 (chosen): two-level dispatch.** Outer consumer reads any event from the stream. For each event, look at its `wallet_id` and route it to an in-process channel/queue dedicated to that wallet. A goroutine/task per wallet drains its channel serially.
+**Stream partitioned by wallet, with exclusive ownership.** This is what you'd build if you *did* need per-wallet ordering. It's avoided here for two reasons: wallet cardinality and load skew are far worse than merchants (a hot funding wallet does 1000 events/sec while most do one a week), making per-wallet shard ownership costly, and, since the count needs no ordering, it would be cost for nothing. (If a *future* rule needs true per-wallet sequencing, this is the mechanism it would adopt.)
+
+**Two-level dispatch (kept, as an optimization).** On top of the plain consumer group, each worker routes events to an in-process per-wallet task. This is *not* for ordering; it's a throughput optimization, batching a wallet's events onto one task to cut Redis round-trips and contention on hot keys.
 
 ```mermaid
 graph TD
-    stream["Redis Streams<br/>stream:jobs"] --> outer["Outer Consumer<br/>XREADGROUP, inspect event.wallet_id"]
+    stream["Kafka Topic<br/>jobs"] --> outer["Outer Consumer<br/>Poll Kafka, inspect event.wallet_id"]
     outer --> dispatcher["Dispatcher<br/>wallet_id -> channel"]
     dispatcher --> w1["Wallet task W1"]
     dispatcher --> w2["Wallet task W2"]
@@ -81,15 +83,15 @@ graph TD
     stateHub --> pg["Postgres wallets, events"]
 ```
 
-Properties:
+Properties (note: these are *throughput* properties, not correctness ones):
 
-- **Per-wallet ordering preserved** because each wallet has exactly one task draining its channel. The task is single-threaded with respect to that wallet.
+- **Per-wallet work is batched onto one in-process task**, which reduces Redis round-trips and contention on a hot wallet's keys. Within one process the task happens to process that wallet serially, but that's a side effect of the batching, not a guarantee the system relies on, correctness comes from the atomic Redis script, and two replicas may both hold a task for the same wallet.
 - **Parallelism across wallets** because different wallets have different tasks running concurrently.
-- **No advance configuration of wallet→shard mapping**. Tasks are spawned lazily when a wallet's first event arrives. No pre-allocation; no surprise when a new wallet appears.
-- **Load follows demand**. A hot wallet's task is constantly busy; a cold wallet's task spends most of its time idle. Idle tasks exit after a timeout to reclaim memory.
-- **Outer consumer never blocks**. The dispatch is a non-blocking channel send. If a per-wallet channel is full (slow processing for that wallet), the outer consumer may block briefly, that's intentional backpressure on that wallet specifically.
+- **No advance configuration of wallet→shard mapping**. Tasks are spawned lazily on a wallet's first event. No pre-allocation; no surprise when a new wallet appears.
+- **Load follows demand**. A hot wallet's task is busy; a cold wallet's idles and exits after a timeout to reclaim memory.
+- **Outer consumer applies backpressure per wallet**. The dispatch is a channel send; if a per-wallet channel is full, the outer consumer blocks briefly, throttling that wallet specifically.
 
-The pattern has a name in the literature: **"actor per key"** or **"single-writer principle"**. It shows up in payment systems, financial engines, and game servers, anywhere per-entity state needs to be mutated by a single concurrent unit.
+The pattern resembles **"actor per key"** from actor systems, but with an important difference: here it's an in-process performance optimization layered over shared atomic state, *not* the single-writer-of-record. The real single writer for a wallet's velocity is the atomic Redis script, which is exactly why the optimization can safely run on every replica at once.
 
 ### The lifecycle of a per-wallet task
 
@@ -113,7 +115,7 @@ sequenceDiagram
     end
 
     D->>T: send event to W's chan
-    OC->>OC: continue (returns to XREADGROUP)
+    OC->>OC: continue (returns to Kafka poll)
 
     Note over T: task processes event:
     T->>R: ZADD velocity:W <timestamp> <event_id>
@@ -143,25 +145,25 @@ Three things to notice:
 
 - **The task is spawned on first event for that wallet, not pre-allocated.** Avoids a static configuration of "max wallets" and lets the system scale to whatever cardinality the workload produces.
 - **The task exits after idle.** A wallet that hasn't been active for 5 minutes has its task cleaned up. If a new event arrives later, a fresh task is spawned. This bounds memory at any point in time to "number of currently-active wallets."
-- **The outer consumer's ACK is independent of the task's processing.** When does the outer consumer ACK? See the next subsection, this is the subtle part.
+- **The outer consumer's commit is independent of the task's processing.** When does the outer consumer commit? See the next subsection, this is the subtle part.
 
-### The ACK question
+### The commit question
 
-When the outer consumer receives an event and dispatches it to a per-wallet channel, _when_ should it ACK the stream message?
+When the outer consumer receives an event and dispatches it to a per-wallet channel, _when_ should it commit the Kafka offset?
 
 Three options:
 
-**Option A: ACK immediately after dispatch (before the per-wallet task processes).**
+**Option A: commit immediately after dispatch (before the per-wallet task processes).**
 
 - Pro: simple, doesn't block the outer consumer.
-- Con: if the worker crashes after ACK but before the task processed, the event is lost. The next worker won't get a redelivery (it was ACKed). Reconciliation might catch missed fraud events on its nightly run, but in the meantime, fraud goes undetected.
+- Con: if the worker crashes after commit but before the task processed, the event is lost. The next worker won't get a redelivery (it was commited). Reconciliation might catch missed fraud events on its nightly run, but in the meantime, fraud goes undetected.
 
-**Option B: ACK only after the per-wallet task confirms processing.**
+**Option B: commit only after the per-wallet task confirms processing.**
 
-- Pro: durability, events are only ACKed when processed.
+- Pro: durability, events are only commited when processed.
 - Con: the outer consumer has to wait. If the per-wallet task is slow, the outer consumer blocks. Throughput limited. Also complicates the code significantly, you need a back-channel from task to dispatcher.
 
-**Option C: ACK immediately, accept that a worker crash can lose in-flight events, document the limitation.**
+**Option C: commit immediately, accept that a worker crash can lose in-flight events, document the limitation.**
 
 - The choice RRQ makes.
 
@@ -208,14 +210,14 @@ Additional rules could include "100 transfers in 10 minutes" or "sudden geograph
 
 A wallet `wal_X` has been very active recently. Its 50th transfer in 60 seconds completes.
 
-1. **API Gateway emits.** A transfer request from `wal_X` arrives; the API Gateway writes a `JobRequested` event to `stream:jobs`. The event embeds `job_id`, `merchant_id`, and the transfer payload including `from_wallet: wal_X`.
+1. **API Gateway emits.** A transfer request from `wal_X` arrives; the API Gateway produces a `JobRequested` event to the Kafka `jobs` topic. The event embeds `job_id`, `merchant_id`, and the transfer payload including `from_wallet: wal_X`.
 
-2. **Outer consumer reads.** Fraud worker's outer consumer task calls `XREADGROUP fraud-workers <consumer-id> COUNT 10 BLOCK 2000 STREAMS stream:jobs >`. Receives the event.
+2. **Outer consumer reads.** Fraud worker's outer consumer task polls the Kafka `jobs` topic. Receives the event.
 
 3. **Dispatch.** Outer consumer inspects the event's wallet_id (`wal_X`). Looks up `wal_X` in its in-process dispatcher map.
    - If a channel exists for `wal_X`: send the event to it.
    - If not: create a new channel, spawn a goroutine/task to drain it, register it in the map, send the event.
-4. **ACK.** Outer consumer XACKs the message. Done with this event.
+4. **Commit.** Outer consumer commits the Kafka offset. Done with this event.
 
 5. **Per-wallet task processes.** The task for `wal_X` receives the event. It computes:
 
@@ -247,7 +249,7 @@ A wallet `wal_X` has been very active recently. Its 50th transfer in 60 seconds 
 
 9. **Emit metric.** `wallet_frozen_total{reason='velocity'}` increments.
 
-The next time anyone tries to submit a transfer from `wal_X`, the Saga Worker's `Validate` step sees `status=frozen` and rejects the transfer with `FAILURE_REASON_WALLET_FROZEN`. The downstream cascade (transfer fails, merchant webhook fires) follows naturally.
+The next time anyone tries to submit a transfer from `wal_X`, the Ledger Worker's posting transaction reads `status=frozen` under the wallet's row lock and rejects the transfer with `WALLET_FROZEN`. The downstream cascade (transfer fails, merchant webhook fires) follows naturally.
 
 10. **Task continues.** The per-wallet task returns to `select`/`recv` on its channel, waiting for the next event for `wal_X`.
 
@@ -255,15 +257,15 @@ The next time anyone tries to submit a transfer from `wal_X`, the Saga Worker's 
 
 ## Failure walk-throughs
 
-### F1: Worker crashes after ACK but before per-wallet task processed
+### F1: Worker crashes after commit but before per-wallet task processed
 
 The known limitation. Sequence:
 
 1. Outer consumer receives event for `wal_X`.
-2. Outer consumer dispatches to channel, ACKs the stream message.
+2. Outer consumer dispatches to channel, commits the Kafka offset.
 3. Worker is killed before the per-wallet task could `ZADD`.
 
-Result: the event was ACKed (not redelivered) but its effect on velocity state was not recorded. If this happens to be the 50th event in the window, the freeze doesn't fire. The wallet continues operating.
+Result: the event was commited (not redelivered) but its effect on velocity state was not recorded. If this happens to be the 50th event in the window, the freeze doesn't fire. The wallet continues operating.
 
 Mitigation: nightly reconciliation re-derives velocity from event log. If a wallet shows anomalous patterns that the live system missed, the reconciliation surfaces it and an operator reviews. The reconciliation isn't designed specifically for fraud signals, but it does provide a backstop.
 
@@ -271,11 +273,11 @@ This is documented as a known limitation. Real production would use Option B (du
 
 ### F2: Per-wallet task panics on an event
 
-A bug in the velocity rule or a malformed event causes the task to panic (Go) or unwind (Rust).
+A bug in the velocity rule or a malformed event causes the task to panic (Go).
 
 Defensive handling:
 
-- The dispatcher wraps task execution in `recover()` (Go) or a panic catch (Rust).
+- The dispatcher wraps task execution in `recover()` (Go).
 - On panic, log the error with the event details, increment a `fraud_task_panic_total` metric, drop the event, continue.
 - The next event for the same wallet spawns a fresh task (since the old one died).
 
@@ -285,21 +287,22 @@ This is "fail-open" behavior, a bug skips fraud detection for one event rather t
 
 Hypothetical: somehow the sorted set has spurious entries (e.g., due to a Redis bug or operational issue). The count is inflated.
 
-The recovery: per-wallet tasks rebuild the sorted set from `saga_state` on first event after a configured rebuild interval. `JobRequested` events are not persisted to the Postgres event store (the API Gateway never writes to Postgres), so the rebuild uses `saga_state`, which the Saga Worker inserts for every job it picks up. Specifically, the task on every Nth event (or every N seconds, configurable) does:
+The recovery: per-wallet tasks rebuild the sorted set from the durable `events` log on first event after a configured rebuild interval. Every attempt is persisted as a `job.requested` event — the gateway writes it in the same transaction as the `jobs` row (see [`10-API-GATEWAY.md`](10-API-GATEWAY.md)) — so the rebuild reads from there. Specifically, the task on every Nth event (or every N seconds, configurable) does:
 
 ```
 DEL velocity:wallet:W
-SELECT job_id, created_at FROM saga_state
-  WHERE state_data->>'from_wallet' = W
-    AND created_at > NOW() - INTERVAL '60 seconds'
-For each row: ZADD velocity:wallet:W <created_at_ms> <job_id>
+SELECT event_id, occurred_at FROM events
+  WHERE event_type = 'job.requested'
+    AND payload->>'from_wallet' = W
+    AND occurred_at > NOW() - INTERVAL '60 seconds'
+For each row: ZADD velocity:wallet:W <occurred_at_ms> <event_id>
 ```
 
-This is expensive (a Postgres query), so we don't do it on every event. But periodic rebuilds catch drift. `saga_state` is the nearest durable source of truth for transfer requests; the Redis sorted set is a cache of that data.
+This is expensive (a Postgres query), so we don't do it on every event. But periodic rebuilds catch drift. The `job.requested` events are the durable source of truth for transfer requests; the Redis sorted set is a cache of that data.
 
 ### F4: Outer consumer overwhelmed by dispatch
 
-If the outer consumer can't keep up with stream throughput, lag grows. The bottleneck is:
+If the outer consumer can't keep up with topic throughput, lag grows. The bottleneck is:
 
 - Read from Redis: fast.
 - Inspect event, look up wallet_id in map: fast (sync.RWMutex / DashMap operations).
@@ -333,12 +336,14 @@ The Go version uses goroutines, channels, and a `sync.RWMutex`-guarded map.
 ```go
 // Package fraud implements the Fraud Worker.
 //
-// The defining problem: per-wallet event ordering with horizontal parallelism.
-// Solved by two-level dispatch (outer consumer + per-wallet goroutines).
+// The velocity computation is order-insensitive (atomic Redis sorted sets),
+// so this worker needs no per-wallet ordering guarantee. The two-level
+// dispatch is a throughput optimization, not a correctness mechanism.
 
 type Worker struct {
     redis    *redis.Client
     db       *pgxpool.Pool
+    kafka    *kafka.Reader   // jobs topic, group "fraud-workers"
     rules    []VelocityRule
     metrics  *Metrics
 
@@ -358,47 +363,28 @@ type walletTask struct {
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-    // Ensure consumer group exists.
-    _ = w.redis.XGroupCreateMkStream(ctx, "stream:jobs", "fraud-workers", "$").Err()
-
-    consumerID := fmt.Sprintf("fraud-%s", hostname())
-
     // Start the idle-task reaper.
     go w.reapIdleTasks(ctx)
 
-    // Main consume loop.
+    // Main consume loop. A plain consumer group on the jobs topic — no
+    // partitioning, because the velocity count is order-insensitive.
     for {
-        select {
-        case <-ctx.Done():
-            w.shutdown()
-            return ctx.Err()
-        default:
-        }
-
-        msgs, err := w.redis.XReadGroup(ctx, &redis.XReadGroupArgs{
-            Group:    "fraud-workers",
-            Consumer: consumerID,
-            Streams:  []string{"stream:jobs", ">"},
-            Count:    10,
-            Block:    2 * time.Second,
-        }).Result()
-        if err != nil && err != redis.Nil {
-            // Log, retry.
-            continue
-        }
-
-        for _, stream := range msgs {
-            for _, msg := range stream.Messages {
-                w.dispatch(ctx, msg)
-                // ACK immediately. See F1 in service doc for the tradeoff.
-                w.redis.XAck(ctx, "stream:jobs", "fraud-workers", msg.ID)
+        msg, err := w.kafka.FetchMessage(ctx)
+        if err != nil {
+            if ctx.Err() != nil {
+                w.shutdown()
+                return ctx.Err()
             }
+            continue // transient read error; retry
         }
+        w.dispatch(ctx, msg)
+        // Commit immediately after dispatch. See F1 for the tradeoff.
+        _ = w.kafka.CommitMessages(ctx, msg)
     }
 }
 
 // dispatch routes an event to its wallet's task, spawning the task if needed.
-func (w *Worker) dispatch(ctx context.Context, msg redis.XMessage) {
+func (w *Worker) dispatch(ctx context.Context, msg kafka.Message) {
     event, err := parseEvent(msg)
     if err != nil || !w.relevantEventType(event) {
         return
@@ -573,153 +559,19 @@ return redis.call('ZCARD', KEYS[1])
 Key implementation points:
 
 - **`sync.RWMutex` with double-check on miss.** The fast path (read lock, look up task) handles 99% of dispatches. Only the first event for a given wallet takes the write lock. The double-check pattern (RLock → miss → Lock → check again) avoids a race where two outer-consumer goroutines could both decide to spawn a task for the same wallet.
-- **Channel send has no default case.** That's intentional backpressure. If the channel is full (the per-wallet task is slow), the outer consumer blocks. This naturally slows the consumer group's reading from the stream, allowing the slow wallet to catch up.
+- **Channel send has no default case.** That's intentional backpressure. If the channel is full (the per-wallet task is slow), the outer consumer blocks. This naturally slows the consumer group's consuming from the topic, allowing the slow wallet to catch up.
 - **The reaper runs every 30s, not on every event.** Reaping on every event would require taking the write lock on every dispatch, defeating the read-lock optimization.
 
 ---
 
-## Code skeleton (Rust reference)
-
-The Rust version uses `DashMap` (lock-free concurrent map) and `tokio::spawn`:
-
-```rust
-//! Fraud Worker, two-level dispatch with lazy per-wallet tasks.
-//!
-//! The dispatcher uses DashMap to avoid lock contention on the hot path.
-//! Per-wallet tasks are spawned via tokio::spawn and exit on idle timeout.
-
-use dashmap::DashMap;
-use tokio::sync::mpsc;
-
-pub struct Worker {
-    redis: redis::Client,
-    db: PgPool,
-    rules: Vec<VelocityRule>,
-
-    tasks: Arc<DashMap<WalletId, WalletTask>>,
-    per_wallet_buffer: usize,
-    idle_timeout: Duration,
-}
-
-struct WalletTask {
-    sender: mpsc::Sender<Event>,
-    last_seen: Arc<AtomicU64>,  // unix nanos
-}
-
-impl Worker {
-    pub async fn run(self: Arc<Self>) -> Result<()> {
-        let me = self.clone();
-        tokio::spawn(async move { me.reap_idle_tasks().await });
-
-        self.clone().ensure_consumer_group().await?;
-        let consumer_id = format!("fraud-{}", hostname());
-
-        loop {
-            let msgs = self.redis.xreadgroup_block(
-                "fraud-workers", &consumer_id,
-                &["stream:jobs"], ">",
-                /*count=*/10, /*block_ms=*/2000,
-            ).await?;
-
-            for msg in msgs {
-                self.dispatch(&msg).await;
-                self.redis.xack("stream:jobs", "fraud-workers", &msg.id).await?;
-            }
-        }
-    }
-
-    async fn dispatch(&self, msg: &StreamMessage) {
-        let event = match Event::from_message(msg) {
-            Ok(e) if self.relevant(&e) => e,
-            _ => return,
-        };
-
-        let wallet_id = event.wallet_id.clone();
-
-        // DashMap entry API avoids the write-lock-on-miss pattern.
-        // If absent, the closure runs while holding a shard lock;
-        // other shards remain unblocked.
-        let task = self.tasks.entry(wallet_id.clone()).or_insert_with(|| {
-            self.spawn_task(wallet_id.clone())
-        });
-
-        task.last_seen.store(now_nanos(), Ordering::Relaxed);
-
-        // Backpressure: blocks if the channel is full.
-        if let Err(_) = task.sender.send(event).await {
-            // Channel closed (task died). Will be re-spawned on next event.
-            // Log a warning.
-        }
-    }
-
-    fn spawn_task(&self, wallet_id: WalletId) -> WalletTask {
-        let (tx, mut rx) = mpsc::channel::<Event>(self.per_wallet_buffer);
-        let last_seen = Arc::new(AtomicU64::new(now_nanos()));
-        let task = WalletTask { sender: tx, last_seen: last_seen.clone() };
-
-        let redis = self.redis.clone();
-        let db = self.db.clone();
-        let rules = self.rules.clone();
-        let metrics = self.metrics.clone();
-        let wallet_id_for_task = wallet_id.clone();
-
-        tokio::spawn(async move {
-            // Catch panics so one bad event doesn't kill the task long-term.
-            let result = AssertUnwindSafe(async {
-                while let Some(event) = rx.recv().await {
-                    process_event(&redis, &db, &rules, &wallet_id_for_task, event).await;
-                }
-            }).catch_unwind().await;
-
-            if result.is_err() {
-                metrics.task_panic.inc();
-            }
-        });
-
-        self.metrics.active_tasks.inc();
-        task
-    }
-
-    async fn reap_idle_tasks(self: Arc<Self>) {
-        let mut ticker = tokio::time::interval(Duration::from_secs(30));
-        loop {
-            ticker.tick().await;
-            let now = now_nanos();
-            let deadline = now.saturating_sub(self.idle_timeout.as_nanos() as u64);
-
-            self.tasks.retain(|_, task| {
-                let last = task.last_seen.load(Ordering::Relaxed);
-                if last < deadline {
-                    // Dropping the WalletTask drops the sender, which closes
-                    // the channel, which causes the task to exit naturally.
-                    self.metrics.active_tasks.dec();
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-    }
-}
-```
-
-The Rust version is structurally similar but uses different concurrency primitives. Note specifically:
-
-- **`DashMap::entry().or_insert_with()`** is the equivalent of Go's double-check pattern, with shard-level locking rather than global locking. Different shards of the DashMap can be written concurrently. For a workload of many wallets, this matters.
-- **`mpsc::channel`** with bounded buffer provides the same backpressure semantics as a Go buffered channel.
-- **Dropping the `WalletTask` cascades to closing the sender, which causes the receive loop to exit when there are no more senders.** Idiomatic Rust async cleanup, no explicit cancel needed.
-- **`catch_unwind`** catches panics in the task body so the task doesn't propagate the panic up to the runtime. Equivalent to Go's `recover()`.
-
-The Go-vs-Rust comparison here is one of the most direct: same architecture, different concurrency idioms. The benchmarks should focus on this service for the headline "concurrency model" comparison.
-
----
 
 ## Test plan
 
-### Validates per-wallet ordering (the central correctness property)
+### Validates velocity-count correctness (the central property)
 
-- **`TestOrdering_SameWallet`**, emit 1000 events for wallet W in known sequence; assert per-wallet task processes them in the same order (instrument the task with an in-test recorder).
-- **`TestOrdering_HighParallelism`**, emit 10000 events distributed across 100 wallets, 100 events each; assert each wallet's sequence is preserved internally while different wallets process in parallel (measure parallel task count).
+- **`TestVelocity_CountCorrectUnderConcurrency`**, emit N events for wallet W spread across *multiple fraud replicas* processing concurrently; assert the final `ZCARD` count is exactly N and the threshold trips at N, *regardless of processing order*. (Asserting a processing order here would test the optimization, not the guarantee.)
+- **`TestVelocity_HighParallelism`**, emit 10000 events across 100 wallets; assert every wallet's count is correct while different wallets process in parallel (measure parallel task count as a throughput check, not an ordering check).
+- **`TestVelocity_IdempotentRedelivery`**, redeliver the same `event_id`; assert the count doesn't double (set semantics on the member).
 
 ### Validates threshold detection
 
@@ -746,20 +598,21 @@ The Go-vs-Rust comparison here is one of the most direct: same architecture, dif
 
 ### Chaos tests
 
-- **`ChaosTest_WorkerKillDuringDispatch`**, kill worker mid-dispatch; verify next worker continues from XREADGROUP cleanly (note: pre-ACK events in dispatch are lost; this is documented).
-- **`TurmoilTest_RedisPartition`** (Rust comparison), partition Redis; assert per-wallet tasks fail gracefully and resume after partition heals.
+- **`ChaosTest_WorkerKillDuringDispatch`**, kill worker mid-dispatch; verify next worker continues from Kafka poll cleanly (note: pre-commit events in dispatch are lost; this is documented).
+
+
 
 ---
 
 ## What this service depends on
 
-- **Redis**, the job stream (consume), sorted sets for velocity state.
+- **Kafka** for the `jobs` topic (consume), and **Redis** sorted sets for velocity state.
 - **Postgres**, wallet status reads, wallet status updates on freeze, event writes.
-- **Saga Worker**, produces the events this service consumes.
+- **API Gateway / Outbox Relay**, produce the `job.requested` events this service consumes.
 
 ## What depends on this service
 
-- **Saga Worker**, reads `wallets.status` during `Validate`. A frozen wallet causes transfers to fail.
+- **Ledger Worker**, reads `wallets.status` in its posting transaction. A frozen wallet causes transfers to fail.
 - **Admin Dashboard**, operators can list frozen wallets, manually unfreeze.
 - **Reconciliation**, reads `wallet.frozen` events as part of the full event audit.
 
@@ -767,6 +620,7 @@ The Go-vs-Rust comparison here is one of the most direct: same architecture, dif
 
 ## Where to read next
 
+- How fraud fits the fleet model (≥2 replicas, plain consumer group) → [`../03-SCALING-AND-AVAILABILITY.md`](../03-SCALING-AND-AVAILABILITY.md)
 - The reconciliation job that closes the loop on detection → [`14-RECONCILIATION.md`](14-RECONCILIATION.md)
 
 ---
