@@ -1,12 +1,6 @@
 # 16: Merchant & Wallet Lifecycle
 
-> **What this is.** The service document covering the flows that *create* the entities the rest of the system operates on: merchants, wallets, API keys, JWTs, initial funding. Without these flows, RRQ is a transfer engine with nothing to transfer.
->
-> **Reading time.** ~15 minutes.
->
-> **Prerequisites.** Read [`10-API-GATEWAY.md`](10-API-GATEWAY.md). The flows here feed into the gateway's existing endpoints.
-
----
+The flows that *create* the entities the rest of the system operates on: merchants, wallets, API keys, JWTs, initial funding. Without these, RRQ is a transfer engine with nothing to transfer.
 
 ## What this service does
 
@@ -150,7 +144,7 @@ Every wallet starts with zero balance. Transfers between wallets require positiv
 
 In real production: it doesn't, from RRQ's perspective. RRQ moves value between wallets that represent claims on real funds held elsewhere (a bank account, a card network, etc.). External integrations credit wallets when money arrives at the bank; debit wallets when money leaves. RRQ is the ledger; the bank is the vault.
 
-RRQ has no bank integration, so it models the outside world as a single reserved **external source wallet** (`wal_external_source`, owned by a system merchant). Value enters the ledger as a normal **transfer from that wallet** — which means funding uses the *exact same* single-transaction posting path as every other movement, and double-entry conservation still holds globally: the external wallet simply goes increasingly negative as value enters, and reconciliation's "the whole ledger sums to zero" check (I1) stays true. The external source wallet is the one wallet exempt from the no-negative-balance rule (I2), because it represents value that has entered from outside the system.
+RRQ has no bank integration, so it models the outside world as a reserved **external source wallet** (`wal_external_source`, owned by a system merchant) — mirrored on each shard so funding stays intra-shard. Value enters the ledger as a normal **transfer from that wallet** on the recipient's shard, which means funding uses the *exact same* single-transaction posting path as every other movement, and double-entry conservation still holds per shard: the external wallet simply goes increasingly negative as value enters, and reconciliation's per-shard "sums to zero" check (I1) stays true. The external source wallet is the one wallet exempt from the no-negative-balance rule (I2), because it represents value that has entered from outside the system.
 
 For development and demos, the operator's **Seed wallet** action is just a funding transfer from `wal_external_source`:
 

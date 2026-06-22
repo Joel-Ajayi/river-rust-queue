@@ -1,12 +1,6 @@
 # 17: Simulation Harness & Merchant Simulator
 
-> **What this is.** The design for the part of the project that stands in for the outside world. RRQ will never be integrated by a real payment company, so the real world that would send it traffic and receive its webhooks has to be built. This doc covers the actors, the boundary between what is real and what is simulated, and the `merchant-sim` component that closes the loop.
->
-> **Reading time.** ~18 minutes.
->
-> **Prerequisites.** Read [`10-API-GATEWAY.md`](10-API-GATEWAY.md), [`15-ADMIN-DASHBOARD.md`](15-ADMIN-DASHBOARD.md), and [`16-MERCHANT-WALLET-LIFECYCLE.md`](16-MERCHANT-WALLET-LIFECYCLE.md). This doc assumes you know how a merchant authenticates, submits a transfer, and receives a webhook.
-
----
+The design for the part of the project that stands in for the outside world. RRQ will never be integrated by a real payment company, so the real world that would send it traffic and receive its webhooks has to be built. This doc covers the actors, the boundary between what is real and what is simulated, and the `merchant-sim` component that closes the loop.
 
 ## Why this doc exists
 

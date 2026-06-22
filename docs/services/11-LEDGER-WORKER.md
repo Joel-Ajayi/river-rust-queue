@@ -1,12 +1,6 @@
 # 11: Ledger Worker
 
-> **What this is.** The service document for the Ledger Worker — the service that actually moves money. The API Gateway accepts work; the Ledger Worker executes it. This is the spine of the system: every other service either feeds it (Gateway) or consumes its output (Webhook, Fraud, Reconciliation).
->
-> **Reading time.** ~20 minutes.
->
-> **Prerequisites.** Read [`10-API-GATEWAY.md`](10-API-GATEWAY.md), [`../00-OVERVIEW.md`](../00-OVERVIEW.md), and [`../02-INVARIANTS.md`](../02-INVARIANTS.md) first.
-
----
+The Ledger Worker is the service that actually moves money. The API Gateway accepts work; the Ledger Worker executes it. It is the spine of the system: every other service either feeds it (Gateway) or consumes its output (Webhook, Fraud, Reconciliation).
 
 ## What it does
 
@@ -20,13 +14,9 @@ The rest of this document is that claim, made precise.
 
 ## Why one transaction, and not a saga
 
-It is worth stating plainly, because earlier drafts of RRQ used a multi-step saga here and the difference is the most important design decision in the system.
+This is the most important design decision in the system, so it's worth stating plainly. A **saga** — debit in one step, credit in a later step, with a *compensation* to undo the debit if the credit fails — is the tool you're forced to use when the two legs **cannot** share a transaction (different databases, or a call to an external bank). It is strictly *weaker*: it has an in-flight, debited-but-not-credited window, and "undo" is a second movement rather than a clean "never happened."
 
-A **saga** — debit in one step, credit in a later step, with a *compensation* to undo the debit if the credit fails — is the tool you are forced to use when the two legs **cannot** share a transaction: when they live in different databases, or one leg is a call to an external bank's API. A saga is strictly *weaker* than a transaction: it necessarily has an in-flight window where money is debited-but-not-yet-credited, and "undo" is a second movement that reverses the first rather than a clean "never happened."
-
-RRQ is a **closed-loop ledger on one logical Postgres**. Both wallets are in the same database, and there is no external bank leg (that integration surface is scoped out — see [`../01-PROBLEM.md`](../01-PROBLEM.md)). So a single transaction *is* available for every transfer, which means the professional rule applies: **if you can use a transaction, you must.** Using a saga where a transaction would do means choosing the weaker guarantee and paying for it with an in-flight window, compensation code, a distributed lease to guard that window, and a crash-recovery state machine — all to manage a danger the transaction never creates.
-
-So there is no saga, no compensation, and no distributed lock in this worker. There is one transaction. The only place a saga-shaped pattern would return is a genuinely cross-boundary operation (a sharded ledger, or a real external settlement leg), and both are out of scope by design ([`../03-SCALING-AND-AVAILABILITY.md`](../03-SCALING-AND-AVAILABILITY.md)).
+For an **intra-shard** transfer — both wallets on one merchant's shard, which is the common case — a single transaction *is* available, so the professional rule applies: **if you can use a transaction, you must.** This worker posts in one transaction, with no compensation and no distributed lock. The one place a saga genuinely returns is a **cross-shard** transfer, whose two wallets live on different shards a transaction can't span; that path uses the clearing protocol in [`../deep-dives/29-LEDGER-SHARDING.md`](../deep-dives/29-LEDGER-SHARDING.md), and nowhere else. RRQ stays closed-loop — no external bank leg — so the shard boundary is the *only* boundary a transaction can't cover.
 
 ---
 
@@ -207,7 +197,7 @@ Caught under the lock in step 2. The transaction aborts before any leg is writte
 Two transfers of 60 from a wallet holding 100. Both try to `SELECT … FOR UPDATE` the source wallet; one wins the lock, debits, commits (balance 40); the second then acquires the lock, reads balance 40, fails the check, commits a `failed` transfer. Exactly one succeeds; the wallet never goes negative (**I2**).
 
 ### F4: Postgres commit returns an unknown outcome
-A network blip at the moment of `COMMIT` — the worker doesn't know whether it committed. It treats this as retryable and re-runs the transaction. If the commit had landed, the re-run no-ops on `UNIQUE(transfer_id, leg)`; if not, it posts. The constraint resolves the unknown into a definite outcome (the local version of the [unknown-outcome problem](../01-PROBLEM.md)).
+A network blip at the moment of `COMMIT` — the worker doesn't know whether it committed. It treats this as retryable and re-runs the transaction. If the commit had landed, the re-run no-ops on `UNIQUE(transfer_id, leg)`; if not, it posts. The constraint resolves the unknown into a definite outcome (the local version of the [unknown-outcome problem](../00-OVERVIEW.md)).
 
 ### F5: Bulk payout, one leg fails
 Leg `i` targets a closed wallet. That leg's transaction commits `failed`; the others are unaffected and already final. The job's `bulk_payout.completed` summary reports `N-1` succeeded, `1` failed. No compensation anywhere.
@@ -340,7 +330,7 @@ Organized by the invariant each test validates.
 
 ## What this service depends on
 
-- **Postgres** — the one logical ledger; the source of truth for `jobs`, `transfers`, `ledger_entries`, and the outbox. The most write-intensive backend.
+- **Postgres** — the merchant's shard (one logical ledger per shard); the source of truth for `jobs`, `transfers`, `ledger_entries`, and the outbox. The most write-intensive backend.
 - **Kafka** — the `jobs` topic it consumes (produced by the outbox relay on the gateway's behalf).
 - **API Gateway** — writes the `jobs` rows and the `job.requested` outbox events this worker consumes.
 
@@ -357,7 +347,3 @@ Organized by the invariant each test validates.
 - How the single transaction scales horizontally → [`../03-SCALING-AND-AVAILABILITY.md`](../03-SCALING-AND-AVAILABILITY.md)
 - The outbox and event log it writes to → [`../deep-dives/25-EVENT-STORE-AND-PROJECTIONS.md`](../deep-dives/25-EVENT-STORE-AND-PROJECTIONS.md)
 - The webhook delivery it feeds → [`12-WEBHOOK-WORKER.md`](12-WEBHOOK-WORKER.md)
-
----
-
-_Pass 1 of the architecture series. Last updated pre-implementation._

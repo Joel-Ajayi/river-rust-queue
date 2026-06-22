@@ -1,12 +1,6 @@
 # 13: Fraud Worker
 
-> **What this is.** The service document for the Fraud Worker. The interesting twist: it *looks* like a per-wallet ordering problem, and the original design treated it as one — but the velocity computation is order-insensitive, so the real lesson is recognizing when a guarantee you assumed you needed isn't required at all. That recognition is what lets the worker scale to ≥2 replicas the easy way.
->
-> **Reading time.** ~20 minutes.
->
-> **Prerequisites.** Read [`11-LEDGER-WORKER.md`](11-LEDGER-WORKER.md). The fraud worker joins the Kafka `jobs` topic with an independent `fraud-workers` consumer group — the same topic the outbox relay populates and the Ledger Worker consumes.
-
----
+The Fraud Worker. The interesting twist: it *looks* like a per-wallet ordering problem, and the original design treated it as one — but the velocity computation is order-insensitive, so the real lesson is recognizing when a guarantee you assumed you needed isn't required at all. That recognition is what lets the worker scale to ≥2 replicas the easy way.
 
 ## What it does
 
@@ -622,7 +616,3 @@ Key implementation points:
 
 - How fraud fits the fleet model (≥2 replicas, plain consumer group) → [`../03-SCALING-AND-AVAILABILITY.md`](../03-SCALING-AND-AVAILABILITY.md)
 - The reconciliation job that closes the loop on detection → [`14-RECONCILIATION.md`](14-RECONCILIATION.md)
-
----
-
-_Pass 2 of the architecture series. Last updated pre-implementation._

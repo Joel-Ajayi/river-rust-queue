@@ -1,12 +1,6 @@
 # 15: Admin Dashboard
 
-> **What this is.** The service document for the Admin Dashboard. Replaces what was originally designed as a CLI. The dashboard is the operator's interface to the rest of the system *and* the demo/test surface for the project.
->
-> **Reading time.** ~15 minutes.
->
-> **Prerequisites.** Skim the other service docs. The dashboard is a window into all of them.
-
----
+The Admin Dashboard is the operator's interface to the rest of the system *and* the demo/test surface for the project.
 
 ## What this does
 

@@ -1,22 +1,17 @@
 # 14: Reconciliation
 
-> **What this is.** The service document for the Reconciliation batch job. Smaller scope than the workers but architecturally crucial — it's the system's only out-of-band verification that the ledger is consistent with itself and with the projections derived from it.
->
-> **Reading time.** ~15 minutes.
->
-> **Prerequisites.** [`../02-INVARIANTS.md`](../02-INVARIANTS.md), particularly **I1** (conservation of value) and **I6** (immutable history).
-
----
+The Reconciliation batch job. Smaller scope than the workers but architecturally crucial — it is the system's only out-of-band verification that the ledger is consistent with itself and with the projections derived from it.
 
 ## What it does
 
-Reconciliation answers three questions that the live system should already guarantee but a bug could silently break:
+Reconciliation answers four questions that the live system should already guarantee but a bug could silently break:
 
-1. **Does value conserve?** Across the whole ledger, every debit has a matching credit — so `SUM(ledger_entries.amount)` over *all* entries must be **exactly zero**, and within each transfer the debit and credit legs must be equal and opposite.
-2. **Are the projections honest?** Each wallet's `wallet_balance_cache` row must equal the balance *derived* from its `ledger_entries`.
-3. **Was an active wallet ever negative?** Replaying a wallet's entries in `id` order, the running balance must never dip below zero while the wallet was active (I2), and each entry's stored `balance_after` must match the running sum.
+1. **Does value conserve within a shard?** For each shard, `SUM(ledger_entries.amount)` over that shard's entries must be **exactly zero** (every intra-shard transfer writes equal-and-opposite legs), and within each transfer the debit and credit legs must be equal and opposite.
+2. **Does money conserve across shards?** The shards' clearing accounts must net to zero — off only by transfers currently in flight — and no `cross_shard_transfer` may be stuck past its SLA ([→ `../deep-dives/29-LEDGER-SHARDING.md`](../deep-dives/29-LEDGER-SHARDING.md)).
+3. **Are the projections honest?** Each wallet's `wallet_balance_cache` row must equal the balance *derived* from its `ledger_entries`.
+4. **Was an active wallet ever negative?** Replaying a wallet's entries in `id` order, the running balance must never dip below zero while the wallet was active (I2), and each entry's stored `balance_after` must match the running sum.
 
-The Ledger Worker writes both legs of every transfer in one transaction, so by construction these properties hold. Reconciliation exists because "by construction" is a claim about code, and code has bugs. It runs nightly on a Kubernetes CronJob, replays the previous day's activity, and emits a `reconciliation.alert` event for any wallet or transfer that violates the above. **It never corrects** — divergence means a bug, and the failure mode of an incorrect auto-correction is worse than the failure mode of a discrepancy waiting for review.
+The Ledger Worker writes both legs of an intra-shard transfer in one transaction (cross-shard transfers post each leg locally and are tied together through the clearing accounts), so by construction these properties hold. Reconciliation exists because "by construction" is a claim about code, and code has bugs. It runs nightly on a Kubernetes CronJob, replays the previous day's activity, and emits a `reconciliation.alert` event for any wallet or transfer that violates the above. **It never corrects** — divergence means a bug, and the failure mode of an incorrect auto-correction is worse than the failure mode of a discrepancy waiting for review.
 
 A few things make this service interesting:
 
@@ -57,11 +52,11 @@ The service is small — about 200 lines, no consumer loop, no concurrency primi
 
 For a window `[start, end - safety_margin]`:
 
-**A. Global conservation (one query, the strongest check).**
+**A. Per-shard conservation (one query per shard, the strongest check).**
 ```sql
-SELECT COALESCE(SUM(amount), 0) FROM ledger_entries;   -- must be exactly 0
+SELECT COALESCE(SUM(amount), 0) FROM ledger_entries;   -- must be exactly 0, per shard
 ```
-Because every transfer writes a `-amount` debit and a `+amount` credit, the entire ledger must sum to zero. A non-zero total means a leg was written without its pair — the single most important number in the system.
+Each shard is internally balanced — every leg posted on it, including the clearing legs, has its equal-and-opposite pair on the same shard — so a shard's entries must sum to zero. A non-zero total means a leg was written without its pair: the single most important number in the system. Across shards, a separate small pass checks that the clearing accounts net to zero and no `cross_shard_transfer` is stuck ([→ `../deep-dives/29-LEDGER-SHARDING.md`](../deep-dives/29-LEDGER-SHARDING.md)).
 
 **B. Per-transfer leg balance.** For every transfer that posted in the window, assert exactly one `debit` and one `credit` leg exist with equal magnitude. A missing or mismatched leg is a corruption alert.
 
@@ -81,7 +76,7 @@ fn reconcile_window(start, end) -> Report:
     run_id = ULID()
     cutoff = end - safety_margin
 
-    // A. global conservation
+    // A. per-shard conservation (this shard's ledger must net to zero)
     total = SELECT COALESCE(SUM(amount),0) FROM ledger_entries WHERE created_at < cutoff
     if total != 0: report.add_global_discrepancy(total)
 
@@ -146,7 +141,7 @@ Reconciliation is a batch job, but it still obeys the system-wide rule: **the fu
 
 - **Idempotent, so a failed run is just re-run.** A crash mid-run writes no `reconciliation.completed`; the next run redoes the window from scratch and produces the same alerts. No partial state to recover.
 - **≥2 candidates, leader-elected.** The run is guarded by a Postgres advisory lock (`pg_try_advisory_lock`): the CronJob, a manual trigger, and a standby may all be eligible, but exactly one wins and runs while others stand by. `concurrencyPolicy: Forbid` is the same guard at the scheduler level.
-- **Fans out across CPU cores.** With one logical Postgres, a single run replays the window in parallel across cores (the `parallel_for`). Because the ledger is a single logical store, there is **no cross-shard correlation pass** — every transfer's two legs live in the same database, so the conservation check is one global `SUM`. See [`../03-SCALING-AND-AVAILABILITY.md`](../03-SCALING-AND-AVAILABILITY.md).
+- **Fans out across CPU cores, per shard.** Each shard's run replays its window in parallel across cores (the `parallel_for`); within a shard, conservation is a local `SUM = 0`. The one cross-shard step is a small correlation pass — verify the clearing accounts net globally and no `cross_shard_transfer` is stuck past its SLA ([`../deep-dives/29-LEDGER-SHARDING.md`](../deep-dives/29-LEDGER-SHARDING.md)). See [`../03-SCALING-AND-AVAILABILITY.md`](../03-SCALING-AND-AVAILABILITY.md).
 
 ---
 
@@ -156,7 +151,7 @@ Reconciliation is a batch job, but it still obeys the system-wide rule: **the fu
 flowchart TD
     cron(["CronJob fires 01:00 UTC"]) --> lock{"acquire advisory lock?"}
     lock -->|no| abort["abort: a run is in progress"]
-    lock -->|yes| total["SUM(all ledger_entries) == 0 ?"]
+    lock -->|yes| total["per shard: SUM(ledger_entries)==0 · clearing nets globally ?"]
     total --> stream["per wallet: replay ledger_entries (id-ordered, O(1) memory)"]
     stream --> compare{"derived == cache AND balance_after consistent?"}
     compare -->|match| ok["no discrepancy"]
@@ -168,7 +163,7 @@ flowchart TD
 At 01:00 UTC the CronJob fires for window `[2026-05-11, 2026-05-12]`:
 
 1. **Startup.** Connect to Postgres; read config; acquire the advisory lock.
-2. **Global conservation.** `SELECT SUM(amount) FROM ledger_entries` → assert 0.
+2. **Per-shard conservation.** For each shard, `SELECT SUM(amount) FROM ledger_entries` → assert 0; then assert the shards' clearing accounts net globally.
 3. **Find affected wallets.** `SELECT DISTINCT wallet_id FROM ledger_entries WHERE created_at ∈ window` → say 1,247.
 4. **Fan out.** 8 worker tasks; distribute wallets.
 5. **Per-wallet check.** Each worker derives the balance by replaying entries, checks each `balance_after`, and compares the total to `wallet_balance_cache`.
@@ -179,7 +174,7 @@ At 01:00 UTC the CronJob fires for window `[2026-05-11, 2026-05-12]`:
 ```
 Reconciliation run rec_01HQX...
   window: 2026-05-11T00:00:00Z .. 2026-05-12T00:00:00Z
-  global conservation:  OK (sum = 0)
+  per-shard conservation:  OK (every shard sum = 0)
   wallets checked:      1247
   discrepancies:        0
   duration:             12.4s   (8 cores, 847,231 entries scanned)
@@ -191,7 +186,7 @@ Reconciliation run rec_01HQX...
 
 ```
 Reconciliation run rec_01HQY...
-  global conservation:  OK (sum = 0)
+  per-shard conservation:  OK (every shard sum = 0)
   wallets checked:      1283
   discrepancies:        1
 
@@ -258,7 +253,7 @@ func (r *Runner) Run(ctx context.Context, windowStart, windowEnd time.Time) (*Re
 
     report := &Report{RunID: r.runID, WindowStart: windowStart, WindowEnd: windowEnd}
 
-    // A. global conservation: the whole ledger must net to zero.
+    // A. per-shard conservation: this shard's ledger must net to zero.
     var total int64
     if err := r.db.QueryRow(ctx, `
         SELECT COALESCE(SUM(amount),0) FROM ledger_entries WHERE created_at < $1`,
@@ -344,7 +339,7 @@ Streaming via `rows.Next()` keeps memory O(1) even for a wallet with a million e
 
 ### Validates I1 (conservation)
 - **`TestReconciliation_GlobalSumIsZero`** — seed 1,000 valid transfers; assert `SUM(ledger_entries.amount) = 0` and zero alerts.
-- **`TestReconciliation_DetectsUnpairedLeg`** — inject a single credit leg with no debit; assert the global sum alert fires.
+- **`TestReconciliation_DetectsUnpairedLeg`** — inject a single credit leg with no debit; assert the per-shard sum alert fires.
 - **`TestReconciliation_DetectsLegMismatch`** — inject a transfer whose legs have unequal magnitude; assert a per-transfer alert.
 
 ### Validates projection honesty (C) and replay (D)
@@ -377,7 +372,3 @@ Streaming via `rows.Next()` keeps memory O(1) even for a wallet with a million e
 
 - How reconciliation stays HA → [`../03-SCALING-AND-AVAILABILITY.md`](../03-SCALING-AND-AVAILABILITY.md)
 - The operator tooling that surfaces alerts → [`15-ADMIN-DASHBOARD.md`](15-ADMIN-DASHBOARD.md)
-
----
-
-_Pass 2 of the architecture series. Last updated pre-implementation._

@@ -1,8 +1,6 @@
 # STATUS
 
-> What's been done, what's been designed, what's not started. Updated as the project moves.
->
-> This file exists because "in-progress" projects often blur the line between _designed_ and _built_. RRQ does not. If something has been built, this file says so. If only designed, this file says that. If neither, that too.
+> What's been done, what's been designed, what's not started — updated as the project moves. If something has been built, this file says so; if only designed, it says that; if neither, that too.
 
 **Last updated:** Pre-implementation. Design phase complete; Go build is next.
 
@@ -15,7 +13,7 @@
 | Design, system, services, invariants                        | Complete (see `docs/`)       |
 | Design, deep-dives                                           | In progress                  |
 | Design, simulation harness and merchant-sim                  | Complete (see doc 17)        |
-| Design, scaling & availability (HA, horizontal scale-out, one logical ledger) | Complete (doc 03) |
+| Design, scaling & availability (HA, horizontal scale-out, sharded ledger) | Complete (doc 03) |
 | Design, deployment & operations                             | Complete (doc 28)            |
 | Implementation, scaffold (proto, migrations, k8s overlays, CI) | Not started (dirs are placeholders) |
 | Implementation (Go), API Gateway                             | Not started                  |

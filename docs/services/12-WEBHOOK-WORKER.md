@@ -1,10 +1,6 @@
 # 12: Webhook Worker
 
-> **What this is.** The service document for the Webhook Worker. Explains how RRQ delivers signed notifications to merchants with per-merchant ordering, exponential backoff with full jitter, per-merchant circuit breakers, and DLQ routing for terminal failures.
->
-> **Prerequisites.** Read [`11-LEDGER-WORKER.md`](11-LEDGER-WORKER.md), webhooks consume what the ledger posts (via the outbox relay).
-
----
+How RRQ delivers signed notifications to merchants: per-merchant ordering, exponential backoff with full jitter, per-merchant circuit breakers, and DLQ routing for terminal failures.
 
 ## What it does
 
@@ -648,7 +644,3 @@ Key implementation points:
 
 - How Kafka partition routing fits the fleet model → [`../03-SCALING-AND-AVAILABILITY.md`](../03-SCALING-AND-AVAILABILITY.md)
 - The fraud detection service consuming the same Kafka `jobs` topic → [`13-FRAUD-WORKER.md`](13-FRAUD-WORKER.md)
-
----
-
-_Pass 2 of the architecture series. Last updated pre-implementation._

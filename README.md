@@ -3,10 +3,10 @@
 RRQ moves value between wallets and stays correct while doing it: through worker
 crashes, network partitions, and duplicate retries. It is the part of a payment
 platform that silently loses money when it's built wrong — built here as a
-**closed-loop, double-entry ledger on one logical Postgres**, where every
-transfer is a **single serializable transaction**, messaging rides a
-**transactional outbox into Kafka**, and a nightly **reconciliation** job proves
-the books balance.
+**closed-loop, double-entry ledger** on **Postgres sharded by merchant**, where
+the common transfer is a **single serializable transaction** (cross-shard
+transfers use a clearing protocol), messaging rides a **transactional outbox
+into Kafka**, and a nightly **reconciliation** job proves the books balance.
 
 It is built in **Go first**, with a **Rust** port as a controlled language
 study: same infrastructure, same invariants, same test suite, so the only
@@ -31,12 +31,11 @@ that surfaces weeks later. These are not exotic — they are the *default*
 behavior of a distributed system built without specific countermeasures.
 
 RRQ is built *with* the countermeasures, and nothing else. The decisive design
-choice is scoping it as a **closed-loop ledger on one logical Postgres**: because
-both wallets in any transfer live in the same database, a transfer is *one
+choice is scoping it as a **closed-loop ledger**: with no external bank leg, the
+common transfer moves between two wallets on one merchant's shard, so it is *one
 transaction*, which deletes a whole category of machinery (sagas, compensations,
-distributed leases, in-flight recovery state) rather than building elaborate
-mechanisms to survive it. Every component earns its place by handling a named
-failure mode:
+distributed leases, in-flight recovery state) for everything but the cross-shard
+path. Every component earns its place by handling a named failure mode:
 
 | Failure mode | Mechanism |
 | --- | --- |
@@ -47,7 +46,7 @@ failure mode:
 | Unhealthy downstreams | **Circuit breakers**, jittered backoff, **DLQ** |
 
 The full problem statement and the failure-to-mechanism mapping are in
-[`docs/01-PROBLEM.md`](docs/01-PROBLEM.md).
+[`docs/00-OVERVIEW.md`](docs/00-OVERVIEW.md).
 
 ---
 
@@ -82,7 +81,7 @@ graph TD
     merchant["Merchant System"]
     kong["Kong — edge gateway<br/>TLS · coarse JWT check · per-merchant rate limiting"]
     gateway["API Gateway<br/>JWT auth · wallet-ownership authz · validation<br/>INSERT jobs + job.requested outbox (one txn) → 202 Accepted"]
-    postgres["PostgreSQL — one logical ledger, append-only source of truth<br/>ledger_entries (the money) · jobs · transfers<br/>events (fact log + outbox) · webhook_deliveries · dlq_entries · wallets"]
+    postgres["PostgreSQL — sharded by merchant, append-only source of truth<br/>ledger_entries (the money) · jobs · transfers<br/>events (fact log + outbox) · webhook_deliveries · dlq_entries · wallets"]
     relay["Outbox Relay<br/>publishes unpublished events → Kafka, in id order"]
     kafka["Kafka<br/>topic jobs (groups: ledger-workers, fraud-workers)<br/>topic notify (partitioned by merchant_id)"]
     ledgerWorker["Ledger Worker<br/>one SERIALIZABLE txn per transfer:<br/>lock wallets (FOR UPDATE) · check balance · post debit+credit<br/>UNIQUE(transfer_id, leg) ⇒ redelivery is a no-op · no saga"]
@@ -90,7 +89,7 @@ graph TD
     webhookWorker["Webhook Worker<br/>per-merchant FIFO via Kafka partitions · HMAC payloads<br/>jittered backoff · per-merchant breaker · DLQ at 10 attempts"]
     redisState["Redis — ephemeral, non-correctness-critical<br/>velocity sorted sets · circuit-breaker state"]
     merchantEndpoint["Merchant Endpoint"]
-    reconciliation["Reconciliation — nightly CronJob<br/>replay ledger_entries vs. cached balances · global SUM = 0<br/>reconciliation.alert on any divergence"]
+    reconciliation["Reconciliation — nightly CronJob<br/>replay ledger_entries vs. cached balances · per-shard SUM=0, clearing nets<br/>reconciliation.alert on any divergence"]
     adminDashboard["Admin Dashboard<br/>DLQ replay · wallet freeze · breaker reset · consumer lag · stuck jobs"]
 
     merchant -->|"HTTPS POST + Idempotency-Key"| kong
@@ -129,11 +128,12 @@ fraud/breaker state and no invariant depends on it.
 
 Every box runs as **≥2 live instances** with automatic failover: RRQ is
 horizontally scalable and highly available, not a single-process design. The
-stateless tier scales out by adding replicas; the authoritative ledger is one
-logical Postgres (primary + standby) scaled vertically — deliberately *not*
-sharded, because sharding would force money movements across a transaction
-boundary and reintroduce the very machinery this design removes. The full
-scale-out and HA model is
+stateless tier scales out by adding replicas; the authoritative ledger is
+**sharded by merchant** (each shard primary + standby), so write throughput
+scales by adding shards while the common transfer stays one transaction.
+Cross-shard transfers use a clearing protocol
+([`docs/deep-dives/29-LEDGER-SHARDING.md`](docs/deep-dives/29-LEDGER-SHARDING.md)).
+The full scale-out and HA model is
 [`docs/03-SCALING-AND-AVAILABILITY.md`](docs/03-SCALING-AND-AVAILABILITY.md).
 
 Full system in one read, with success/failure/retry sequence diagrams:
@@ -177,7 +177,7 @@ the network long before the language matters.
 
 | Path | Purpose |
 | --- | --- |
-| [`docs/`](docs/) | System design: overview, problem, the nine invariants, per-service docs |
+| [`docs/`](docs/) | System design: overview, the nine invariants, per-service docs |
 | [`proto/`](proto/) | Protobuf event and gRPC contracts *(placeholder)* |
 | [`migrations/`](migrations/) | PostgreSQL schema — tables, indexes, constraints that uphold the invariants *(placeholder)* |
 | [`v-go/`](v-go/) | Go reference implementation — six services + outbox relay + shared package *(placeholder)* |
@@ -218,14 +218,11 @@ Scope discipline matters more than ambition.
 
 - **Not a complete payment platform** — no card networks, bank rails, KYC/AML, FX
   pricing, PCI-DSS, or multi-region. RRQ is the correctness-critical *core*.
-- **One logical ledger, not a sharded one** — RRQ is horizontally scalable and
-  highly available *within* a region (≥2 of every component, automatic failover),
-  but it keeps a single authoritative Postgres ledger so every transfer stays one
-  transaction. Reads and the stateless tier scale out; the ledger scales
-  vertically. Sharding the write ledger, spanning regions, and active-active are
-  out of scope — each would reintroduce cross-boundary money movement. The
-  ~1,000 transfers/sec figure is the size the benchmarks prove on a small
-  cluster, not a ceiling.
+- **Single-region, not multi-region** — RRQ is horizontally scalable and highly
+  available *within* a region (≥2 of every component, automatic failover), and the
+  ledger is **sharded by merchant** so writes scale by adding shards. Spanning
+  regions and active-active are out of scope. The ~1,000 transfers/sec figure is
+  the size the benchmarks prove on a small cluster, not a ceiling.
 - **Not a research artifact** — every pattern is drawn from existing practice
   (double-entry bookkeeping, event sourcing, the transactional outbox; the same
   single-atomic-posting model used by ledgers like TigerBeetle and Formance). The

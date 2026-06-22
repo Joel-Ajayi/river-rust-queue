@@ -1,12 +1,6 @@
 # 03: Scaling & Availability
 
-> **What this is.** The canonical account of how RRQ scales out and stays up. RRQ is a **highly available, horizontally scalable** system with **one strongly-consistent authoritative ledger**. Every other doc defers here for "how does this scale / how does it survive failure."
->
-> **Reading time.** ~15 minutes.
->
-> **Audience.** Anyone evaluating whether RRQ is a toy or a system that could actually run. If a service doc and this doc ever disagree about replicas, ownership, or the ledger's consistency, **this doc wins** and the other is a bug.
-
----
+The canonical account of how RRQ scales out and stays up: a **highly available, horizontally scalable** system with a **sharded, strongly-consistent ledger** (N independent Postgres shards, each authoritative for its merchants). Every other doc defers here for how something scales or survives failure. If a service doc and this doc ever disagree about replicas, ownership, or the ledger's consistency, **this doc wins** and the other is a bug.
 
 ## The thesis, stated once
 
@@ -14,23 +8,23 @@ RRQ runs as a fleet, not a process — but its authoritative ledger is **one log
 
 1. **No single point of failure.** Every component runs **≥ 2 live instances**. There is no "the ledger worker," only _the ledger workers_; the same for the edge, the relay, the dashboard, the batch jobs, _and_ the stateful backends (each runs primary + standby with automatic failover). Losing any one pod, node, or backend primary degrades capacity or pauses briefly, never breaks availability.
 2. **Horizontal scale-out for the stateless tier.** The gateway, the relay, and the workers hold no durable state of their own. Throughput grows by adding replicas; an autoscaler does it off queue lag. They scale the way stateless tiers always do — the work is in a queue, more consumers drain it faster.
-3. **One authoritative ledger, kept strongly consistent.** All money lives in a single logical Postgres so that **every transfer is one serializable transaction** ([→ `services/11-LEDGER-WORKER.md`](services/11-LEDGER-WORKER.md)). This is the deliberate design choice that gives RRQ exactly one money-movement flow. Its write throughput scales _vertically_ (one primary, plus HA standby); its reads scale _horizontally_ (standbys + projections).
+3. **A sharded ledger, each shard strongly consistent.** Money is partitioned across **N Postgres shards** by merchant, so the common transfer — customer→merchant, both wallets on one shard — is still **one serializable transaction** ([→ `services/11-LEDGER-WORKER.md`](services/11-LEDGER-WORKER.md)). Transfers that cross a shard boundary take a clearing protocol ([→ `deep-dives/29-LEDGER-SHARDING.md`](deep-dives/29-LEDGER-SHARDING.md)). Write throughput scales _horizontally_ by adding shards; within a shard, writes scale vertically (one primary + HA standby) and reads scale via standbys + projections.
 
-What RRQ is **not**: sharded across machines for ledger writes, multi-region, active-active, or globally ordered. Those are real engineering projects with their own failure models and are deliberately out of scope. "Highly available" here means "survives the loss of any pod, node, or backend primary within a single region," not "survives the loss of a region."
+What RRQ is **not**: multi-region, active-active, or globally ordered. The ledger **is** sharded across machines for write scale ([→ `deep-dives/29-LEDGER-SHARDING.md`](deep-dives/29-LEDGER-SHARDING.md)); multi-region and global ordering are real engineering projects with their own failure models and remain out of scope. "Highly available" here means "survives the loss of any pod, node, or backend primary within a single region," not "survives the loss of a region."
 
 > **A note on "highly available" vs "fallback."** Running two of something — two ledger-worker pods, a Postgres standby ready to be promoted — is *the same implementation, duplicated*. That is HA, and it is present everywhere. It is **not** a "fallback": a fallback is a *different* second mechanism that takes over when the first fails. RRQ has no fallbacks. It has one way to do each job, run on enough replicas to survive failure.
 
 ---
 
-## Why the ledger is not sharded (and what that costs)
+## How the ledger is sharded (and what it costs)
 
-This is the load-bearing decision, so it gets its own section.
+This is the load-bearing decision, so it gets its own section; the full mechanics are in [`deep-dives/29-LEDGER-SHARDING.md`](deep-dives/29-LEDGER-SHARDING.md).
 
-You could shard the ledger by merchant or wallet to scale writes horizontally. The problem: a transfer moves money between two wallets, and if those wallets land on **different shards**, you can no longer post both legs in one transaction — you'd be forced into a **second, different flow** (a cross-shard saga with compensations) for exactly the transfers that span shards. That second flow is strictly weaker (it has an in-flight, debited-but-not-credited window) and it's the precise machinery RRQ is designed to avoid. Sharding the write ledger trades RRQ's single, atomic money-movement flow for two flows whose behavior depends on where the data happens to live.
+The ledger is partitioned into **N independent Postgres shards**, hashed by `merchant_id`, with a merchant's entire wallet namespace co-located on its home shard. This makes the dominant transfer — customer→merchant, both wallets on one shard — **one serializable transaction**, unchanged from the unsharded model. Write throughput then scales the way a stateless tier does: add shards.
 
-So RRQ keeps **one logical ledger** and scales its writes vertically. The honest cost: **write throughput is bounded by one Postgres primary.** That bound is high — a well-tuned primary on modern hardware posts thousands of small transactions per second, comfortably past the ~1,000 TPS the benchmarks demonstrate — and it is raised the boring way (faster disks, more cores, batching, connection pooling), not by changing the architecture. If a deployment genuinely outgrew a single primary, sharding the ledger would be a *new project* with its own (saga-based) correctness model — explicitly out of scope here, and called out so no reviewer mistakes the ceiling for an accident.
+The cost is the **cross-shard transfer**. When money moves between two merchants (or to an external rail) the two wallets live on different shards, so a single transaction can't cover both legs. Those transfers take a **clearing-account two-phase protocol with compensation** — a saga, used at exactly the boundary a transaction cannot cross and nowhere else. It is built so no lock is ever held across the network: each shard commits a short local transaction, and the two are linked over the existing outbox→Kafka path. The price is a genuine in-flight window for cross-shard transfers, a `cross_shard_transfer` state machine, and a routing directory — all detailed in doc 29.
 
-> **About the throughput number.** Elsewhere you'll see ~1,000 transfers/sec as a working figure. That is the _demonstrated_ target on a small cluster — the number the benchmark suite drives to — not the limit of the design. You raise it by adding stateless replicas until the primary is the bottleneck, then by scaling the primary vertically.
+> **About the throughput number.** Elsewhere you'll see ~1,000 transfers/sec as a working figure: the _demonstrated_ target on a small cluster, not the limit of the design. Per-shard throughput is raised the boring way (faster disks, more cores, batching); total throughput is raised by adding shards.
 
 ---
 
@@ -38,9 +32,9 @@ So RRQ keeps **one logical ledger** and scales its writes vertically. The honest
 
 | Axis | What scales | How | Bounded by |
 | --- | --- | --- | --- |
-| **Stateless tier** | API Gateway, Outbox Relay, Ledger / Webhook / Fraud workers, Admin Dashboard | Add replicas (HPA on consumer lag) | The ledger primary |
-| **Read path** | Dashboard / operator queries | Postgres standbys + projections (CQRS) | Replication lag (seconds) |
-| **Write ledger** | Postings | Vertical (one primary) + HA standby | One primary's write throughput |
+| **Stateless tier** | API Gateway, Outbox Relay, Ledger / Webhook / Fraud workers, Admin Dashboard | Add replicas (HPA on consumer lag) | The shard a job routes to |
+| **Read path** | Dashboard / operator queries | Per-shard standbys + projections (CQRS) | Replication lag (seconds) |
+| **Write ledger** | Postings | Horizontal (add shards); vertical within a shard (one primary + HA standby) | One shard primary's throughput, per shard |
 
 The interesting engineering is making "more stateless replicas" _safe_ for the orderings RRQ promises — which is the next section.
 
@@ -64,7 +58,7 @@ The Ledger Worker is the **exemplar**: it scales to any number of replicas with 
 
 The outbox relay produces `transfer.completed`/`transfer.failed` events to a Kafka topic `notify` with `N` partitions (default `16`), using `merchant_id` as the message key. So **all of a merchant's events land on one partition, in `events.id` order**. Kafka's consumer-group protocol assigns each partition to exactly one live webhook worker, so a merchant's deliveries are attempted serially across any number of replicas. On a worker death, Kafka rebalances the partition to a peer; the only ordering-relevant window is the brief rebalance pause, during which the partition is paused, never reordered.
 
-Changing `N` (16 → 32) changes which merchant hashes to which partition, so RRQ fixes `N` at deploy time. That's the genuine cost of the partitioning approach, and the only resharding edge in the system — there is no ledger resharding to worry about, because the ledger isn't sharded.
+Changing `N` (16 → 32) changes which merchant hashes to which partition, so RRQ fixes `N` at deploy time. That's one of the system's two resharding edges; the other is the ledger shard ring ([`deep-dives/29-LEDGER-SHARDING.md`](deep-dives/29-LEDGER-SHARDING.md)), which uses consistent hashing so adding a shard moves only a bounded subset of merchants.
 
 ---
 
@@ -82,7 +76,7 @@ Replica counts are the _production floor_; the [deployment doc](deep-dives/28-DE
 | Fraud Worker | 2 | yes | replicas (plain consumer group) | plain rebalance; velocity state is in shared Redis |
 | Reconciliation | n/a (batch) | yes | parallel per-wallet-range jobs | re-run is idempotent; leader-elected (Postgres advisory lock) to avoid overlap |
 | Admin Dashboard | 2 | yes | replicas | LB reroutes; holds no session state worth preserving |
-| Postgres | 2 (primary+standby) | n/a | vertical (primary) | CloudNativePG promotes the standby in seconds |
+| Postgres (per shard) | 2 (primary+standby) × N shards | n/a | vertical per shard; add shards for write scale | CloudNativePG promotes the standby in seconds |
 | Redis | 2 + Sentinel | n/a | replica failover | Sentinel promotes a replica |
 
 Three of these deserve a note:
@@ -101,7 +95,7 @@ The availability story is concrete. Walking the failure cases:
 
 - **A worker pod dies.** Kubernetes reschedules it; peers carry the load. Kafka reassigns the dead worker's partitions to survivors. A ledger transaction that was in flight was rolled back by Postgres, so its job is just redelivered and re-run (idempotent via `UNIQUE(transfer_id, leg)`). No work is lost; latency briefly rises.
 - **A node dies.** Same as above for every pod on it, in parallel. Because each Deployment runs ≥2 replicas spread across nodes (anti-affinity), no service goes to zero.
-- **The Postgres primary dies.** CloudNativePG promotes the standby; the `postgres-rw` Service follows the new primary. Workers reconnect and retry; an in-flight transaction that may or may not have committed is safe to re-attempt because the postings are idempotent. RPO is effectively zero for committed transactions (synchronous replication / continuous WAL); the gap is a few seconds of promotion.
+- **A shard's Postgres primary dies.** CloudNativePG promotes that shard's standby; the shard's `postgres-rw` Service follows the new primary. Only that shard's merchants pause briefly; the other shards are unaffected. Workers reconnect and retry; an in-flight transaction that may or may not have committed is safe to re-attempt because the postings are idempotent. RPO is effectively zero for committed transactions (synchronous replication / continuous WAL); the gap is a few seconds of promotion.
 - **A Redis node dies.** Sentinel promotes a replica. Velocity counters and breaker memory may lose a moment of un-fsynced state — tolerable, because **no invariant depends on Redis**. Idempotency and the ledger are in Postgres.
 - **The whole region dies.** Out of scope. RRQ is single-region. Stated plainly so no reviewer mistakes the HA story for a DR story.
 
@@ -111,6 +105,6 @@ The shape to notice: every failure resolves to "a peer or a standby takes over w
 
 ## What this buys, and what it costs
 
-**Buys:** the system can lose any single component and keep running; it absorbs more load by adding replicas; and its money-movement path is a single, atomic, strongly-consistent flow that a reviewer can reason about completely. "What happens when this pod dies?" gets a specific answer at every tier.
+**Buys:** the system can lose any single component and keep running; it absorbs more load by adding replicas *and shards*; and its money-movement path is a single atomic transaction for the common intra-shard case, with an explicit clearing protocol at shard boundaries that a reviewer can reason about completely. "What happens when this pod dies?" gets a specific answer at every tier.
 
-**Costs:** more moving parts than a single-process design (Kafka rebalancing, leader election, failover controllers), one resharding edge (the Kafka partition count), and a write-throughput ceiling at one Postgres primary. These are paid deliberately: the first two are the price of HA, and the third is the price of keeping exactly one correct flow for money — which, for a correctness-critical ledger, is the right thing to buy.
+**Costs:** more moving parts than a single-process design (Kafka rebalancing, leader election, failover controllers), two resharding edges (the Kafka partition count and the ledger shard ring), a routing directory, and a reintroduced in-flight window for cross-shard transfers. These are paid deliberately: the HA machinery is the price of surviving failure, and the cross-shard saga is the price of horizontal write scale — confined to the boundary so the common transfer never pays it.

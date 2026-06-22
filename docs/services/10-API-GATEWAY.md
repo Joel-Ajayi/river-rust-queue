@@ -1,13 +1,5 @@
 # 10: API Gateway
 
-> **What this is.** The service document for the API Gateway. Explains exactly what it does and exactly how it does it.
->
-> **Reading time.** ~15 minutes.
->
-> **Prerequisites.** Read [`../00-OVERVIEW.md`](../00-OVERVIEW.md) and [`../02-INVARIANTS.md`](../02-INVARIANTS.md) first.
-
----
-
 ## What it does
 
 The API Gateway is the _only_ synchronous component in the merchant's request path. Everything else in RRQ is asynchronous; the gateway exists to convert synchronous merchant requests into durable asynchronous work as quickly as possible.
