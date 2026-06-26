@@ -1,12 +1,12 @@
-# 02: Invariants
+# 01: Invariants
 
-The precise, testable statements about what RRQ guarantees — not slogans, but statements a test can falsify, and that the suite *does* try to falsify. Each has a name (`I1`…`I9`) used across the other docs.
+The precise, testable statements about what RRQ guarantees — not slogans, but statements a test can falsify, and that the suite *does* try to falsify. Each has a name (`I1`…`I9`) used across the system design.
 
 ## I1 — Conservation of value
 
 > Every transfer posts exactly one `debit` and one `credit` leg of equal magnitude, to two distinct wallets, in a single transaction. For every `transfer_id` there is exactly one `(transfer_id,'debit')` and one `(transfer_id,'credit')` row in `ledger_entries`, with `|debit.amount| = credit.amount`.
 
-Money is never created or destroyed. **Enforced** by writing both legs in one serializable transaction ([→ `services/11-LEDGER-WORKER.md`](services/11-LEDGER-WORKER.md)) — they commit together or not at all, so the debit-then-crash limbo can't exist — plus `UNIQUE(transfer_id, leg)` against a redelivered third leg; reconciliation re-verifies the pairing nightly. **Tested** by chaos: 1,000 transfers while killing the worker, then assert one debit + one credit of equal magnitude per `transfer_id`.
+Money is never created or destroyed. **Enforced** by writing both legs in one serializable transaction — they commit together or not at all, so the debit-then-crash limbo can't exist — plus `UNIQUE(transfer_id, leg)` against a redelivered third leg; reconciliation re-verifies the pairing nightly. **Tested** by chaos: 1,000 transfers while killing the worker, then assert one debit + one credit of equal magnitude per `transfer_id`.
 
 ## I2 — No negative balance on active wallets
 
@@ -30,7 +30,7 @@ A wallet's history is a clean, replayable sequence. **Enforced** by the `BIGSERI
 
 > For any merchant `M`, webhook deliveries are *attempted* in the order their source events occurred.
 
-Merchants build state machines on webhooks, so order matters. **Enforced** by publishing notify events keyed by `merchant_id` to Kafka in `events.id` order: all of `M`'s events land on one partition, and Kafka assigns each partition to exactly one live worker ([→ `services/12-WEBHOOK-WORKER.md`](services/12-WEBHOOK-WORKER.md)). "Attempted in order," not "succeeds in order" — a failing event head-of-line-blocks its own partition, bounded by the retry policy; different merchants are independent. **Tested**: 100 events × 10 merchants in known order → each endpoint receives its sequence; a slow merchant neither reorders nor blocks others.
+Merchants build state machines on webhooks, so order matters. **Enforced** by publishing notify events keyed by `merchant_id` to Kafka in `events.id` order: all of `M`'s events land on one partition, and Kafka assigns each partition to exactly one live worker. "Attempted in order," not "succeeds in order" — a failing event head-of-line-blocks its own partition, bounded by the retry policy; different merchants are independent. **Tested**: 100 events × 10 merchants in known order → each endpoint receives its sequence; a slow merchant neither reorders nor blocks others.
 
 ## I6 — Immutable history
 
@@ -69,4 +69,3 @@ Stated so reviewers know the exact boundary of the promises:
 ## Where to read next
 
 - The system shape that upholds these → [`00-OVERVIEW.md`](00-OVERVIEW.md)
-- A specific implementation → `services/`

@@ -4,7 +4,7 @@ The whole system in one read — what RRQ is, the problem it solves, and how the
 
 ## What RRQ is
 
-RRQ is the correctness-critical **core** of a payment system: merchants tell it "move 5,000 NGN from wallet A to wallet B" and it executes that durably, without losing money or paying twice. It is a **closed-loop ledger** — value enters when an operator funds a wallet ([→ `services/16-MERCHANT-WALLET-LIFECYCLE.md`](services/16-MERCHANT-WALLET-LIFECYCLE.md)) and only ever moves *between wallets inside the system*; there is no bank or card off-ramp.
+RRQ is the correctness-critical **core** of a payment system: merchants tell it "move 5,000 NGN from wallet A to wallet B" and it executes that durably, without losing money or paying twice. It is a **closed-loop ledger** — value enters when an operator funds a wallet and only ever moves *between wallets inside the system*; there is no bank or card off-ramp.
 
 It deliberately leaves out everything that isn't the hard correctness core: no custody of real funds, no card-network or bank integration, no KYC/AML, no FX. Those are years of regulatory and integration work, and none of them is where money is silently lost to a race or a crash. RRQ is the engine underneath, built to be right under failure.
 
@@ -41,13 +41,13 @@ Two more ideas tie these together:
 - **At-least-once delivery + idempotent handlers.** A broker can't give exactly-once (impossible in general). Kafka delivers at least once; a `UNIQUE` constraint turns any duplicate into a no-op. The combination is *effectively* exactly-once — the only correct answer.
 - **The transactional outbox.** Never "write to the DB, then publish to Kafka" — a crash between the two loses the message. The message is written to the `events` table *in the same transaction* as the state change, and a relay publishes it afterward. A fact and its notification are equally durable.
 
-And one people get wrong: a Kafka **consumer group gives you delivery, not order** — two replicas can process two messages for one key at once. Where order matters (a merchant's webhooks) RRQ pins the key to a Kafka partition so exactly one worker owns it. Where it only *looks* like it matters (fraud velocity) the computation is order-insensitive and needs no ordering at all. [→ `03-SCALING-AND-AVAILABILITY.md`](03-SCALING-AND-AVAILABILITY.md)
+And one people get wrong: a Kafka **consumer group gives you delivery, not order** — two replicas can process two messages for one key at once. Where order matters (a merchant's webhooks) RRQ pins the key to a Kafka partition so exactly one worker owns it. Where it only *looks* like it matters (fraud velocity) the computation is order-insensitive and needs no ordering at all.
 
 ## The closed loop, and the one place a saga appears
 
 The decisive scoping choice is the closed loop: because RRQ never settles to an external bank, a transfer moves value between two wallets that can share a transaction — so it is **one transaction**, not a multi-step saga with compensating undos. That deletes a whole category of machinery (sagas, distributed locks, in-flight recovery state). The rule is simply: **if a transaction can cover it, use a transaction.**
 
-A saga returns in exactly one place. The ledger is **sharded by merchant** for write scale ([→ `deep-dives/29-LEDGER-SHARDING.md`](deep-dives/29-LEDGER-SHARDING.md)), so a transfer between two *different* merchants crosses a shard boundary a single transaction can't span. Those cross-shard transfers use a clearing-account two-phase protocol with compensation — a saga used only where a transaction genuinely cannot reach, and nowhere else. The common transfer (a customer paying its own merchant, same shard) stays one transaction.
+A saga returns in exactly one place. The ledger is **sharded by merchant** for write scale, so a transfer between two *different* merchants crosses a shard boundary a single transaction can't span. Those cross-shard transfers use a clearing-account two-phase protocol with compensation — a saga used only where a transaction genuinely cannot reach, and nowhere else. The common transfer (a customer paying its own merchant, same shard) stays one transaction.
 
 ## The merchant's view
 
@@ -93,7 +93,7 @@ Kong sits at the edge (TLS, coarse JWT check, rate limit). The custom **API Gate
 - **Synchronous (the request path):** Merchant → Kong → Gateway → one Postgres transaction (insert the `jobs` row + the `job.requested` outbox event) → `202`. That commit is the durability boundary. Nothing else is in the path.
 - **Asynchronous (everything else):** the relay publishes the outbox to Kafka; the Ledger Worker posts each transfer in one transaction; webhooks go out. None of it blocks the merchant's call.
 
-**Every box is a fleet of ≥2 instances** — there is no "the ledger worker," only the ledger workers, and the same for every backend (primary + standby, automatic failover). You add throughput by adding replicas (and shards); you survive the loss of any single pod, node, or primary because a peer takes over in seconds. Where replicas could race, the database serializes them (a row lock, a unique constraint, a partition assignment) — never anything in process memory. Full story in [`03-SCALING-AND-AVAILABILITY.md`](03-SCALING-AND-AVAILABILITY.md).
+**Every box is a fleet of ≥2 instances** — there is no "the ledger worker," only the ledger workers, and the same for every backend (primary + standby, automatic failover). You add throughput by adding replicas (and shards); you survive the loss of any single pod, node, or primary because a peer takes over in seconds. Where replicas could race, the database serializes them (a row lock, a unique constraint, a partition assignment) — never anything in process memory.
 
 ## The happy path, once
 
@@ -130,17 +130,17 @@ sequenceDiagram
 
 Notice: the API responds *before* any posting happens (the commit at step 2 is the durability boundary — once the `jobs` row exists, the system owns the work); the posting is **one atomic step** (both legs, the job's status, and the outbox notification commit together, or roll back with nothing to repair); the webhook is its own durability domain and retries independently.
 
-A **failure** (insufficient balance, frozen wallet, currency mismatch) is not a crash to recover — it's a normal terminal outcome, still one transaction: no `ledger_entries` are written, so no money moved and there is nothing to undo (conservation holds trivially). A **retry** conflicts on the idempotency key and returns the original `job_id`, so the transfer happens at most once. Exact sequences and edge cases live in [API Gateway](services/10-API-GATEWAY.md).
+A **failure** (insufficient balance, frozen wallet, currency mismatch) is not a crash to recover — it's a normal terminal outcome, still one transaction: no `ledger_entries` are written, so no money moved and there is nothing to undo (conservation holds trivially). A **retry** conflicts on the idempotency key and returns the original `job_id`, so the transfer happens at most once.
 
 ## The services, one line each
 
-- **API Gateway** — auth (JWT), wallet-ownership check (I9), validation; inserts the `jobs` row + `job.requested` outbox event in one transaction, returns `202`. The only synchronous component. [→ `services/10-API-GATEWAY.md`](services/10-API-GATEWAY.md)
-- **Outbox Relay** — drains the `events` table to the right Kafka topic in id order. The single bridge from Postgres to Kafka. [→ `deep-dives/25-EVENT-STORE-AND-PROJECTIONS.md`](deep-dives/25-EVENT-STORE-AND-PROJECTIONS.md)
-- **Ledger Worker** — the money mover: posts each transfer as one serializable transaction (lock both wallets, check balance, write both legs, finish the job, enqueue the notification). Crash-safe by construction, idempotent via `UNIQUE(transfer_id, leg)`. [→ `services/11-LEDGER-WORKER.md`](services/11-LEDGER-WORKER.md)
-- **Webhook Worker** — signed notifications over the Kafka `notify` topic, partitioned by `merchant_id` so per-merchant order holds across replicas; backoff with jitter, a per-merchant breaker, DLQ on terminal failure. [→ `services/12-WEBHOOK-WORKER.md`](services/12-WEBHOOK-WORKER.md)
-- **Fraud Worker** — detective control: watches for velocity anomalies and freezes suspect wallets; the count is order-insensitive, so it load-balances freely. Doesn't gate transfers. [→ `services/13-FRAUD-WORKER.md`](services/13-FRAUD-WORKER.md)
-- **Reconciliation** — nightly batch: re-derives balances from the postings and checks conservation and the cache; any drift is an alert, never a silent fix. [→ `services/14-RECONCILIATION.md`](services/14-RECONCILIATION.md)
-- **Admin Dashboard** — operator surface: DLQ replay, consumer lag, breaker state, freeze/unfreeze. Not in the request path. [→ `services/15-ADMIN-DASHBOARD.md`](services/15-ADMIN-DASHBOARD.md)
+- **API Gateway** — auth (JWT), wallet-ownership check, validation; inserts the `jobs` row + `job.requested` outbox event in one transaction, returns `202`. The only synchronous component.
+- **Outbox Relay** — drains the `events` table to the right Kafka topic in id order. The single bridge from Postgres to Kafka.
+- **Ledger Worker** — the money mover: posts each transfer as one serializable transaction (lock both wallets, check balance, write both legs, finish the job, enqueue the notification). Crash-safe by construction, idempotent via `UNIQUE(transfer_id, leg)`.
+- **Webhook Worker** — signed notifications over the Kafka `notify` topic, partitioned by `merchant_id` so per-merchant order holds across replicas; backoff with jitter, a per-merchant breaker, DLQ on terminal failure.
+- **Fraud Worker** — detective control: watches for velocity anomalies and freezes suspect wallets; the count is order-insensitive, so it load-balances freely. Doesn't gate transfers.
+- **Reconciliation** — nightly batch: re-derives balances from the postings and checks conservation and the cache; any drift is an alert, never a silent fix.
+- **Admin Dashboard** — operator surface: DLQ replay, consumer lag, breaker state, freeze/unfreeze. Not in the request path.
 
 ## The data backends
 
@@ -150,15 +150,12 @@ A **failure** (insufficient balance, frozen wallet, currency mismatch) is not a 
 
 ## What "correct" means
 
-"Correct" means a specific list of invariants holds at all times — testable statements, not slogans: conservation of value, no negative balances, at-most-once execution per idempotency key, per-wallet posting order, per-merchant webhook order, immutable history, and tenant isolation. Each is spelled out with the mechanism that enforces it, and tested adversarially, in [`02-INVARIANTS.md`](02-INVARIANTS.md).
+"Correct" means a specific list of invariants holds at all times — testable statements, not slogans: conservation of value, no negative balances, at-most-once execution per idempotency key, per-wallet posting order, per-merchant webhook order, immutable history, and tenant isolation. Each is spelled out with the mechanism that enforces it, and tested adversarially.
 
 ## Out of scope (deliberately)
 
-Not PayPal: no custody, settlement to banks, card networks, KYC/AML, FX, disputes, or fraud ML — each a project of its own. Not multi-region, not active-active, not globally ordered. The ledger *is* sharded for write scale, but staying single-region is a deliberate boundary, not an oversight. The ~1,000 TPS benchmark figure is what a small cluster proves, not a design ceiling. [→ `03-SCALING-AND-AVAILABILITY.md`](03-SCALING-AND-AVAILABILITY.md)
+Not PayPal: no custody, settlement to banks, card networks, KYC/AML, FX, disputes, or fraud ML — each a project of its own. Not multi-region, not active-active, not globally ordered. The ledger *is* sharded for write scale, but staying single-region is a deliberate boundary, not an oversight. The ~1,000 TPS benchmark figure is what a small cluster proves, not a design ceiling.
 
 ## Where to read next
 
-- The testable correctness statements → [`02-INVARIANTS.md`](02-INVARIANTS.md)
-- How it scales out and stays up → [`03-SCALING-AND-AVAILABILITY.md`](03-SCALING-AND-AVAILABILITY.md)
-- How the ledger shards → [`deep-dives/29-LEDGER-SHARDING.md`](deep-dives/29-LEDGER-SHARDING.md)
-- Implementing a service → its file under `services/`, then the deep-dives it links to.
+- The testable correctness statements → [`01-INVARIANTS.md`](01-INVARIANTS.md)
