@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package rrq.api.v1;
+
+// ---- Authentication ----
+
+message AuthTokenResponse {
+  string token      = 1;
+  int32  expires_in = 2;   // seconds until expiry
+}
+
+// ---- Transfers ----
+
+message CreateTransferRequest {
+  string from_wallet = 1;
+  string to_wallet   = 2;
+  int64  amount      = 3;
+  string currency    = 4;
+  string reference   = 5;
+}
+
+message JobLinks {
+  string self = 1;
+}
+
+message CreateTransferResponse {
+  string   job_id = 1;
+  string   status = 2;
+  JobLinks links  = 3;
+}
+
+// ---- Payouts ----
+
+message PayoutRecipient {
+  string to_wallet = 1;
+  int64  amount    = 2;
+  string reference = 3;
+}
+
+message CreatePayoutRequest {
+  string from_wallet                   = 1;
+  repeated PayoutRecipient recipients  = 2;
+}
+
+message CreatePayoutResponse {
+  string   job_id = 1;
+  string   status = 2;
+  JobLinks links  = 3;
+}
+
+// ---- Job status ----
+
+message TransferOutcome {
+  string transfer_id = 1;
+  string status      = 2;
+}
+
+message FailureDetail {
+  string reason = 1;
+  string detail = 2;
+}
+
+message BulkPayoutSummary {
+  int32 total_recipients = 1;
+  int32 completed        = 2;
+  int32 failed           = 3;
+  int32 pending          = 4;
+}
+
+message GetJobResponse {
+  string             job_id       = 1;
+  string             type         = 2;
+  string             status       = 3;
+  string             created_at   = 4;
+  string             completed_at = 5;
+  TransferOutcome    transfer     = 6;
+  FailureDetail      failure      = 7;
+  BulkPayoutSummary  summary      = 8;
+}
+
+// ---- Errors ----
+
+message ErrorResponse {
+  string error   = 1;
+  string message = 2;
+  string field   = 3;
+}

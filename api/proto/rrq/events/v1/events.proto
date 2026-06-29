@@ -1,0 +1,197 @@
+syntax = "proto3";
+
+package rrq.events.v1;
+
+
+import "google/protobuf/timestamp.proto";
+
+// EventEnvelope is the top-level wrapper stored in the events table's payload column.
+// Each event_type maps to exactly one of the oneof payloads below.
+message EventEnvelope {
+  string event_id       = 1;
+  string event_type     = 2;
+  string aggregate_type = 3;
+  string aggregate_id   = 4;
+  string correlation_id = 5;
+  google.protobuf.Timestamp occurred_at = 6;
+
+  oneof payload {
+    JobRequestedPayload           job_requested           = 10;
+    TransferCompletedPayload      transfer_completed      = 11;
+    TransferFailedPayload         transfer_failed         = 12;
+    BulkPayoutCompletedPayload    bulk_payout_completed   = 13;
+    FraudSuspectedPayload         fraud_suspected         = 14;
+    WalletFrozenPayload           wallet_frozen           = 15;
+    WalletUnfrozenPayload         wallet_unfrozen         = 16;
+    WalletCreatedPayload          wallet_created          = 17;
+    WebhookDeliveredPayload       webhook_delivered       = 18;
+    WebhookFailedPayload          webhook_failed          = 19;
+    MerchantCreatedPayload        merchant_created        = 20;
+    MerchantApiKeyRotatedPayload  merchant_api_key_rotated = 21;
+    ReconciliationCompletedPayload reconciliation_completed = 22;
+    ReconciliationAlertPayload    reconciliation_alert    = 23;
+    OperatorActionPayload         operator_action         = 24;
+  }
+}
+
+// ---- Job lifecycle ----
+
+message TransferData {
+  string from_wallet = 1;
+  string to_wallet   = 2;
+  int64  amount      = 3;
+  string currency    = 4;
+  string reference   = 5;
+}
+
+message BulkPayoutRecipient {
+  string to_wallet = 1;
+  int64  amount    = 2;
+  string reference = 3;
+}
+
+message BulkPayoutData {
+  string from_wallet                    = 1;
+  repeated BulkPayoutRecipient recipients = 2;
+}
+
+message JobRequestedPayload {
+  string job_id          = 1;
+  string merchant_id     = 2;
+  string idempotency_key = 3;
+  string job_type        = 4;   // "transfer" | "bulk_payout"
+
+  oneof data {
+    TransferData   transfer_data    = 10;
+    BulkPayoutData bulk_payout_data = 11;
+  }
+}
+
+// ---- Transfer outcomes ----
+
+message TransferCompletedPayload {
+  string job_id      = 1;
+  string transfer_id = 2;
+  string from_wallet = 3;
+  string to_wallet   = 4;
+  int64  amount      = 5;
+  string currency    = 6;
+}
+
+message TransferFailedPayload {
+  string job_id      = 1;
+  string transfer_id = 2;
+  string reason      = 3;
+}
+
+message BulkPayoutFailure {
+  string transfer_id = 1;
+  string reason      = 2;
+}
+
+message BulkPayoutCompletedPayload {
+  string job_id                         = 1;
+  int32  total                          = 2;
+  int32  succeeded                      = 3;
+  int32  failed                         = 4;
+  repeated BulkPayoutFailure failures   = 5;
+}
+
+// ---- Fraud ----
+
+message FraudSuspectedPayload {
+  string wallet_id      = 1;
+  string rule           = 2;
+  int32  observed_count = 3;
+  int32  threshold      = 4;
+  string action_taken   = 5;
+}
+
+// ---- Wallet events ----
+
+message WalletFrozenPayload {
+  string wallet_id = 1;
+  string reason    = 2;
+  string frozen_by = 3;   // "system" | "operator_<id>"
+}
+
+message WalletUnfrozenPayload {
+  string wallet_id   = 1;
+  string reason      = 2;
+  string unfrozen_by = 3;
+}
+
+message WalletCreatedPayload {
+  string wallet_id    = 1;
+  string merchant_id  = 2;
+  string wallet_type  = 3;
+  string currency     = 4;
+  string external_ref = 5;
+}
+
+// ---- Webhook events ----
+
+message WebhookDeliveredPayload {
+  string delivery_id     = 1;
+  string merchant_id     = 2;
+  string source_event_id = 3;
+  int32  status_code     = 4;
+  int32  attempt_count   = 5;
+  google.protobuf.Timestamp delivered_at = 6;
+}
+
+message WebhookFailedPayload {
+  string delivery_id     = 1;
+  string merchant_id     = 2;
+  string source_event_id = 3;
+  int32  attempt_count   = 4;
+  string last_error      = 5;
+}
+
+// ---- Merchant events ----
+
+message MerchantCreatedPayload {
+  string merchant_id = 1;
+  string name        = 2;
+  string tier        = 3;
+  string created_by  = 4;
+}
+
+message MerchantApiKeyRotatedPayload {
+  string merchant_id = 1;
+  string rotated_by  = 2;
+}
+
+// ---- Reconciliation events ----
+
+message ReconciliationCompletedPayload {
+  string run_id                            = 1;
+  google.protobuf.Timestamp window_start   = 2;
+  google.protobuf.Timestamp window_end     = 3;
+  int64  ledger_sum                        = 4;
+  int32  wallets_checked                   = 5;
+  int32  discrepancies_found               = 6;
+  double duration_seconds                  = 7;
+}
+
+message ReconciliationAlertPayload {
+  string run_id          = 1;
+  string kind            = 2;   // "global_conservation" | "projection_drift" | "balance_after" | "leg_imbalance"
+  string wallet_id       = 3;
+  int64  derived_balance = 4;
+  int64  cached_balance  = 5;
+  int64  delta           = 6;
+}
+
+// ---- Operator events ----
+
+message OperatorActionPayload {
+  string operator_id  = 1;
+  string action       = 2;   // "dlq.replay" | "wallet.freeze" | "wallet.seed" | etc.
+  string target_type  = 3;
+  string target_id    = 4;
+  string params_json  = 5;   // JSON-encoded parameters
+  string outcome      = 6;   // "success" | "failure"
+  string before_state = 7;   // JSON-encoded
+  string after_state  = 8;   // JSON-encoded
+}

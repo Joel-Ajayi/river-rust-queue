@@ -1,0 +1,12 @@
+version: v2
+modules:
+  - path: .
+    name: buf.build/rrq/proto # The name of the module, which is used to identify it in the Buf registry.
+lint:
+  use:
+    - STANDARD # Enforces standard Google/Protobuf naming conventions
+  except:
+    - PACKAGE_VERSION_SUFFIX # Allows for package version suffixes.
+breaking:
+  use:
+    - FILE # Checks for any changes that would crash existing clients
