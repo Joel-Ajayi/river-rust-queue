@@ -1,0 +1,58 @@
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: river-rust-queue
+build:
+  local:
+    push: false
+  artifacts:
+    - image: rrq/api-gateway
+      context: go-services
+      docker:
+        dockerfile: Dockerfile
+        buildArgs:
+          SERVICE: api-gateway
+    - image: rrq/outbox-relay
+      context: go-services
+      docker:
+        dockerfile: Dockerfile
+        buildArgs:
+          SERVICE: outbox-relay
+    - image: rrq/ledger-worker
+      context: go-services
+      docker:
+        dockerfile: Dockerfile
+        buildArgs:
+          SERVICE: ledger-worker
+    - image: rrq/webhook-worker
+      context: go-services
+      docker:
+        dockerfile: Dockerfile
+        buildArgs:
+          SERVICE: webhook-worker
+    - image: rrq/fraud-worker
+      context: go-services
+      docker:
+        dockerfile: Dockerfile
+        buildArgs:
+          SERVICE: fraud-worker
+    - image: rrq/recon-worker
+      context: go-services
+      docker:
+        dockerfile: Dockerfile
+        buildArgs:
+          SERVICE: recon-worker
+    - image: rrq/admin-dashboard
+      context: go-services
+      docker:
+        dockerfile: Dockerfile
+        buildArgs:
+          SERVICE: admin-dashboard
+    - image: rrq/migrate
+      context: deploy/db/migrations
+      docker:
+        dockerfile: Dockerfile
+deploy:
+  kustomize:
+    paths:
+      - ../rrq-gitops/rrq/overlays/dev
