@@ -47,35 +47,65 @@ Nine invariants, each stated precisely enough to be tested and adversarially val
 
 ## Architecture
 
+> **For a deep dive into the design decisions driving this architecture, read [`docs/00-OVERVIEW.md`](docs/00-OVERVIEW.md).**
+
+
 ```mermaid
 graph TD
-    merchant["Merchant System"]
-    kong["Kong — edge gateway<br/>TLS · coarse JWT check · per-merchant rate limiting"]
-    gateway["API Gateway<br/>JWT auth · wallet-ownership authz · validation<br/>INSERT jobs + job.requested outbox (one txn) → 202 Accepted"]
-    postgres["PostgreSQL (CloudNativePG)<br/>sharded by merchant, append-only source of truth"]
-    relay["Outbox Relay<br/>publishes unpublished events → Kafka"]
-    kafka["Kafka (Strimzi KRaft)<br/>topic jobs · topic notify"]
-    ledgerWorker["Ledger Worker<br/>SERIALIZABLE txn per transfer"]
-    fraudWorker["Fraud Worker<br/>detective, non-blocking velocity checks"]
-    webhookWorker["Webhook Worker<br/>per-merchant FIFO via Kafka partitions"]
-    redisState["Redis (Bitnami)<br/>ephemeral velocity sorted sets"]
-    adminDashboard["Admin Dashboard<br/>DLQ replay · breaker reset"]
+  merchant["Merchant System"] -->|HTTPS request| kong["Kong, edge gateway<br/>TLS · JWT precheck · rate limit"]
+  kong -->|routes /v1| gateway["API Gateway<br/>(auth, validation, idempotency)"]
+  gateway -->|"INSERT jobs + job.requested (one txn)"| db[("PostgreSQL — sharded by merchant<br/>source of truth · append-only postings")]
+  relay["Outbox Relay<br/>(publishes events table → Kafka)"] -->|read unpublished| db
+  relay -->|job.requested| jobsTopic["Kafka topic: jobs<br/>group: ledger-workers<br/>group: fraud-workers"]
+  relay -->|transfer.completed/failed| notifyTopic["Kafka topic: notify<br/>partitioned by merchant_id"]
+  jobsTopic --> ledgerWorker["Ledger Worker<br/>(one serializable txn per transfer)"]
+  jobsTopic --> fraudWorker["Fraud Worker<br/>(velocity, detective)"]
+  ledgerWorker -->|"post legs + transfer.completed (one txn)"| db
+  fraudWorker -->|freeze wallet| db
+  notifyTopic --> webhookWorker["Webhook Worker<br/>(per-merchant ordering, retry, breaker)"]
+  webhookWorker -->|HTTPS| merchantEndpoint["Merchant Endpoint"]
 
-    merchant -->|"HTTPS POST"| kong
-    kong --> gateway
-    gateway -->|"INSERT jobs + outbox"| postgres
+  reconciliation["Reconciliation<br/>(nightly batch)"] -.->|reads & compares| db
+  adminDashboard["Admin Dashboard"] -.->|lag, breaker, DLQ replay, freeze| db
+```
 
-    relay -->|"read unpublished events"| postgres
-    relay -->|"produce"| kafka
+### The Happy Path
 
-    kafka -->|"consume job.requested"| ledgerWorker
-    kafka -->|"consume job.requested"| fraudWorker
-    kafka -->|"consume transfer.*"| webhookWorker
+```mermaid
+sequenceDiagram
+    autonumber
+    participant M as Merchant
+    participant API as API Gateway
+    participant DB as Postgres (merchant's shard)
+    participant RL as Outbox Relay
+    participant K as Kafka
+    participant LW as Ledger Worker
+    participant WW as Webhook Worker
 
-    ledgerWorker -->|"post legs + outbox"| postgres
-    fraudWorker -->|"velocity check"| redisState
-    webhookWorker -->|"HTTPS POST"| merchant
-    adminDashboard --> postgres
+    M->>API: POST /v1/transfers (Idempotency-Key)
+    rect rgb(240, 240, 240)
+        note over API,DB: Database Transaction
+        API->>DB: BEGIN TRANSACTION
+        API->>DB: INSERT jobs ON CONFLICT DO NOTHING
+        API->>DB: INSERT job.requested (outbox)
+        API->>DB: COMMIT
+    end
+    API-->>M: 202 Accepted (job_id)
+
+    RL->>DB: read unpublished events
+    RL->>K: publish job.requested → jobs topic
+
+    LW->>K: consume job.requested
+    LW->>DB: BEGIN SERIALIZABLE
+    Note over LW,DB: SELECT wallets FOR UPDATE (ordered)<br/>check balance · INSERT debit + credit legs<br/>UPDATE jobs completed · INSERT transfer.completed (outbox)
+    LW->>DB: COMMIT
+    LW->>K: commit offset
+
+    RL->>K: publish transfer.completed → notify topic
+    WW->>K: consume (assigned partition)
+    WW->>M: POST signed webhook
+    M-->>WW: 200 OK
+    WW->>DB: record delivery
 ```
 
 The system relies on six core Go microservices and one outbox relay, running behind a Kong edge gateway. **The single durable write on the request path is one Postgres transaction**; everything past it is asynchronous and crash-recoverable. **Every correctness guarantee is enforced in Postgres** (via transactions, row locks, and unique constraints). 
@@ -86,7 +116,8 @@ The stateful backend relies heavily on Kubernetes operators (CloudNativePG, Stri
 
 ## Repository Layout
 
-This repository contains **only application source code**. Infrastructure and deployments are strictly decoupled into the [`rrq-gitops`](../rrq-gitops) repository.
+This repository contains **only application source code**. Infrastructure and deployments are strictly decoupled into the [`rrq-gitops`](https://github.com/Joel-Ajayi/rrq-gitops) repository.
+
 
 | Path | Purpose |
 | --- | --- |
@@ -123,8 +154,9 @@ make dev
 
 1. **Bootstrap Production Infrastructure (Run Once):**
    ```bash
-   # Switch to the infrastructure repository
-   cd ../rrq-gitops
+   # Clone the infrastructure repository
+   git clone https://github.com/Joel-Ajayi/rrq-gitops.git
+   cd rrq-gitops
    make bootstrap-prod
    ```
    *This installs Argo CD into your cluster and immediately syncs the production configuration from the Git repository. You never run `kubectl apply` directly for production deployments.*

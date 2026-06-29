@@ -69,74 +69,8 @@ It's `202`, not `200`: the transfer hasn't happened yet — it's been _durably a
 
 ## Architecture at a glance
 
-```mermaid
-graph TD
-  merchant["Merchant System"] -->|HTTPS request| kong["Kong, edge gateway<br/>TLS · JWT precheck · rate limit"]
-  kong -->|routes /v1| gateway["API Gateway<br/>(auth, validation, idempotency)"]
-  gateway -->|"INSERT jobs + job.requested (one txn)"| db[("PostgreSQL — sharded by merchant<br/>source of truth · append-only postings")]
-  relay["Outbox Relay<br/>(publishes events table → Kafka)"] -->|read unpublished| db
-  relay -->|job.requested| jobsTopic["Kafka topic: jobs<br/>group: ledger-workers<br/>group: fraud-workers"]
-  relay -->|transfer.completed/failed| notifyTopic["Kafka topic: notify<br/>partitioned by merchant_id"]
-  jobsTopic --> ledgerWorker["Ledger Worker<br/>(one serializable txn per transfer)"]
-  jobsTopic --> fraudWorker["Fraud Worker<br/>(velocity, detective)"]
-  ledgerWorker -->|"post legs + transfer.completed (one txn)"| db
-  fraudWorker -->|freeze wallet| db
-  notifyTopic --> webhookWorker["Webhook Worker<br/>(per-merchant ordering, retry, breaker)"]
-  webhookWorker -->|HTTPS| merchantEndpoint["Merchant Endpoint"]
+> **See the [System Topology and Happy Path diagrams](../README.md#architecture) in the root README.**
 
-  reconciliation["Reconciliation<br/>(nightly batch)"] -.->|reads & compares| db
-  adminDashboard["Admin Dashboard"] -.->|lag, breaker, DLQ replay, freeze| db
-```
-
-Kong sits at the edge (TLS, coarse JWT check, rate limit). The custom **API Gateway** does the part no off-the-shelf gateway can: the durable idempotency claim and the hand-off into the ledger. Two paths:
-
-- **Synchronous (the request path):** Merchant → Kong → Gateway → one Postgres transaction (insert the `jobs` row + the `job.requested` outbox event) → `202`. That commit is the durability boundary. Nothing else is in the path.
-- **Asynchronous (everything else):** the relay publishes the outbox to Kafka; the Ledger Worker posts each transfer in one transaction; webhooks go out. None of it blocks the merchant's call.
-
-**Every box is a fleet of ≥2 instances** — there is no "the ledger worker," only the ledger workers, and the same for every backend (primary + standby, automatic failover). You add throughput by adding replicas (and shards); you survive the loss of any single pod, node, or primary because a peer takes over in seconds. Where replicas could race, the database serializes them (a row lock, a unique constraint, a partition assignment) — never anything in process memory.
-
-## The happy path, once
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant M as Merchant
-    participant API as API Gateway
-    participant DB as Postgres (merchant's shard)
-    participant RL as Outbox Relay
-    participant K as Kafka
-    participant LW as Ledger Worker
-    participant WW as Webhook Worker
-
-    M->>API: POST /v1/transfers (Idempotency-Key)
-    rect rgb(240, 240, 240)
-        note over API,DB: Database Transaction
-        API->>DB: BEGIN TRANSACTION
-        API->>DB: INSERT jobs ON CONFLICT DO NOTHING
-        API->>DB: INSERT job.requested (outbox)
-        API->>DB: COMMIT
-    end
-    API-->>M: 202 Accepted (job_id)
-
-    RL->>DB: read unpublished events
-    RL->>K: publish job.requested → jobs topic
-
-    LW->>K: consume job.requested
-    LW->>DB: BEGIN SERIALIZABLE
-    Note over LW,DB: SELECT wallets FOR UPDATE (ordered)<br/>check balance · INSERT debit + credit legs<br/>UPDATE jobs completed · INSERT transfer.completed (outbox)
-    LW->>DB: COMMIT
-    LW->>K: commit offset
-
-    RL->>K: publish transfer.completed → notify topic
-    WW->>K: consume (assigned partition)
-    WW->>M: POST signed webhook
-    M-->>WW: 200 OK
-    WW->>DB: record delivery
-```
-
-Notice: the API responds _before_ any posting happens (the commit at step 2 is the durability boundary — once the `jobs` row exists, the system owns the work); the posting is **one atomic step** (both legs, the job's status, and the outbox notification commit together, or roll back with nothing to repair); the webhook is its own durability domain and retries independently.
-
-A **failure** (insufficient balance, frozen wallet, currency mismatch) is not a crash to recover — it's a normal terminal outcome, still one transaction: no `ledger_entries` are written, so no money moved and there is nothing to undo (conservation holds trivially). A **retry** conflicts on the idempotency key and returns the original `job_id`, so the transfer happens at most once.
 
 ## The services, one line each
 

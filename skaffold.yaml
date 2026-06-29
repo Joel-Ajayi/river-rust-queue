@@ -55,4 +55,4 @@ build:
 deploy:
   kustomize:
     paths:
-      - ../rrq-gitops/rrq/overlays/dev
+      - github.com/Joel-Ajayi/rrq-gitops/rrq/overlays/dev
