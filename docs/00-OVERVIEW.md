@@ -4,7 +4,7 @@ The whole system in one read — what RRQ is, the problem it solves, and how the
 
 ## What RRQ is
 
-RRQ is the correctness-critical **core** of a payment system: merchants tell it "move 5,000 NGN from wallet A to wallet B" and it executes that durably, without losing money or paying twice. It is a **closed-loop ledger** — value enters when an operator funds a wallet and only ever moves *between wallets inside the system*; there is no bank or card off-ramp.
+RRQ is the correctness-critical **core** of a payment system: merchants tell it "move 5,000 NGN from wallet A to wallet B" and it executes that durably, without losing money or paying twice. It is a **closed-loop ledger** — value enters when an operator funds a wallet and only ever moves _between wallets inside the system_; there is no bank or card off-ramp.
 
 It deliberately leaves out everything that isn't the hard correctness core: no custody of real funds, no card-network or bank integration, no KYC/AML, no FX. Those are years of regulatory and integration work, and none of them is where money is silently lost to a race or a crash. RRQ is the engine underneath, built to be right under failure.
 
@@ -14,40 +14,40 @@ On one machine, a transfer is a database transaction — three lines, ACID, done
 
 A naive processor — read balance, debit A, credit B, return `200` — breaks in five concrete ways, each a real incident:
 
-| # | Failure | What goes wrong |
-| --- | --- | --- |
-| A | Crash between debit and credit | Money left A, never reached B — gone, unreconstructable |
-| B | Two transfers on A run concurrently | Both read the old balance; one debit is lost (lost update) |
-| C | Merchant retries a lost response | The transfer runs twice; the customer is paid double |
-| D | An off-by-one ships | Ledger drifts silently until the month-end close |
-| E | A downstream endpoint hangs | Workers pile up on doomed retries and cascade |
+| #   | Failure                             | What goes wrong                                            |
+| --- | ----------------------------------- | ---------------------------------------------------------- |
+| A   | Crash between debit and credit      | Money left A, never reached B — gone, unreconstructable    |
+| B   | Two transfers on A run concurrently | Both read the old balance; one debit is lost (lost update) |
+| C   | Merchant retries a lost response    | The transfer runs twice; the customer is paid double       |
+| D   | An off-by-one ships                 | Ledger drifts silently until the month-end close           |
+| E   | A downstream endpoint hangs         | Workers pile up on doomed retries and cascade              |
 
-These aren't avoidable — in a busy system they happen constantly. The design question is how to structure things so each is *automatically* prevented or recovered. That structure is RRQ.
+These aren't avoidable — in a busy system they happen constantly. The design question is how to structure things so each is _automatically_ prevented or recovered. That structure is RRQ.
 
 ## The ideas that answer them
 
 Each failure maps to a mechanism. This table is the rosetta stone — every component is just one of these made concrete:
 
-| Failure | Mechanism |
-| --- | --- |
-| **A. Partial completion** | **Atomic double-entry.** The debit and credit are two `ledger_entries` rows in **one serializable transaction** — they commit together or not at all, so a half-done transfer can't exist. A crash rolls back; the job is redelivered and re-run. |
-| **B. Concurrent operations** | **In-transaction row lock.** `SELECT … FOR UPDATE` on both wallet rows (ordered by id), held for the whole check-and-post. No distributed lease, no TTL. |
-| **C. Duplicate requests** | **Durable idempotency key.** `UNIQUE (merchant_id, idempotency_key)` inserted with `ON CONFLICT DO NOTHING`. First request wins; retries get the cached result. At most once per key, in Postgres — not a cache. |
-| **D. Silent integrity bugs** | **Immutable ledger + reconciliation.** Balances are *derived* by summing append-only postings; a nightly job re-derives and checks them. Any drift is an alert, never a silent fix. |
-| **E. External unavailability** | **Circuit breakers, backoff with jitter, DLQs.** Stop calling a dead endpoint, spread retries, and park terminally-failed work where a human can see it. |
+| Failure                        | Mechanism                                                                                                                                                                                                                                         |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A. Partial completion**      | **Atomic double-entry.** The debit and credit are two `ledger_entries` rows in **one serializable transaction** — they commit together or not at all, so a half-done transfer can't exist. A crash rolls back; the job is redelivered and re-run. |
+| **B. Concurrent operations**   | **In-transaction row lock.** `SELECT … FOR UPDATE` on both wallet rows (ordered by id), held for the whole check-and-post. No distributed lease, no TTL.                                                                                          |
+| **C. Duplicate requests**      | **Durable idempotency key.** `UNIQUE (merchant_id, idempotency_key)` inserted with `ON CONFLICT DO NOTHING`. First request wins; retries get the cached result. At most once per key, in Postgres — not a cache.                                  |
+| **D. Silent integrity bugs**   | **Immutable ledger + reconciliation.** Balances are _derived_ by summing append-only postings; a nightly job re-derives and checks them. Any drift is an alert, never a silent fix.                                                               |
+| **E. External unavailability** | **Circuit breakers, backoff with jitter, DLQs.** Stop calling a dead endpoint, spread retries, and park terminally-failed work where a human can see it.                                                                                          |
 
 Two more ideas tie these together:
 
-- **At-least-once delivery + idempotent handlers.** A broker can't give exactly-once (impossible in general). Kafka delivers at least once; a `UNIQUE` constraint turns any duplicate into a no-op. The combination is *effectively* exactly-once — the only correct answer.
-- **The transactional outbox.** Never "write to the DB, then publish to Kafka" — a crash between the two loses the message. The message is written to the `events` table *in the same transaction* as the state change, and a relay publishes it afterward. A fact and its notification are equally durable.
+- **At-least-once delivery + idempotent handlers.** A broker can't give exactly-once (impossible in general). Kafka delivers at least once; a `UNIQUE` constraint turns any duplicate into a no-op. The combination is _effectively_ exactly-once — the only correct answer.
+- **The transactional outbox.** Never "write to the DB, then publish to Kafka" — a crash between the two loses the message. The message is written to the `events` table _in the same transaction_ as the state change, and a relay publishes it afterward. A fact and its notification are equally durable.
 
-And one people get wrong: a Kafka **consumer group gives you delivery, not order** — two replicas can process two messages for one key at once. Where order matters (a merchant's webhooks) RRQ pins the key to a Kafka partition so exactly one worker owns it. Where it only *looks* like it matters (fraud velocity) the computation is order-insensitive and needs no ordering at all.
+And one people get wrong: a Kafka **consumer group gives you delivery, not order** — two replicas can process two messages for one key at once. Where order matters (a merchant's webhooks) RRQ pins the key to a Kafka partition so exactly one worker owns it. Where it only _looks_ like it matters (fraud velocity) the computation is order-insensitive and needs no ordering at all.
 
 ## The closed loop, and the one place a saga appears
 
 The decisive scoping choice is the closed loop: because RRQ never settles to an external bank, a transfer moves value between two wallets that can share a transaction — so it is **one transaction**, not a multi-step saga with compensating undos. That deletes a whole category of machinery (sagas, distributed locks, in-flight recovery state). The rule is simply: **if a transaction can cover it, use a transaction.**
 
-A saga returns in exactly one place. The ledger is **sharded by merchant** for write scale, so a transfer between two *different* merchants crosses a shard boundary a single transaction can't span. Those cross-shard transfers use a clearing-account two-phase protocol with compensation — a saga used only where a transaction genuinely cannot reach, and nowhere else. The common transfer (a customer paying its own merchant, same shard) stays one transaction.
+A saga returns in exactly one place. The ledger is **sharded by merchant** for write scale, so a transfer between two _different_ merchants crosses a shard boundary a single transaction can't span. Those cross-shard transfers use a clearing-account two-phase protocol with compensation — a saga used only where a transaction genuinely cannot reach, and nowhere else. The common transfer (a customer paying its own merchant, same shard) stays one transaction.
 
 ## The merchant's view
 
@@ -65,7 +65,7 @@ HTTP/1.1 202 Accepted
 { "job_id": "job_01HQX4...", "status": "pending" }
 ```
 
-It's `202`, not `200`: the transfer hasn't happened yet — it's been *durably accepted*. The response is fast because the gateway's job is to persist work, not to wait for it. The merchant learns the outcome from a signed **webhook** (`transfer.completed` / `transfer.failed`) under a second later, or by polling `GET /v1/jobs/<id>`. That is the whole surface; everything else exists behind it to make it correct under failure.
+It's `202`, not `200`: the transfer hasn't happened yet — it's been _durably accepted_. The response is fast because the gateway's job is to persist work, not to wait for it. The merchant learns the outcome from a signed **webhook** (`transfer.completed` / `transfer.failed`) under a second later, or by polling `GET /v1/jobs/<id>`. That is the whole surface; everything else exists behind it to make it correct under failure.
 
 ## Architecture at a glance
 
@@ -109,7 +109,13 @@ sequenceDiagram
     participant WW as Webhook Worker
 
     M->>API: POST /v1/transfers (Idempotency-Key)
-    API->>DB: BEGIN; INSERT jobs ON CONFLICT DO NOTHING; INSERT job.requested (outbox); COMMIT
+    rect rgb(240, 240, 240)
+        note over API,DB: Database Transaction
+        API->>DB: BEGIN TRANSACTION
+        API->>DB: INSERT jobs ON CONFLICT DO NOTHING
+        API->>DB: INSERT job.requested (outbox)
+        API->>DB: COMMIT
+    end
     API-->>M: 202 Accepted (job_id)
 
     RL->>DB: read unpublished events
@@ -128,7 +134,7 @@ sequenceDiagram
     WW->>DB: record delivery
 ```
 
-Notice: the API responds *before* any posting happens (the commit at step 2 is the durability boundary — once the `jobs` row exists, the system owns the work); the posting is **one atomic step** (both legs, the job's status, and the outbox notification commit together, or roll back with nothing to repair); the webhook is its own durability domain and retries independently.
+Notice: the API responds _before_ any posting happens (the commit at step 2 is the durability boundary — once the `jobs` row exists, the system owns the work); the posting is **one atomic step** (both legs, the job's status, and the outbox notification commit together, or roll back with nothing to repair); the webhook is its own durability domain and retries independently.
 
 A **failure** (insufficient balance, frozen wallet, currency mismatch) is not a crash to recover — it's a normal terminal outcome, still one transaction: no `ledger_entries` are written, so no money moved and there is nothing to undo (conservation holds trivially). A **retry** conflicts on the idempotency key and returns the original `job_id`, so the transfer happens at most once.
 
@@ -154,7 +160,7 @@ A **failure** (insufficient balance, frozen wallet, currency mismatch) is not a 
 
 ## Out of scope (deliberately)
 
-Not PayPal: no custody, settlement to banks, card networks, KYC/AML, FX, disputes, or fraud ML — each a project of its own. Not multi-region, not active-active, not globally ordered. The ledger *is* sharded for write scale, but staying single-region is a deliberate boundary, not an oversight. The ~1,000 TPS benchmark figure is what a small cluster proves, not a design ceiling.
+Not PayPal: no custody, settlement to banks, card networks, KYC/AML, FX, disputes, or fraud ML — each a project of its own. Not multi-region, not active-active, not globally ordered. The ledger _is_ sharded for write scale, but staying single-region is a deliberate boundary, not an oversight. The ~1,000 TPS benchmark figure is what a small cluster proves, not a design ceiling.
 
 ## Where to read next
 
