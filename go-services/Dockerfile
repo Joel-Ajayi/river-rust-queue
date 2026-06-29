@@ -11,7 +11,7 @@ COPY . .
 # CGO means that the Go compiler will not use C code. Useful for building static binaries that can run in minimal environments like Alpine Linux.
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/service ./${SERVICE}/cmd
 
-FROM alpine:3.20
+FROM alpine:3.24
 # Install CA certificates and create a non-root user for running the service
 # -D flag creates a user without a home directory, and -u 1000 sets the user ID to 1000.
 RUN apk add --no-cache ca-certificates && adduser -D -u 1000 rrq

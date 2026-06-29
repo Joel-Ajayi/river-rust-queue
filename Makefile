@@ -23,7 +23,7 @@ BUF_VERSION                ?= v1.47.2
 MIGRATE_VERSION            ?= v4.18.1
 KUBESEAL_VERSION           ?= 0.27.3
 ARGOCD_VERSION             ?= v2.13.3
-SKAFFOLD_VERSION           ?= v2.13.2
+SKAFFOLD_VERSION           ?= v2.23.0
 K6_VERSION                 ?= v0.55.0
 PROTOC_GEN_GO_VERSION      ?= v1.35.2
 PROTOC_GEN_GO_GRPC_VERSION ?= v1.5.1
@@ -126,7 +126,7 @@ tools-check: ## Report which tools are installed
 # ===========================================================================
 .PHONY: dev
 dev: ## Run local development with hot-reloading (Skaffold)
-	skaffold dev --port-forward
+	skaffold fix && skaffold dev --port-forward
 
 .PHONY: psql
 psql: ## Open psql against a shard (SHARD=shard-a|shard-b|merchants-db)

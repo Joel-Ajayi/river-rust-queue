@@ -3,7 +3,7 @@ managed:
   enabled: true
   override:
     - file_option: go_package_prefix
-      value: github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto
+      value: ../../go-services/internal/gen/proto
 plugins:
   # Generates standard Go types/structs
   - remote: buf.build/protocolbuffers/go
@@ -16,12 +16,12 @@ plugins:
     opt: paths=source_relative
 
   # native Rust data structures/types
-  - remote: buf.build/tokio-rs/prost
-    out: ../../rust-services/internal/gen/rust
+  # - remote: buf.build/tokio-rs/prost
+  #   out: ../../rust-services/internal/gen/rust
 
-  # Generates the type-safe Rust gRPC client/server interfaces (Tonic engine)
-  - remote: buf.build/hyperium/tonic
-    out: ../../rust-services/internal/gen/rust
+  # # Generates the type-safe Rust gRPC client/server interfaces (Tonic engine)
+  # - remote: buf.build/hyperium/tonic
+  #   out: ../../rust-services/internal/gen/rust
 
 # ├── proto/
 # │   ├── buf.yaml              <-- lint/breaking configuration

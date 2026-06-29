@@ -52,7 +52,9 @@ build:
       context: deploy/db/migrations
       docker:
         dockerfile: Dockerfile
-deploy:
+manifests:
   kustomize:
     paths:
-      - github.com/Joel-Ajayi/rrq-gitops/rrq/overlays/dev
+      - ../rrq-gitops/rrq/overlays/dev
+deploy:
+  kubectl: {}
