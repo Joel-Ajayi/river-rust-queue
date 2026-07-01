@@ -1,6 +1,3 @@
-// Package app implements the gateway's use-cases (Clean Architecture's
-// interactors). It orchestrates domain objects and driven ports; it contains no
-// transport code and no SQL, so its logic is unit-testable without a database.
 package app
 
 import (
@@ -10,43 +7,79 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/port"
 )
 
-// Service implements the inbound ports (TransferSubmitter, Authenticator) by
-// composing the outbound ports it is given. Dependencies are injected, never
-// constructed here — that is the composition root's job (cmd/main.go).
-type Service struct {
-	dir   port.MerchantDirectory
-	jobs  port.JobStore
-	newID func() string
-}
-
-// Compile-time proof that Service satisfies the driving ports.
+// compile time check that Service implements TransferSubmitter
 var (
 	_ port.TransferSubmitter = (*Service)(nil)
 	_ port.Authenticator     = (*Service)(nil)
 )
 
-// NewService wires the use-cases to their driven ports. newID mints job ids.
-func NewService(dir port.MerchantDirectory, jobs port.JobStore, newID func() string) *Service {
-	return &Service{dir: dir, jobs: jobs, newID: newID}
+type Service struct {
+	merchantsDir port.MerchantDirectory
+	walletsDir   port.WalletDirectory
+	jobs         port.JobStore
+	getNewJobID  func() string
 }
 
-// Submit accepts a transfer: validate, route to the owning shard, then claim the
-// idempotency key while recording the job and its outbox event in one write.
-func (s *Service) Submit(ctx context.Context, t domain.Transfer, idempotencyKey string) (domain.SubmitResult, error) {
+func NewService(mDir port.MerchantDirectory, wDir port.WalletDirectory, jobs port.JobStore, idGen func() string) *Service {
+	return &Service{
+		merchantsDir: mDir,
+		walletsDir:   wDir,
+		jobs:         jobs,
+		getNewJobID:  idGen,
+	}
+}
+
+func (s *Service) Submit(ctx context.Context, t domain.Transfer, idempKey string) (domain.SubmitResult, error) {
+	// a. Validate the transfer payload first
 	if err := t.Validate(); err != nil {
 		return domain.SubmitResult{}, err
 	}
 
-	shardID, err := s.dir.ShardFor(ctx, t.MerchantID)
+	// b. Hash request to test for idempotency
+	hash := t.Hash()
+
+	// c. check shard of merchant
+	shard, err := s.merchantsDir.ShardFor(ctx, t.MerchantID)
 	if err != nil {
 		return domain.SubmitResult{}, err
 	}
 
-	job := domain.Job{ID: s.newID(), Status: "pending"}
-	return s.jobs.ClaimAndRecord(ctx, shardID, job, t, idempotencyKey, t.Hash())
+	// d. Verify that the merchant owns the from_wallet
+	if err := s.walletsDir.CheckWalletOwnership(ctx, shard, t.FromWallet, t.MerchantID); err != nil {
+		return domain.SubmitResult{}, err
+	}
+
+	// e. Create Job record
+	job := domain.Job{
+		ID:             s.getNewJobID(),
+		MerchantID:     t.MerchantID,
+		PayloadHash:    hash,
+		IdempotencyKey: idempKey,
+		Type:           string(domain.JobTypeTransfer),
+		Status:         string(domain.JobStatusPending),
+	}
+
+	return s.jobs.ClaimAndRecord(ctx, shard, job, t, idempKey)
 }
 
-// Authenticate exchanges a raw API key for the merchant identity behind it.
 func (s *Service) Authenticate(ctx context.Context, apiKey string) (domain.Principal, error) {
-	return s.dir.AuthenticateAPIKey(ctx, apiKey)
+	return s.merchantsDir.AuthenticateAPIKey(ctx, apiKey)
+}
+
+func (s *Service) GetJobStatus(ctx context.Context, merchantID, jobID string) (domain.Job, error) {
+	shard, err := s.merchantsDir.ShardFor(ctx, merchantID)
+	if err != nil {
+		return domain.Job{}, err
+	}
+
+	job, err := s.jobs.GetJob(ctx, shard, jobID)
+	if err != nil {
+		return domain.Job{}, err
+	}
+
+	if job.MerchantID != merchantID {
+		return domain.Job{}, domain.ErrJobNotFound
+	}
+
+	return job, nil
 }

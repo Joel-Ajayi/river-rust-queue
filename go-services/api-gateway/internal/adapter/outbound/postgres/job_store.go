@@ -3,109 +3,115 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/port"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
 )
 
-// JobStore writes jobs and their outbox events on a merchant's shard.
 type JobStore struct {
-	pools   *platform.ShardPools
-	newEvID func() string
+	pools port.ShardPools
 }
 
+// compile time interface implementation check
 var _ port.JobStore = (*JobStore)(nil)
 
-// NewJobStore builds the adapter; newEvID mints outbox event ids.
-func NewJobStore(pools *platform.ShardPools, newEvID func() string) *JobStore {
-	return &JobStore{pools: pools, newEvID: newEvID}
+func NewJobStore(pools *platform.ShardPools) *JobStore {
+	return &JobStore{pools}
 }
 
-// ClaimAndRecord performs the idempotent accept: one transaction that claims the
-// (merchant, key) pair and, only on first sight, records the job + outbox event.
-func (s *JobStore) ClaimAndRecord(
-	ctx context.Context,
-	shardID string,
-	job domain.Job,
-	t domain.Transfer,
-	idempotencyKey string,
-	requestHash string,
-) (domain.SubmitResult, error) {
-	pool, err := s.pools.ShardPool(shardID)
+func (s *JobStore) ClaimAndRecord(ctx context.Context, shardId string, job domain.Job, t domain.Transfer, idempKey string) (domain.SubmitResult, error) {
+	// a. get merchant pool and begin transaction
+	pool, err := s.pools.ShardPool(shardId)
 	if err != nil {
 		return domain.SubmitResult{}, err
 	}
-	return s.claim(ctx, pool, shardID, job, t, idempotencyKey, requestHash)
-}
 
-func (s *JobStore) claim(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	_ string,
-	job domain.Job,
-	t domain.Transfer,
-	idempotencyKey string,
-	requestHash string,
-) (domain.SubmitResult, error) {
+	// Begin atomic transaction
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return domain.SubmitResult{}, err
 	}
 	defer tx.Rollback(ctx)
 
+	// b. try to insert Job(UNIQUE merchant_id, idempotency_key)
 	tag, err := tx.Exec(ctx,
 		`INSERT INTO jobs (id, merchant_id, idempotency_key, request_hash, type, status, created_at)
-		 VALUES ($1, $2, $3, $4, 'transfer', 'pending', $5)
-		 ON CONFLICT (merchant_id, idempotency_key) DO NOTHING`,
-		job.ID, t.MerchantID, idempotencyKey, requestHash, time.Now(),
-	)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			ON CONFLICT (merchant_id, idempotency_key) DO NOTHING`,
+		job.ID, job.MerchantID, job.IdempotencyKey, job.PayloadHash, job.Type, job.Status, time.Now())
 	if err != nil {
 		return domain.SubmitResult{}, err
 	}
 
+	// c. ALREADY EXISTS! We must fetch the existing job to see if the hash matches.
 	if tag.RowsAffected() == 0 {
 		var existing domain.Job
-		var existingHash string
 		if err := tx.QueryRow(ctx,
-			`SELECT id, request_hash, status FROM jobs WHERE merchant_id = $1 AND idempotency_key = $2`,
-			t.MerchantID, idempotencyKey,
-		).Scan(&existing.ID, &existingHash, &existing.Status); err != nil {
+			`SELECT id, request_hash, status FROM jobs WHERE merchant_id = $1 AND idempotency_key=$2`,
+			job.MerchantID, job.IdempotencyKey,
+		).Scan(&existing.ID, &existing.PayloadHash, &existing.Status); err != nil {
 			return domain.SubmitResult{}, err
 		}
-		if existingHash != requestHash {
+
+		if existing.PayloadHash != job.PayloadHash {
 			return domain.SubmitResult{}, domain.ErrIdempotencyConflict
 		}
+
+		// Replay successful!
 		return domain.SubmitResult{Job: existing, AlreadyExisted: true}, nil
 	}
 
-	payload, _ := json.Marshal(map[string]any{
-		"job_id":          job.ID,
-		"merchant_id":     t.MerchantID,
-		"idempotency_key": idempotencyKey,
-		"job_type":        "transfer",
-		"data": map[string]any{
-			"from_wallet": t.FromWallet,
-			"to_wallet":   t.ToWallet,
-			"amount":      t.Amount,
-			"currency":    t.Currency,
-			"reference":   t.Reference,
-		},
-	})
+	// c. We successfully claimed the key! Now, write the Outbox Event.
+	payload, _ := json.Marshal(t)
+	eventID := platform.NewEventID()
 
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO events (event_id, event_type, aggregate_type, aggregate_id,
-		 correlation_id, payload, occurred_at, publish_topic)
-		 VALUES ($1, 'job.requested', 'job', $2, $2, $3, $4, 'jobs')`,
-		s.newEvID(), job.ID, payload, time.Now(),
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO events (event_id, event_type, aggregate_type, aggregate_id, correlation_id, payload, occurred_at, publish_topic)
+		VALUES ($1, $4, $5, $2, $2, $3, NOW(), $6)`,
+		eventID, job.ID, payload, platform.EventTypeJobRequested, platform.AggregateTypeJob, platform.TopicJobs,
 	); err != nil {
 		return domain.SubmitResult{}, err
 	}
 
+	// d. Commit the transaction! Both the Job and Event are saved atomically.
 	if err := tx.Commit(ctx); err != nil {
 		return domain.SubmitResult{}, err
 	}
+
 	return domain.SubmitResult{Job: job}, nil
+}
+
+func (s *JobStore) GetJob(ctx context.Context, shardID, jobID string) (domain.Job, error) {
+	pool, err := s.pools.ShardPool(shardID)
+	if err != nil {
+		return domain.Job{}, err
+	}
+
+	var job domain.Job
+	err = pool.QueryRow(ctx, `
+		SELECT id, merchant_id, idempotency_key, type, request_hash, status, failure_reason, created_at, completed_at
+		FROM jobs WHERE id = $1`, jobID).Scan(
+		&job.ID,
+		&job.MerchantID,
+		&job.IdempotencyKey,
+		&job.Type,
+		&job.PayloadHash,
+		&job.Status,
+		&job.FailureReason,
+		&job.CreatedAt,
+		&job.CompletedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Job{}, domain.ErrJobNotFound
+		}
+		return domain.Job{}, err
+	}
+
+	return job, nil
 }

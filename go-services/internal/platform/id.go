@@ -23,5 +23,5 @@ func NewID(prefix string) string {
 	return fmt.Sprintf("%s_%d_%06x", prefix, ts, seq&0xFFFFFF)
 }
 
-func NewJobID() string   { return NewID("job") }
-func NewEventID() string { return NewID("ev") }
+func NewJobID() string   { return NewID(string(AggregateTypeJob)) }
+func NewEventID() string { return NewID(string(AggregateTypeEvent)) }

@@ -5,55 +5,60 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/golang-jwt/jwt/v5"
-	"go.uber.org/zap"
 )
 
-type contextKey string
-
-const merchantIDKey contextKey = "merchant_id"
-
-// requireAuth verifies the bearer JWT (a transport-security concern, so it lives
-// in the adapter, not the core) and stores the merchant id on the request context.
-func (s *Server) requireAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authHeader, "Bearer ") {
-			handleError(w, s.log, platform.ErrUnauthorized("missing or invalid token"))
-			return
-		}
-		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-
-		token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
-			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, jwt.ErrSignatureInvalid
-			}
-			return s.jwtKey, nil
-		})
-		if err != nil || !token.Valid {
-			s.log.Debug("jwt validation failed", zap.Error(err))
-			handleError(w, s.log, platform.ErrUnauthorized("missing or invalid token"))
-			return
-		}
-
-		claims, ok := token.Claims.(jwt.MapClaims)
-		if !ok {
-			handleError(w, s.log, platform.ErrUnauthorized("invalid claims"))
-			return
-		}
-		merchantID, _ := claims["sub"].(string)
-		if merchantID == "" {
-			handleError(w, s.log, platform.ErrUnauthorized("missing subject"))
-			return
-		}
-
-		ctx := context.WithValue(r.Context(), merchantIDKey, merchantID)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+func (s *Server) VerifyJWTkeyFunc(token *jwt.Token) (interface{}, error) {
+	if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+		return nil, platform.ErrUnauthorized("unexpected signing method")
+	}
+	return s.jwtKey, nil
 }
 
-func merchantFromCtx(ctx context.Context) string {
-	v, _ := ctx.Value(merchantIDKey).(string)
-	return v
+func (s *Server) requireAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// a. Extract Bearer Token
+		authHeader := r.Header.Get(string(HeaderAuthorization))
+
+		if authHeader == "" || !strings.HasPrefix(authHeader, string(HeaderValBearer)) {
+			writeError(w, platform.ErrUnauthorized(domain.ErrMissingBearerToken))
+			return
+		}
+		tokenStr := strings.TrimPrefix(authHeader, string(HeaderValBearer))
+		tokenStr = strings.TrimSpace(tokenStr)
+
+		// b. Verify Token signature and extract claims
+		token, err := jwt.Parse(tokenStr, s.VerifyJWTkeyFunc)
+		if err != nil || !token.Valid {
+			writeError(w, platform.ErrInvalidAPIKey(domain.ErrInvalidAPIKey.Error()))
+			return
+		}
+
+		// c. Extract the merchant_id from the token claims
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			writeError(w, platform.ErrUnauthorized(domain.ErrInvalidAPIKey.Error()))
+			return
+		}
+		merchantID, ok := claims["sub"].(string)
+		if !ok || merchantID == "" {
+			writeError(w, platform.ErrUnauthorized(domain.ErrInvalidAPIKey.Error()))
+			return
+		}
+
+		// d. Check active status
+		_, err = s.directory.ShardFor(r.Context(), merchantID)
+		if err != nil {
+			writeError(w, err) // Translates domain.ErrMerchantInactive -> 403 Frozen
+			return
+		}
+
+		// e. Create a Principal and inject into context
+		principal := domain.Principal{MerchantID: merchantID, Status: string(platform.MerchantStatusActive)}
+		ctx := context.WithValue(r.Context(), ContextPrincipal, principal)
+
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }

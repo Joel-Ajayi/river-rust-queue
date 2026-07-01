@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
@@ -15,15 +16,15 @@ import (
 // transport detail and stays here.
 func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authHeader, "Bearer ") {
-		handleError(w, s.log, platform.ErrInvalidAPIKey("API key missing"))
+	if !strings.HasPrefix(authHeader, string(HeaderValBearer)) {
+		writeError(w, domain.ErrInvalidAPIKey)
 		return
 	}
-	apiKey := strings.TrimPrefix(authHeader, "Bearer ")
-
-	principal, err := s.auth.Authenticate(r.Context(), apiKey)
+	apiKey := strings.TrimPrefix(authHeader, string(HeaderValBearer))
+	apiKey = strings.TrimSpace(apiKey)
+	principal, err := s.svc.Authenticate(r.Context(), apiKey)
 	if err != nil {
-		handleError(w, s.log, err)
+		writeError(w, err)
 		return
 	}
 
@@ -37,7 +38,7 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.jwtKey)
 	if err != nil {
 		s.log.Error("jwt signing failed", zap.Error(err))
-		handleError(w, s.log, platform.ErrInternal("internal error"))
+		writeError(w, platform.ErrInternal(domain.ErrInternal))
 		return
 	}
 

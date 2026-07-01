@@ -24,6 +24,14 @@ func ErrMerchantFrozen() *AppError {
 	return &AppError{Code: "MERCHANT_FROZEN", Message: "merchant account is not active", Status: 403}
 }
 
+func ErrForeignWallet() *AppError {
+	return &AppError{Code: "FOREIGN_WALLET", Message: "wallet does not belong to merchant", Status: 403}
+}
+
+func ErrNotFound(resource string) *AppError {
+	return &AppError{Code: "NOT_FOUND", Message: resource + " not found", Status: 404}
+}
+
 func ErrMissingIdempotencyKey() *AppError {
 	return &AppError{Code: "MISSING_IDEMPOTENCY_KEY", Message: "Idempotency-Key header required", Status: 400}
 }

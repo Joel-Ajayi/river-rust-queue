@@ -1,9 +1,3 @@
-// Command api-gateway is the composition root for the gateway service.
-//
-// This is the ONE place allowed to know every concrete type: it constructs the
-// infrastructure (config, pools, redis), builds the driven adapters, injects
-// them into the core use-cases, hands the core to the driving adapter, and runs.
-// Nothing below this file imports anything "more concrete" than an interface.
 package main
 
 import (
@@ -23,6 +17,7 @@ import (
 )
 
 func main() {
+	// --- -Config & Logs--
 	cfg, err := platform.LoadConfig()
 	if err != nil {
 		panic("config: " + err.Error())
@@ -34,6 +29,7 @@ func main() {
 	}
 	defer log.Sync()
 
+	// --- Context ---
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -51,20 +47,25 @@ func main() {
 	defer rdb.Close()
 
 	// --- Driven adapters (outbound) ---
-	directory := postgres.NewMerchantDirectory(pools)
-	jobStore := postgres.NewJobStore(pools, platform.NewEventID)
+	merchantDir := postgres.NewMerchantDirectory(pools)
+	wallterDir := postgres.NewWalletDirectory(pools)
+	jobStore := postgres.NewJobStore(pools)
 
 	// --- Core use-cases ---
-	svc := app.NewService(directory, jobStore, platform.NewJobID)
+	svc := app.NewService(merchantDir, wallterDir, jobStore, platform.NewJobID)
 
 	// --- Driving adapter (inbound) ---
 	ready := func(ctx context.Context) error { return readiness(ctx, pools, rdb) }
-	srv := rest.NewServer(rest.Addr(cfg.HTTPPort), svc, svc, cfg.JWTSigningKey, ready, log)
+	srv := rest.NewServer(svc, merchantDir, string(cfg.JWTSigningKey), ready, log)
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)
+		// send msg to sigCh when sigint or sigterm is received
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
+
+		<-sigCh // Blocker until signal is received
+
+		// -- Graceful Shutdown --
 		log.Info("received shutdown signal")
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer shutdownCancel()

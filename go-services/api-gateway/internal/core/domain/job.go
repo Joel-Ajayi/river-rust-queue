@@ -1,21 +1,33 @@
 package domain
 
-// Job is the persisted record of an accepted request. The gateway only ever
-// creates jobs in the "pending" state; workers advance them later.
+import "time"
+
+type JobType string
+type JobStatus string
+
+const (
+	// Job types
+	JobTypeTransfer JobType = "transfer"
+	JobTypePayout   JobType = "payout"
+
+	// Job statuses
+	JobStatusPending   JobStatus = "pending"
+	JobStatusCompleted JobStatus = "completed"
+	JobStatusFailed    JobStatus = "failed"
+)
+
 type Job struct {
-	ID     string
-	Status string
+	ID             string
+	MerchantID     string
+	IdempotencyKey string
+	Type           string
+	PayloadHash    string
+	Status         string
+	FailureReason  *string
+	CreatedAt      time.Time
+	CompletedAt    *time.Time
 }
 
-// Principal is the authenticated identity behind a request.
-type Principal struct {
-	MerchantID string
-	Tier       string
-}
-
-// SubmitResult is the outcome of submitting a transfer. AlreadyExisted is true
-// when the idempotency key matched a prior job, in which case Job describes the
-// existing job rather than a newly created one.
 type SubmitResult struct {
 	Job            Job
 	AlreadyExisted bool

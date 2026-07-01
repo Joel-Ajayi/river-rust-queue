@@ -2,58 +2,75 @@ package rest
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/port"
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"go.uber.org/zap"
 )
 
-// ReadinessFunc reports whether the service's dependencies are reachable.
-// The composition root supplies one that pings Postgres and Redis, keeping this
-// adapter free of any direct infrastructure knowledge.
-type ReadinessFunc func(ctx context.Context) error
+type HeaderKey string
+type ContextKey string
+type HeaderVal string
 
-// Server is the HTTP front door. It depends only on the inbound ports and a few
-// transport concerns (JWT signing key, readiness probe) — never on the database.
+const (
+	HeaderIdempotencyKey HeaderKey  = "Idempotency-Key"
+	ContextPrincipal     ContextKey = "principal"
+	HeaderAuthorization  HeaderKey  = "Authorization"
+
+	HeaderValBearer HeaderVal = "Bearer"
+	ApplicationJSON HeaderVal = "application/json"
+
+	ContentType HeaderKey = "Content-Type"
+
+	PORT string = ":8080"
+)
+
+// ReadinessFunc provides the function to check liveness/readiness
+type ReadinessFunc func(ctx context.Context) error
 type Server struct {
 	httpSrv   *http.Server
-	submitter port.TransferSubmitter
-	auth      port.Authenticator
+	svc       port.APIGatewayService
+	directory port.MerchantDirectory
 	jwtKey    []byte
 	ready     ReadinessFunc
 	log       *zap.Logger
 }
 
-// NewServer builds the HTTP server and wires routes.
 func NewServer(
-	addr string,
-	submitter port.TransferSubmitter,
-	auth port.Authenticator,
-	jwtKey []byte,
+	svc port.APIGatewayService,
+	directory port.MerchantDirectory,
+	jwtKey string,
 	ready ReadinessFunc,
 	log *zap.Logger,
 ) *Server {
 	s := &Server{
-		submitter: submitter,
-		auth:      auth,
-		jwtKey:    jwtKey,
+		svc:       svc,
+		directory: directory,
+		jwtKey:    []byte(jwtKey),
 		ready:     ready,
 		log:       log,
 	}
 
 	mux := http.NewServeMux()
-	s.registerRoutes(mux)
+	s.RegisterRoutes(mux)
 
 	s.httpSrv = &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              PORT,
+		Handler:           mux,
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       15 * time.Second,
 	}
+
 	return s
+}
+
+// ServeHTTP delegates to the underlying HTTP server's handler. Useful for testing.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.httpSrv.Handler.ServeHTTP(w, r)
 }
 
 // Start begins serving and blocks until the server stops.
@@ -68,5 +85,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpSrv.Shutdown(ctx)
 }
 
-// Addr formats a :port listen address.
-func Addr(port int) string { return fmt.Sprintf(":%d", port) }
+func (s *Server) RegisterRoutes(mux *http.ServeMux) {
+	// Health (no auth).
+	mux.HandleFunc("GET "+platform.APIHealthPath, s.handleHealth)
+	mux.HandleFunc("GET "+platform.APIReadyPath, s.handleReady)
+
+	// Token exchange (API key -> JWT).
+	mux.HandleFunc("POST "+platform.APIAuthTokenPath, s.handleAuthToken)
+
+	// Protected routes (require a valid JWT).
+	mux.Handle("POST "+platform.APITransfersPath, s.requireAuth(http.HandlerFunc(s.handleCreateTransfer)))
+	mux.Handle("GET "+platform.APIJobPathPrefix+"{id}", s.requireAuth(http.HandlerFunc(s.handleGetJob)))
+}

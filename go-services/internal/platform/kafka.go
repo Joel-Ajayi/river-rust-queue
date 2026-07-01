@@ -5,6 +5,12 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	// Publish topics
+	TopicJobs   = "jobs"
+	TopicNotify = "notify"
+)
+
 // NewKafkaWriter creates a synchronous Kafka writer for the given topic.
 func NewKafkaWriter(brokers []string, topic string, log *zap.Logger) *kafka.Writer {
 	w := &kafka.Writer{
