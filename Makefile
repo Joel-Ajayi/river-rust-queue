@@ -39,7 +39,7 @@ help: ## List available targets
 	  | sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 	@echo
 	@echo "Typical flow:  make tools  →  make dev  →  make build"
-	@echo "Sub-Makefiles: make -C deploy help | make -C go-services help | make -C rust-services help | make -C api/proto help"
+	@echo "Sub-Makefiles: make -C deploy help | make -C services/go-services help | make -C services/rust-services help | make -C api/proto help"
 
 .PHONY: path
 path: ## Print PATH additions for installed tools
@@ -135,22 +135,56 @@ psql: ## Open psql against a shard (SHARD=shard-a|shard-b|merchants-db)
 # ===========================================================================
 # Delegated targets — go-services/
 # ===========================================================================
+.PHONY: build-go
+build-go: ## Build Go services
+	$(MAKE) -C services/go-services build
+
+.PHONY: test-go
+test-go: ## Run Go tests
+	$(MAKE) -C services/go-services test
+
+.PHONY: lint-go
+lint-go: ## Go lint + proto lint
+	$(MAKE) -C services/go-services lint
+
+.PHONY: fmt-go
+fmt-go: ## Format Go code
+	$(MAKE) -C services/go-services fmt
+
+# ===========================================================================
+# Delegated targets — rust-services/
+# ===========================================================================
+.PHONY: build-rust
+build-rust: ## Build Rust services
+	$(MAKE) -C services/rust-services build
+
+.PHONY: test-rust
+test-rust: ## Run Rust tests
+	$(MAKE) -C services/rust-services test
+
+.PHONY: lint-rust
+lint-rust: ## Rust lint (clippy)
+	$(MAKE) -C services/rust-services lint
+
+.PHONY: fmt-rust
+fmt-rust: ## Format Rust code
+	$(MAKE) -C services/rust-services fmt
+
+# ===========================================================================
+# Combined targets
+# ===========================================================================
 .PHONY: build
-build: ## Build Go services
-	$(MAKE) -C go-services build
+build: build-go build-rust ## Build all services
 
 .PHONY: test
-test: ## Run Go tests
-	$(MAKE) -C go-services test
+test: test-go test-rust ## Run all tests
 
 .PHONY: lint
-lint: ## Go lint + proto lint
-	$(MAKE) -C go-services lint
+lint: lint-go lint-rust ## Lint all services
 	$(MAKE) -C api/proto lint
 
 .PHONY: fmt
-fmt: ## Format Go code
-	$(MAKE) -C go-services fmt
+fmt: fmt-go fmt-rust ## Format all services
 
 # ===========================================================================
 # Delegated targets — proto/
@@ -165,3 +199,4 @@ proto: ## Generate Go and Rust code from proto definitions
 .PHONY: sim
 sim: ## Run merchant-sim in steady mode
 	cd tools/merchant-sim && go run ./cmd steady
+
