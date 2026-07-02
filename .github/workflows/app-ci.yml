@@ -35,6 +35,9 @@ jobs:
         with:
           go-version: "1.26"
           cache-dependency-path: services/go-services/go.sum
+      - uses: bufbuild/buf-setup-action@v1
+      - name: buf generate
+        run: buf generate ../../api/proto
 
       - name: gofmt check
         run: test -z "$(gofmt -l .)" || { echo "needs gofmt:"; gofmt -l .; exit 1; }
@@ -57,6 +60,9 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: bufbuild/buf-setup-action@v1
+      - name: buf generate
+        run: buf generate ../../api/proto
 
       - name: cargo fmt check
         run: cargo fmt -- --check

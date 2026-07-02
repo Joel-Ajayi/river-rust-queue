@@ -34,7 +34,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		Status:    job.Status,
 		CreatedAt: job.CreatedAt.Format(time.RFC3339),
 	}
-	
+
 	if job.CompletedAt != nil {
 		res.CompletedAt = job.CompletedAt.Format(time.RFC3339)
 	}

@@ -98,7 +98,7 @@ func SetupTestDB(t *testing.T) (merchantsDB TestDB, shardA TestDB, shardB TestDB
 
 	setupDB := func(dbName, migrationSubDir string) TestDB {
 		uri := fmt.Sprintf("postgres://postgres:postgres@%s:%s/%s?sslmode=disable", host, port.Port(), dbName)
-		
+
 		// Run Migrations
 		mPath := fmt.Sprintf("file://%s/%s", baseDir, migrationSubDir)
 		m, err := migrate.New(mPath, uri)
