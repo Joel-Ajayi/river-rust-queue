@@ -52,11 +52,13 @@ func main() {
 	jobStore := postgres.NewJobStore(pools)
 
 	// --- Core use-cases ---
-	svc := app.NewService(merchantDir, wallterDir, jobStore, platform.NewJobID)
+	authSvc := app.NewAuthService(merchantDir)
+	jobSvc := app.NewJobService(merchantDir, jobStore)
+	transferSvc := app.NewTransferService(merchantDir, wallterDir, jobStore, platform.NewJobID)
 
 	// --- Driving adapter (inbound) ---
 	ready := func(ctx context.Context) error { return readiness(ctx, pools, rdb) }
-	srv := rest.NewServer(svc, merchantDir, string(cfg.JWTSigningKey), ready, log)
+	srv := rest.NewServer(authSvc, transferSvc, jobSvc, string(cfg.JWTSigningKey), ready, log)
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)

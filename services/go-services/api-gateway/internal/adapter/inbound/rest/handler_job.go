@@ -22,7 +22,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, err := s.svc.GetJobStatus(r.Context(), principal.MerchantID, jobID)
+	job, err := s.jobs.GetJobStatus(r.Context(), principal.MerchantID, jobID)
 	if err != nil {
 		writeError(w, err)
 		return

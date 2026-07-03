@@ -91,13 +91,16 @@ func setupEnvironment(t *testing.T) (http.Handler, string, testutil.TestDB) {
 	merchants := postgres.NewMerchantDirectory(pools)
 	wallets := postgres.NewWalletDirectory(pools)
 	jobs := postgres.NewJobStore(pools)
-	// Use the app Service directly for tests (it implements both Submitter and Authenticator)
-	svc := app.NewService(merchants, wallets, jobs, func() string { return "job_123" })
+	// Use the split services for tests
+	authSvc := app.NewAuthService(merchants)
+	jobSvc := app.NewJobService(merchants, jobs)
+	transferSvc := app.NewTransferService(merchants, wallets, jobs, func() string { return "job_123" })
 
 	// Set up the Server with our mocked/ephemeral dependencies
 	server := rest.NewServer(
-		svc,
-		merchants,
+		authSvc,
+		transferSvc,
+		jobSvc,
 		jwtSecret,
 		func(ctx context.Context) error { return nil },
 		zap.NewNop(),

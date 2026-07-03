@@ -22,7 +22,7 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	}
 	apiKey := strings.TrimPrefix(authHeader, string(HeaderValBearer))
 	apiKey = strings.TrimSpace(apiKey)
-	principal, err := s.svc.Authenticate(r.Context(), apiKey)
+	principal, err := s.auth.Authenticate(r.Context(), apiKey)
 	if err != nil {
 		writeError(w, err)
 		return

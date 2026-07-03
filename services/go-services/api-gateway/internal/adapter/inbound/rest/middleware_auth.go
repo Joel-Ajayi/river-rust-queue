@@ -48,15 +48,14 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		// d. Check active status
-		_, err = s.directory.ShardFor(r.Context(), merchantID)
+		// d. Delegate to the Core Domain to verify the merchant and build the Principal profile
+		principal, err := s.auth.GetPrincipal(r.Context(), merchantID)
 		if err != nil {
 			writeError(w, err) // Translates domain.ErrMerchantInactive -> 403 Frozen
 			return
 		}
 
-		// e. Create a Principal and inject into context
-		principal := domain.Principal{MerchantID: merchantID, Status: string(platform.MerchantStatusActive)}
+		// e. Inject Principal into context
 		ctx := context.WithValue(r.Context(), ContextPrincipal, principal)
 
 		next.ServeHTTP(w, r.WithContext(ctx))

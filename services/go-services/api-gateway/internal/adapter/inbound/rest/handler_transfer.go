@@ -42,7 +42,7 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 
 	// d. Call application service
 	t.MerchantID = principal.MerchantID
-	res, err := s.svc.Submit(r.Context(), t, idempKey)
+	res, err := s.transfers.Submit(r.Context(), t, idempKey)
 	if err != nil {
 		writeError(w, err)
 		return

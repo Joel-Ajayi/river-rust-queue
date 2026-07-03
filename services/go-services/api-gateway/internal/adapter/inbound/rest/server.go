@@ -31,23 +31,26 @@ const (
 type ReadinessFunc func(ctx context.Context) error
 type Server struct {
 	httpSrv   *http.Server
-	svc       port.APIGatewayService
-	directory port.MerchantDirectory
+	auth      port.Authenticator
+	transfers port.TransferSubmitter
+	jobs      port.JobReader
 	jwtKey    []byte
 	ready     ReadinessFunc
 	log       *zap.Logger
 }
 
 func NewServer(
-	svc port.APIGatewayService,
-	directory port.MerchantDirectory,
+	auth port.Authenticator,
+	transfers port.TransferSubmitter,
+	jobs port.JobReader,
 	jwtKey string,
 	ready ReadinessFunc,
 	log *zap.Logger,
 ) *Server {
 	s := &Server{
-		svc:       svc,
-		directory: directory,
+		auth:      auth,
+		transfers: transfers,
+		jobs:      jobs,
 		jwtKey:    []byte(jwtKey),
 		ready:     ready,
 		log:       log,
