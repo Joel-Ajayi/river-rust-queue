@@ -69,6 +69,18 @@ func (sp *ShardPools) ShardPool(shardID string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
+// Return Available Shard IDs
+func (sp *ShardPools) GetAvailableShardIDs() []string {
+	sp.mu.RLock()
+	defer sp.mu.RUnlock()
+
+	var shardIDs []string
+	for shardID := range sp.shards {
+		shardIDs = append(shardIDs, shardID)
+	}
+	return shardIDs
+}
+
 // Ping verifies connectivity to all pools (readiness probe).
 func (sp *ShardPools) Ping(ctx context.Context) error {
 	if err := sp.merchants.Ping(ctx); err != nil {

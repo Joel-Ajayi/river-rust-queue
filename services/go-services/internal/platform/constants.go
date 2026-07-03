@@ -4,8 +4,13 @@ type AggregateType string
 type EventType string
 
 const (
-	// Event types
+	// Event Job types
 	EventTypeJobRequested EventType = "job.requested"
+
+	// Event Transfer types
+	EventTypeTransferCompleted  EventType = "transfer.completed"
+	EventTypeTransferFailed     EventType = "transfer.failed"
+	EventTypeTransferRolledBack EventType = "transfer.rolled_back"
 
 	// Paths
 	APIVersionV1     = "/v1"
@@ -23,6 +28,7 @@ const (
 	JobStatusFailed    = "failed"
 
 	// Aggregate types
-	AggregateTypeJob   AggregateType = "job"
-	AggregateTypeEvent AggregateType = "ev"
+	AggregateTypeJob      AggregateType = "job"
+	AggregateTypeEvent    AggregateType = "ev"
+	AggregateTypeTransfer AggregateType = "transfer"
 )
