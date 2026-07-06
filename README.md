@@ -1,13 +1,11 @@
 # RRQ — A Payment Processing Core
 
-<!-- [![Application CI](https://github.com/Joel-Ajayi/river-rust-queue/actions/workflows/app-ci.yml/badge.svg)](https://github.com/Joel-Ajayi/river-rust-queue/actions/workflows/app-ci.yml) -->
+[![Application CI](https://github.com/Joel-Ajayi/river-rust-queue/actions/workflows/app-ci.yml/badge.svg)](https://github.com/Joel-Ajayi/river-rust-queue/actions/workflows/app-ci.yml)
 
-[![Go Version](https://img.shields.io/github/go-mod/go-version/Joel-Ajayi/river-rust-queue?filename=go-services%2Fgo.mod)](https://github.com/Joel-Ajayi/river-rust-queue/tree/main/go-services)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/Joel-Ajayi/river-rust-queue?filename=services%2Fgo-services%2Fgo.mod)](https://github.com/Joel-Ajayi/river-rust-queue/tree/main/services/go-services)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-RRQ moves value between wallets and stays correct while doing it: through worker crashes, network partitions, and duplicate retries. It is the part of a payment platform that silently loses money when it's built wrong — built here as a **closed-loop, double-entry ledger** on **Postgres sharded by merchant**, where the common transfer is a **single serializable transaction**, messaging rides a **transactional outbox into Kafka**, and a nightly **reconciliation** job proves the books balance.
-
-It is built as a suite of highly-concurrent Go microservices. _(Note: despite the historical repository name, this is a pure Go architecture)._
+It utilizes a polyglot microservice architecture combining **Go** and **Rust**.
 
 > **Status — Architectural foundation complete.**
 > The system infrastructure, event-driven topology, and database sharding patterns are fully established via Kustomize and GitOps. The microservices are currently scaffolded as minimal boilerplates, ready for domain logic implementation.
@@ -52,21 +50,79 @@ Nine invariants, each stated precisely enough to be tested and adversarially val
 
 ```mermaid
 graph TD
-  merchant["Merchant System"] -->|HTTPS request| kong["Kong, edge gateway<br/>TLS · JWT precheck · rate limit"]
-  kong -->|routes /v1| gateway["API Gateway<br/>(auth, validation, idempotency)"]
-  gateway -->|"INSERT jobs + job.requested (one txn)"| db[("PostgreSQL — sharded by merchant<br/>source of truth · append-only postings")]
-  relay["Outbox Relay<br/>(publishes events table → Kafka)"] -->|read unpublished| db
-  relay -->|job.requested| jobsTopic["Kafka topic: jobs<br/>group: ledger-workers<br/>group: fraud-workers"]
-  relay -->|transfer.completed/failed| notifyTopic["Kafka topic: notify<br/>partitioned by merchant_id"]
-  jobsTopic --> ledgerWorker["Ledger Worker<br/>(one serializable txn per transfer)"]
-  jobsTopic --> fraudWorker["Fraud Worker<br/>(velocity, detective)"]
-  ledgerWorker -->|"post legs + transfer.completed (one txn)"| db
-  fraudWorker -->|freeze wallet| db
-  notifyTopic --> webhookWorker["Webhook Worker<br/>(per-merchant ordering, retry, breaker)"]
-  webhookWorker -->|HTTPS| merchantEndpoint["Merchant Endpoint"]
+  %% External Entities
+  merchant["Merchant System"]
+  merchantEndpoint["Merchant Endpoint"]
 
-  reconciliation["Reconciliation<br/>(nightly batch)"] -.->|reads & compares| db
-  adminDashboard["Admin Dashboard"] -.->|lag, breaker, DLQ replay, freeze| db
+  %% API Edge
+  kong["Kong (Edge Gateway)<br/>TLS · JWT precheck · rate limit"]
+  gateway["API Gateway<br/>(Auth, validation, idempotency)"]
+
+  merchant -->|HTTPS request| kong
+  kong -->|routes /v1| gateway
+
+  %% Databases
+  subgraph Storage Tier
+    merchantDb[("Global Merchants DB<br/>Routing & Directory")]
+    shardA[("Shard A<br/>Ledger")]
+    shardB[("Shard B<br/>Ledger")]
+    shardDots["..."]
+    shardN[("Shard N<br/>Ledger")]
+  end
+  style shardDots fill:none,stroke:none,font-size:24px;
+
+  gateway -->|"Resolve routing"| merchantDb
+  gateway -->|"INSERT jobs + job.requested"| shardA
+  gateway --> shardB
+  gateway -.-> shardDots
+  gateway -.-> shardN
+
+  %% Messaging
+  relay["Outbox Relay"]
+  relay -->|Read unpublished| shardA
+  relay --> shardB
+  relay -.-> shardDots
+  relay -.-> shardN
+
+  subgraph Kafka Backbone
+    jobsTopic{{"Topic: jobs<br/>(group: ledger, fraud)"}}
+    notifyTopic{{"Topic: notify<br/>(partitioned by merchant)"}}
+  end
+
+  relay -->|job.requested| jobsTopic
+  relay -->|transfer.completed/failed| notifyTopic
+
+  %% Workers
+  subgraph Compute Tier
+    ledgerWorker["Ledger Worker<br/>(SERIALIZABLE txns)"]
+    fraudWorker["Fraud Worker<br/>(Velocity tracking)"]
+    webhookWorker["Webhook Worker<br/>(Retries & Breakers)"]
+  end
+
+  jobsTopic --> ledgerWorker
+  jobsTopic --> fraudWorker
+  notifyTopic --> webhookWorker
+
+  ledgerWorker -->|"Post legs + transfer.completed"| shardA
+  ledgerWorker --> shardB
+  ledgerWorker -.-> shardDots
+  ledgerWorker -.-> shardN
+
+  fraudWorker -->|"Freeze wallet"| shardA
+  fraudWorker --> shardB
+  fraudWorker -.-> shardDots
+  fraudWorker -.-> shardN
+
+  webhookWorker -->|HTTPS| merchantEndpoint
+
+  %% Operations
+  subgraph Ops Tier
+    reconciliation["Reconciliation<br/>(Nightly batch)"]
+    adminDashboard["Admin Dashboard"]
+  end
+  
+  reconciliation -.->|Reads & compares| shardA
+  adminDashboard -.->|Ops & DLQ replay| shardA
 ```
 
 ### The Happy Path
@@ -108,66 +164,78 @@ sequenceDiagram
     WW->>DB: record delivery
 ```
 
-The system relies on six core Go microservices and one outbox relay, running behind a Kong edge gateway. **The single durable write on the request path is one Postgres transaction**; everything past it is asynchronous and crash-recoverable. **Every correctness guarantee is enforced in Postgres** (via transactions, row locks, and unique constraints).
+The system relies on core microservices implemented in both Go and Rust, running behind a Kong edge gateway. **The single durable write on the request path is one Postgres transaction**; everything past it is asynchronous and crash-recoverable. **Every correctness guarantee is enforced in Postgres** (via transactions, row locks, and unique constraints).
 
 The stateful backend relies heavily on Kubernetes operators (CloudNativePG, Strimzi, KEDA) which are decoupled and managed externally by our GitOps repository.
 
 ---
 
-## Repository Layout
+## Tech Stack
 
-This repository contains **only application source code**. Infrastructure and deployments are strictly decoupled into the [`rrq-gitops`](https://github.com/Joel-Ajayi/rrq-gitops) repository.
+- **Core Languages:** **Go 1.22+** (Standard library-heavy) and **Rust** (Actix-web, Tokio).
+- **Contracts:** **Protocol Buffers** (Protobuf) for cross-language event and API schemas.
+- **Database:** **PostgreSQL 16** (Sharded, utilizing `pgx` and `sqlx`).
+- **Messaging & Events:** **Kafka** (Driving the Transactional Outbox pattern).
+- **Caching & Velocity:** **Redis**.
+- **Edge Proxy:** **Kong Gateway** (TLS termination, JWT pre-validation, edge rate limiting).
+- **Infrastructure & Delivery:** **Kubernetes** with GitOps via **Argo CD**.
+- **Kubernetes Operators:** **CloudNativePG** (DB), **Strimzi** (Kafka), **KEDA** (Event-driven autoscaling).
+- **Local Development:** **Skaffold** and **Kustomize** (Live hot-reloading).
 
-| Path                 | Purpose                                                                                           |
-| -------------------- | ------------------------------------------------------------------------------------------------- |
-| `go-services/`       | Go implementation of the six services + outbox relay.                                             |
-| `api/proto/`         | Protobuf event and gRPC contracts — the language-agnostic source of truth.                        |
-| `docs/`              | System design: [`00-OVERVIEW`](docs/00-OVERVIEW.md) and [`01-INVARIANTS`](docs/01-INVARIANTS.md). |
-| `skaffold.yaml`      | The local development loop engine (builds images & delegates to GitOps kustomize).                |
-| `Makefile`           | Developer entry point — `make help`; delegates to `go-services/`.                                 |
-| `.github/workflows/` | CI pipelines that build images and automatically update the `rrq-gitops` repository.              |
 
 ---
 
-## Local Development Loop
+## Getting Started
 
-RRQ embraces a true Cloud Native local developer experience powered by **Skaffold** and **Kustomize**, requiring zero Git commits to test changes locally.
+### Prerequisites
 
-**Prerequisites**: You must first bootstrap your local cluster's stateful operators from the `rrq-gitops` repository by running `make bootstrap-dev` in that repo.
+Before you begin, ensure you have the following installed:
+- **Docker** (for building container images)
+- **Kubernetes Cluster** (e.g., `kind`, `minikube`, or Docker Desktop)
+- **Skaffold** (for the local development loop)
+- **Go 1.22+** and **Rust** (for local development and testing)
 
-Once the platform is running:
+### Running Locally
 
-```bash
-# In river-rust-queue/
-make dev
-```
+RRQ embraces a true Cloud Native local developer experience. We use Skaffold and Kustomize to provide live hot-reloading without requiring git commits.
 
-1. Skaffold will build all 6 Go microservices locally using Docker.
-2. It will apply database migrations using the `rrq-migrate` Job.
-3. It will dynamically inject the newly built image tags into your local Kubernetes cluster.
-4. If you modify any `.go` file or SQL migration, Skaffold will instantly detect the change, rebuild the specific image, and hot-swap the pod in the cluster in seconds.
-
-## Production Setup
-
-**Prerequisites:** You must have a production cluster provisioned, and your active `kubectl` context must be pointing to it.
-
-1. **Bootstrap Production Infrastructure (Run Once):**
+1. **Bootstrap local infrastructure:** 
+   The stateful backend (Postgres, Kafka, Redis) is managed via our GitOps repository.
    ```bash
-   # Clone the infrastructure repository
    git clone https://github.com/Joel-Ajayi/rrq-gitops.git
    cd rrq-gitops
-   make bootstrap-prod
+   make bootstrap-dev
    ```
-   _This installs Argo CD into your cluster and immediately syncs the production configuration from the Git repository. You never run `kubectl apply` directly for production deployments._
 
-## Production CI/CD
+2. **Start the application:**
+   Return to this repository and launch the Skaffold dev loop:
+   ```bash
+   cd ../river-rust-queue
+   make dev
+   ```
 
-When code is merged to `main`, GitHub Actions (`app-ci.yml`):
+**What happens next?**
+- Skaffold builds all Go and Rust microservices locally.
+- It applies database migrations via a Kubernetes Job (`rrq-migrate`).
+- It deploys the services into your local cluster.
+- **Hot-reloading:** Modifying any source code or SQL migration will instantly rebuild the specific container and hot-swap the pod in seconds.
 
-1. Builds both Go and Rust Docker variants and pushes them to GitHub Container Registry (GHCR).
-2. Updates the selected image tags in `rrq-gitops/rrq/overlays/prod/kustomization.yaml`.
-3. Automatically commits those overlay tag updates to the `rrq-gitops` repository.
-4. **Argo CD** detects the GitOps update and synchronizes the live production cluster.
+---
+
+## Production Deployment
+
+Production infrastructure and application state are strictly decoupled from this source repository. We use **Argo CD** for continuous GitOps delivery.
+
+**Prerequisites:** A provisioned production Kubernetes cluster with your active `kubectl` context pointing to it.
+
+**Bootstrap the cluster (Run Once):**
+```bash
+git clone https://github.com/Joel-Ajayi/rrq-gitops.git
+cd rrq-gitops
+make bootstrap-prod
+```
+
+> **Note:** This installs Argo CD into your cluster and immediately synchronizes the production configuration from the Git repository. You should never run `kubectl apply` directly against the production cluster.
 
 ## License
 
