@@ -18,11 +18,6 @@ const (
 	// Merchant Shard Status
 	ShardStatusActive    = "active"
 	ShardStatusMigrating = "migrating"
-
-	// Wallet Statuses
-	WalletStatusActive = "active"
-	WalletStatusFrozen = "frozen"
-	WalletStatusClosed = "closed"
 )
 
 // ShardPools manages pgx connection pools keyed by shard ID.
@@ -57,6 +52,16 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 }
 
 func (sp *ShardPools) MerchantsPool() *pgxpool.Pool { return sp.merchants }
+
+func (sp *ShardPools) AllShardPools() map[string]*pgxpool.Pool {
+	sp.mu.RLock()
+	defer sp.mu.RUnlock()
+	res := make(map[string]*pgxpool.Pool, len(sp.shards))
+	for k, v := range sp.shards {
+		res[k] = v
+	}
+	return res
+}
 
 // ShardPool returns the pool for the given shard ID or an error if unknown.
 func (sp *ShardPools) ShardPool(shardID string) (*pgxpool.Pool, error) {

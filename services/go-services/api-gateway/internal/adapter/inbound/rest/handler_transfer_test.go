@@ -13,7 +13,7 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/adapter/inbound/rest"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/adapter/outbound/postgres"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/app"
-	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/domain"
+
 	apiv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/api/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/testutil"
@@ -21,35 +21,7 @@ import (
 	"go.uber.org/zap"
 )
 
-type fakeJobStore struct {
-	gotShard string
-	gotJob   domain.Job
-	result   domain.SubmitResult
-	err      error
-	jobs     map[string]domain.Job // For GetJob testing
-}
 
-func (f *fakeJobStore) ClaimAndRecord(
-	_ context.Context, shardID string, job domain.Job, _ domain.Transfer, _ string,
-) (domain.SubmitResult, error) {
-	f.gotShard = shardID
-	f.gotJob = job
-	if f.err != nil {
-		return domain.SubmitResult{}, f.err
-	}
-	return f.result, nil
-}
-
-func (f *fakeJobStore) GetJob(ctx context.Context, shardID, jobID string) (domain.Job, error) {
-	if f.err != nil {
-		return domain.Job{}, f.err
-	}
-	job, ok := f.jobs[jobID]
-	if !ok {
-		return domain.Job{}, domain.ErrJobNotFound
-	}
-	return job, nil
-}
 
 // setupEnvironment creates the real HTTP handler backed by testcontainers DBs.
 func setupEnvironment(t *testing.T) (http.Handler, string, testutil.TestDB) {
@@ -80,9 +52,9 @@ func setupEnvironment(t *testing.T) (http.Handler, string, testutil.TestDB) {
 	// Seed wallets for the merchant in the shard DB
 	_, err = shardA.Pool.Exec(context.Background(),
 		`INSERT INTO wallets (id, merchant_id, currency) VALUES
-		('wal_A', $1, 'NGN'),
-		('wal_B', $1, 'NGN'),
-		('wal_foreign', 'm_999', 'NGN')`, merchantID)
+		('m_123.wal_A', $1, 'NGN'),
+		('m_123.wal_B', $1, 'NGN'),
+		('m_999.wal_foreign', 'm_999', 'NGN')`, merchantID)
 	if err != nil {
 		t.Fatalf("failed to seed wallets: %v", err)
 	}
@@ -123,8 +95,8 @@ func TestIdempotency_ConcurrentDuplicates(t *testing.T) {
 	handler, tokenStr, shardA := setupEnvironment(t)
 
 	reqDTO := apiv1.CreateTransferRequest{
-		FromWallet: "wal_A",
-		ToWallet:   "wal_B",
+		FromWallet: "m_123.wal_A",
+		ToWallet:   "m_123.wal_B",
 		Amount:     1000,
 		Currency:   "NGN",
 		Reference:  "ref123",
@@ -142,9 +114,9 @@ func TestIdempotency_ConcurrentDuplicates(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			req := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(body))
-			req.Header.Set("Authorization", string(rest.HeaderValBearer)+tokenStr)
+			req.Header.Set(string(rest.HeaderAuthorization), string(rest.HeaderValBearer)+tokenStr)
 			req.Header.Set(string(rest.HeaderIdempotencyKey), idempKey)
-			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(string(rest.ContentType), string(rest.ApplicationJSON))
 
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, req)
@@ -198,8 +170,8 @@ func TestIdempotency_ConcurrentDuplicates(t *testing.T) {
 func TestIdempotency_DifferentBody(t *testing.T) {
 	handler, tokenStr, _ := setupEnvironment(t)
 
-	reqDTO1 := apiv1.CreateTransferRequest{FromWallet: "wal_A", ToWallet: "wal_B", Amount: 1000, Currency: "NGN"}
-	reqDTO2 := apiv1.CreateTransferRequest{FromWallet: "wal_A", ToWallet: "wal_B", Amount: 5000, Currency: "NGN"}
+	reqDTO1 := apiv1.CreateTransferRequest{FromWallet: "m_123.wal_A", ToWallet: "m_123.wal_B", Amount: 1000, Currency: "NGN"}
+	reqDTO2 := apiv1.CreateTransferRequest{FromWallet: "m_123.wal_A", ToWallet: "m_123.wal_B", Amount: 5000, Currency: "NGN"}
 
 	body1, _ := json.Marshal(&reqDTO1)
 	body2, _ := json.Marshal(&reqDTO2)
@@ -207,7 +179,7 @@ func TestIdempotency_DifferentBody(t *testing.T) {
 
 	// First Request
 	req1 := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(body1))
-	req1.Header.Set("Authorization", string(rest.HeaderValBearer)+tokenStr)
+	req1.Header.Set(string(rest.HeaderAuthorization), string(rest.HeaderValBearer)+tokenStr)
 	req1.Header.Set(string(rest.HeaderIdempotencyKey), idempKey)
 	w1 := httptest.NewRecorder()
 	handler.ServeHTTP(w1, req1)
@@ -218,7 +190,7 @@ func TestIdempotency_DifferentBody(t *testing.T) {
 
 	// Second Request with SAME key but DIFFERENT body
 	req2 := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(body2))
-	req2.Header.Set("Authorization", string(rest.HeaderValBearer)+tokenStr)
+	req2.Header.Set(string(rest.HeaderAuthorization), string(rest.HeaderValBearer)+tokenStr)
 	req2.Header.Set(string(rest.HeaderIdempotencyKey), idempKey)
 	w2 := httptest.NewRecorder()
 	handler.ServeHTTP(w2, req2)
@@ -245,7 +217,7 @@ func TestAuth_InvalidTokens(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(body))
 			if tt.token != "" {
-				req.Header.Set("Authorization", tt.token)
+				req.Header.Set(string(rest.HeaderAuthorization), tt.token)
 			}
 			req.Header.Set(string(rest.HeaderIdempotencyKey), "idem123")
 			w := httptest.NewRecorder()
@@ -275,7 +247,7 @@ func TestValidation_InvalidFields(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			body, _ := json.Marshal(tt.req)
 			req := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(body))
-			req.Header.Set("Authorization", "Bearer "+tokenStr)
+			req.Header.Set(string(rest.HeaderAuthorization), string(rest.HeaderValBearer)+tokenStr)
 			req.Header.Set(string(rest.HeaderIdempotencyKey), "idem_val_"+tt.name)
 
 			w := httptest.NewRecorder()
@@ -294,8 +266,8 @@ func TestAuthz_ForeignWalletRejected(t *testing.T) {
 
 	// Test trying to transfer from a wallet not owned by m_123
 	reqDTO := apiv1.CreateTransferRequest{
-		FromWallet: "wal_foreign",
-		ToWallet:   "wal_B",
+		FromWallet: "m_999.wal_foreign",
+		ToWallet:   "m_123.wal_B",
 		Amount:     1000,
 		Currency:   "NGN",
 		Reference:  "ref123",
@@ -304,14 +276,14 @@ func TestAuthz_ForeignWalletRejected(t *testing.T) {
 	idempKey := "idem_authz_123"
 
 	req := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(body))
-	req.Header.Set("Authorization", string(rest.HeaderValBearer)+tokenStr)
+	req.Header.Set(string(rest.HeaderAuthorization), string(rest.HeaderValBearer)+tokenStr)
 	req.Header.Set(string(rest.HeaderIdempotencyKey), idempKey)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(string(rest.ContentType), string(rest.ApplicationJSON))
 
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	// Since we mock the DB, 'wal_foreign' does not exist in the merchant's shard (or doesn't belong to them)
+	// Since we mock the DB, 'm_999.wal_foreign' does not exist in the merchant's shard (or doesn't belong to them)
 	// Our wallet directory will return ErrWalletNotOwned, mapping to 403.
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 Forbidden for foreign wallet, got %d: %s", w.Code, w.Body.String())

@@ -2,9 +2,12 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"time"
+
+	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/port"
@@ -66,13 +69,46 @@ func (s *JobStore) ClaimAndRecord(ctx context.Context, shardId string, job domai
 	}
 
 	// c. We successfully claimed the key! Now, write the Outbox Event.
-	payload, _ := json.Marshal(t)
 	eventID := platform.NewEventID()
+	now := time.Now()
+
+	envelope := &eventsv1.EventEnvelope{
+		EventId:       eventID,
+		EventType:     string(platform.EventTypeJobRequested),
+		AggregateType: string(platform.AggregateTypeJob),
+		AggregateId:   job.ID,
+		CorrelationId: job.ID,
+		OccurredAt:    timestamppb.New(now),
+		Payload: &eventsv1.EventEnvelope_JobRequested{
+			JobRequested: &eventsv1.JobRequestedPayload{
+				JobId:          job.ID,
+				MerchantId:     job.MerchantID,
+				IdempotencyKey: job.IdempotencyKey,
+				JobType:        string(domain.JobTypeTransfer),
+				Data: &eventsv1.JobRequestedPayload_TransferData{
+					TransferData: &eventsv1.TransferData{
+						FromWallet:   t.FromWallet,
+						ToWallet:     t.ToWallet,
+						ToMerchantId: t.ToMerchantID,
+						Amount:       t.Amount,
+						Currency:     t.Currency,
+						Reference:    t.Reference,
+					},
+				},
+			},
+		},
+	}
+
+	marshaler := protojson.MarshalOptions{EmitUnpopulated: true}
+	payload, err := marshaler.Marshal(envelope)
+	if err != nil {
+		return domain.SubmitResult{}, err
+	}
 
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO events (event_id, event_type, aggregate_type, aggregate_id, correlation_id, payload, occurred_at, publish_topic)
-		VALUES ($1, $4, $5, $2, $2, $3, NOW(), $6)`,
-		eventID, job.ID, payload, platform.EventTypeJobRequested, platform.AggregateTypeJob, platform.TopicJobs,
+		VALUES ($1, $4, $5, $2, $2, $3, $7, $6)`,
+		eventID, job.ID, payload, string(platform.EventTypeJobRequested), string(platform.AggregateTypeJob), platform.TopicJobs, now,
 	); err != nil {
 		return domain.SubmitResult{}, err
 	}

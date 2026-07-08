@@ -30,6 +30,12 @@ func (s *TransferService) Submit(ctx context.Context, t domain.Transfer, idempKe
 		return domain.SubmitResult{}, err
 	}
 
+	toMerchantID, err := s.walletsDir.LookupMerchantForWallet(ctx, t.ToWallet)
+	if err != nil {
+		return domain.SubmitResult{}, err
+	}
+	t.ToMerchantID = toMerchantID
+
 	hash := t.Hash()
 
 	shard, err := s.merchantsDir.ShardFor(ctx, t.MerchantID)
@@ -46,8 +52,8 @@ func (s *TransferService) Submit(ctx context.Context, t domain.Transfer, idempKe
 		MerchantID:     t.MerchantID,
 		PayloadHash:    hash,
 		IdempotencyKey: idempKey,
-		Type:           string(domain.JobTypeTransfer),
-		Status:         string(domain.JobStatusPending),
+		Type:           domain.JobTypeTransfer,
+		Status:         domain.JobStatusPending,
 	}
 
 	return s.jobs.ClaimAndRecord(ctx, shard, job, t, idempKey)

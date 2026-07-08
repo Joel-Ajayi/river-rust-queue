@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/adapter/inbound/rest"
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 )
 
@@ -62,7 +63,7 @@ func TestGetJobStatus(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			req, _ := http.NewRequest("GET", platform.APIJobPathPrefix+tt.jobID, nil)
 			if tt.authHeader != "" {
-				req.Header.Set("Authorization", tt.authHeader)
+				req.Header.Set(string(rest.HeaderAuthorization), tt.authHeader)
 			}
 			rr := httptest.NewRecorder()
 
@@ -80,8 +81,8 @@ func TestGetJobStatus(t *testing.T) {
 				if res["job_id"] != tt.jobID {
 					t.Errorf("expected job id %v, got %v", tt.jobID, res["job_id"])
 				}
-				if res["status"] != platform.JobStatusPending {
-					t.Errorf("expected status %v, got %v", platform.JobStatusPending, res["status"])
+				if res["status"] != domain.JobStatusPending {
+					t.Errorf("expected status %v, got %v", domain.JobStatusPending, res["status"])
 				}
 			}
 		})

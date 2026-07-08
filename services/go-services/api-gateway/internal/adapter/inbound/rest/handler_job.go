@@ -12,7 +12,7 @@ import (
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	principal, ok := r.Context().Value(ContextPrincipal).(domain.Principal)
 	if !ok {
-		writeError(w, platform.ErrUnauthorized(domain.ErrMissingAuthContext))
+		writeError(w, platform.ErrUnauthorized(domain.ErrMissingAuthContext.Error()))
 		return
 	}
 
@@ -30,8 +30,8 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 
 	res := &apiv1.GetJobResponse{
 		JobId:     job.ID,
-		Type:      job.Type,
-		Status:    job.Status,
+		Type:      string(job.Type),
+		Status:    string(job.Status),
 		CreatedAt: job.CreatedAt.Format(time.RFC3339),
 	}
 

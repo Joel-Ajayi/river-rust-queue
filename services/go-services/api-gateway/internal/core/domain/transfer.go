@@ -7,12 +7,13 @@ import (
 )
 
 type Transfer struct {
-	MerchantID string
-	FromWallet string
-	ToWallet   string
-	Amount     int64
-	Currency   string
-	Reference  string
+	MerchantID   string
+	ToMerchantID string
+	FromWallet   string
+	ToWallet     string
+	Amount       int64
+	Currency     string
+	Reference    string
 }
 
 func (t Transfer) Validate() error {
@@ -33,7 +34,7 @@ func (t Transfer) Validate() error {
 }
 
 func (t Transfer) Hash() string {
-	payload := fmt.Sprintf("%s|%s|%s|%d|%s|%s", t.MerchantID, t.FromWallet, t.ToWallet, t.Amount, t.Currency, t.Reference)
+	payload := fmt.Sprintf("%s|%s|%s|%s|%d|%s|%s", t.MerchantID, t.ToMerchantID, t.FromWallet, t.ToWallet, t.Amount, t.Currency, t.Reference)
 	h := sha256.Sum256([]byte(payload))
 	return hex.EncodeToString(h[:])
 }

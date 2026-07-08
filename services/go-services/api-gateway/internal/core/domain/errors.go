@@ -18,10 +18,11 @@ var (
 	ErrInvalidCredentials  = errors.New("invalid credentials")
 	ErrInvalidAPIKey       = errors.New("invalid Merchant Api key format")
 	ErrWalletNotOwned      = errors.New("wallet does not belong to merchant")
+	ErrWalletNotFound      = errors.New("destination wallet not found")
 	ErrJobNotFound         = errors.New("job not found")
 
-	ErrInternal           string = "an unexpected error occurred"
-	ErrInvalidBody        string = "invalid json payload"
-	ErrMissingAuthContext string = "missing authentication context"
-	ErrMissingBearerToken        = "missing or invalid authorization header"
+	ErrInternal           = errors.New("an unexpected error occurred")
+	ErrInvalidBody        = errors.New("invalid json payload")
+	ErrMissingAuthContext = errors.New("missing authentication context")
+	ErrMissingBearerToken = errors.New("missing or invalid authorization header")
 )

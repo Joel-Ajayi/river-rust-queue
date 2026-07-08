@@ -7,8 +7,10 @@ import (
 
 const (
 	// Publish topics
-	TopicJobs   = "jobs"
-	TopicNotify = "notify"
+	TopicJobs         = "jobs"
+	TopicNotify       = "notify"
+	TopicXShardPrefix         = "xshard."
+	ConsumerGroupLedgerWorker = "ledger-worker"
 )
 
 // NewKafkaWriter creates a synchronous Kafka writer for the given topic.

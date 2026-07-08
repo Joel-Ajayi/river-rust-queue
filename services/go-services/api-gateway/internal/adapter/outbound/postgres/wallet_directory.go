@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 
+	"strings"
+
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/port"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
@@ -41,4 +43,14 @@ func (d *WalletDirectory) CheckWalletOwnership(ctx context.Context, shardID, wal
 	}
 
 	return nil
+}
+
+func (d *WalletDirectory) LookupMerchantForWallet(ctx context.Context, walletID string) (string, error) {
+	// <merchantid>.<walletid>
+	parts := strings.SplitN(walletID, ".", 2)
+	if len(parts) == 2 {
+		return parts[0], nil
+	}
+
+	return "", domain.ErrWalletNotFound
 }

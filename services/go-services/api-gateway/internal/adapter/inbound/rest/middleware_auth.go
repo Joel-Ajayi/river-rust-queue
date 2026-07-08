@@ -23,7 +23,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		authHeader := r.Header.Get(string(HeaderAuthorization))
 
 		if authHeader == "" || !strings.HasPrefix(authHeader, string(HeaderValBearer)) {
-			writeError(w, platform.ErrUnauthorized(domain.ErrMissingBearerToken))
+			writeError(w, platform.ErrUnauthorized(domain.ErrMissingBearerToken.Error()))
 			return
 		}
 		tokenStr := strings.TrimPrefix(authHeader, string(HeaderValBearer))

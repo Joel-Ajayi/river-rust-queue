@@ -4,7 +4,6 @@ import "time"
 
 type JobType string
 type JobStatus string
-
 const (
 	// Job types
 	JobTypeTransfer JobType = "transfer"
@@ -20,9 +19,9 @@ type Job struct {
 	ID             string
 	MerchantID     string
 	IdempotencyKey string
-	Type           string
+	Type           JobType
 	PayloadHash    string
-	Status         string
+	Status         JobStatus
 	FailureReason  *string
 	CreatedAt      time.Time
 	CompletedAt    *time.Time

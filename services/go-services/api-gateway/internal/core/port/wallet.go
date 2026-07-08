@@ -11,9 +11,11 @@ import (
 // WalletDirectory is a driven port for verifying wallet information on a shard.
 type WalletDirectory interface {
 	CheckWalletOwnership(ctx context.Context, shardID, walletID, merchantID string) error
+	LookupMerchantForWallet(ctx context.Context, walletID string) (string, error)
 }
 
 // ShardPools is driven port for looking up pool for the given shard ID or an error if unknown.
 type ShardPools interface {
 	ShardPool(shardId string) (*pgxpool.Pool, error)
+	AllShardPools() map[string]*pgxpool.Pool
 }

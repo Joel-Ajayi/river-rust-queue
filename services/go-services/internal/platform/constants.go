@@ -4,14 +4,6 @@ type AggregateType string
 type EventType string
 
 const (
-	// Event Job types
-	EventTypeJobRequested EventType = "job.requested"
-
-	// Event Transfer types
-	EventTypeTransferCompleted  EventType = "transfer.completed"
-	EventTypeTransferFailed     EventType = "transfer.failed"
-	EventTypeTransferRolledBack EventType = "transfer.rolled_back"
-
 	// Paths
 	APIVersionV1     = "/v1"
 	APIVersionV2     = "/v2"
@@ -22,13 +14,18 @@ const (
 	APIHealthPath    = "/health"
 	APIReadyPath     = "/ready"
 
-	// Job Statuses
-	JobStatusPending   = "pending"
-	JobStatusCompleted = "completed"
-	JobStatusFailed    = "failed"
-
 	// Aggregate types
-	AggregateTypeJob      AggregateType = "job"
-	AggregateTypeEvent    AggregateType = "ev"
-	AggregateTypeTransfer AggregateType = "transfer"
+	AggregateTypeJob            AggregateType = "job"
+	AggregateTypeEvent          AggregateType = "ev"
+	AggregateTypeWallet         AggregateType = "wallet"
+	AggregateTypeTransfer       AggregateType = "transfer"
+	AggregateTypeXShardTransfer AggregateType = "xshard_transfer"
+
+	// Event types
+	EventTypeJobRequested            EventType = "job.requested"
+	EventTypeTransferCompleted       EventType = "transfer.completed"
+	EventTypeTransferFailed          EventType = "transfer.failed"
+	EventTypeXShardTransferRequested EventType = "xshard.transfer.requested"
+	EventTypeXShardTransferSettled   EventType = "xshard.transfer.settled"
+	EventTypeXShardTransferFailed    EventType = "xshard.transfer.failed"
 )

@@ -60,23 +60,18 @@ func main() {
 	ready := func(ctx context.Context) error { return readiness(ctx, pools, rdb) }
 	srv := rest.NewServer(authSvc, transferSvc, jobSvc, string(cfg.JWTSigningKey), ready, log)
 
-	go func() {
-		sigCh := make(chan os.Signal, 1)
-		// send msg to sigCh when sigint or sigterm is received
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	// -- Graceful Shutdown --
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh // Blocker until signal is received
 
-		<-sigCh // Blocker until signal is received
-
-		// -- Graceful Shutdown --
-		log.Info("received shutdown signal")
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer shutdownCancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			log.Error("shutdown error", zap.Error(err))
-		}
-		cancel()
-	}()
-
+	log.Info("received shutdown signal")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error("shutdown error", zap.Error(err))
+	}
+	cancel()
 	if err := srv.Start(); err != nil && err != http.ErrServerClosed {
 		log.Fatal("server error", zap.Error(err))
 	}

@@ -1,12 +1,13 @@
 package rest
 
 import (
-	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	apiv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/api/v1"
 )
@@ -20,9 +21,15 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// b. Decode JSON to Transfer Struct
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, platform.ErrInvalidBody(domain.ErrInvalidBody.Error()))
+		return
+	}
+
 	var req apiv1.CreateTransferRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, platform.ErrInvalidBody(domain.ErrInvalidBody))
+	if err := protojson.Unmarshal(bodyBytes, &req); err != nil {
+		writeError(w, platform.ErrInvalidBody(domain.ErrInvalidBody.Error()))
 		return
 	}
 	t := domain.Transfer{
@@ -36,7 +43,7 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	// c. Get Merchant Identity from Context
 	principal, ok := r.Context().Value(ContextPrincipal).(domain.Principal)
 	if !ok {
-		writeError(w, platform.ErrUnauthorized(domain.ErrMissingAuthContext))
+		writeError(w, platform.ErrUnauthorized(domain.ErrMissingAuthContext.Error()))
 		return
 	}
 
@@ -58,8 +65,5 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	statusCode := http.StatusAccepted
-	if res.AlreadyExisted {
-		statusCode = http.StatusOK
-	}
 	writeJSON(w, statusCode, &resp)
 }

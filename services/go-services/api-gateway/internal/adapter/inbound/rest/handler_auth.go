@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/domain"
+	apiv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/api/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
@@ -15,7 +16,7 @@ import (
 // (the API-key lookup) is delegated to the inbound port; minting the JWT is a
 // transport detail and stays here.
 func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
-	authHeader := r.Header.Get("Authorization")
+	authHeader := r.Header.Get(string(HeaderAuthorization))
 	if !strings.HasPrefix(authHeader, string(HeaderValBearer)) {
 		writeError(w, domain.ErrInvalidAPIKey)
 		return
@@ -32,18 +33,19 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	claims := jwt.MapClaims{
 		"sub":  principal.MerchantID,
 		"iat":  now.Unix(),
-		"exp":  now.Add(1 * time.Hour).Unix(),
+		"exp":  now.Add(1 * time.Hour).Unix(), // 1 hour expiration
 		"tier": principal.Tier,
 	}
 	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.jwtKey)
 	if err != nil {
 		s.log.Error("jwt signing failed", zap.Error(err))
-		writeError(w, platform.ErrInternal(domain.ErrInternal))
+		writeError(w, platform.ErrInternal(domain.ErrInternal.Error()))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"token":      signed,
-		"expires_in": 3600,
-	})
+	resp := &apiv1.AuthTokenResponse{
+		Token:     signed,
+		ExpiresIn: 3600, // 1 hour in seconds
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
