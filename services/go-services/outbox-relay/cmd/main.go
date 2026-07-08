@@ -43,7 +43,7 @@ func main() {
 	defer kafkaWriter.Close()
 
 	// -- 2. Initialize Adapters --
-	eventStore := postgres.NewEventStore(pools)
+	eventStore := postgres.NewEventStore(pools, logger)
 	eventPublisher := kafka.NewEventPublisher(kafkaWriter)
 
 	// -- 3. Initialize App --

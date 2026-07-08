@@ -2,11 +2,13 @@ package kafka
 
 import (
 	"context"
-	"encoding/json"
 
+	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/port"
 	"github.com/segmentio/kafka-go"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 type EventPublisher struct {
@@ -24,19 +26,28 @@ func (p *EventPublisher) PublishEvents(ctx context.Context, events []domain.Even
 		return []string{}, nil
 	}
 
-	//
 	messages := make([]kafka.Message, 0, len(events))
-	eventIDs := make([]string, 0, len(events))
+	var eventIDs []string
 	for _, e := range events {
-		// We encode the entire Event struct as JSON so downstream consumers have all the context
-		valueBytes, err := json.Marshal(e)
-		if err != nil {
-			return nil, err
+		valueBytes := e.Payload
+
+		key := []byte(e.AggregateID)
+
+		// For webhook notifications, we must key by merchant_id to guarantee per-merchant ordering (I5).
+		if e.PublishTopic == platform.TopicNotify {
+			var envelope eventsv1.EventEnvelope
+			if err := protojson.Unmarshal(e.Payload, &envelope); err == nil {
+				if whDeliv := envelope.GetWebhookDelivered(); whDeliv != nil {
+					key = []byte(whDeliv.MerchantId)
+				} else if whFail := envelope.GetWebhookFailed(); whFail != nil {
+					key = []byte(whFail.MerchantId)
+				}
+			}
 		}
 
 		msg := kafka.Message{
 			Topic: e.PublishTopic,
-			Key:   []byte(e.AggregateID),
+			Key:   key,
 			Value: valueBytes,
 		}
 
@@ -44,7 +55,9 @@ func (p *EventPublisher) PublishEvents(ctx context.Context, events []domain.Even
 		eventIDs = append(eventIDs, e.ID)
 	}
 
-	// Send the entire batch at once for performance
 	err := p.writer.WriteMessages(ctx, messages...)
-	return eventIDs, err
+	if err != nil {
+		return eventIDs, err
+	}
+	return eventIDs, nil
 }

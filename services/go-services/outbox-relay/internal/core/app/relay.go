@@ -65,10 +65,9 @@ func (s *RelayService) processBatch(ctx context.Context, shardID string) {
 		return
 	}
 
-	// 3.Mark as Published
-	if err := s.store.MarkAsPublished(ctx, shardID, eventIDs); err != nil {
-		s.log.Error("Failed to mark events as published", zap.Error(err))
-	} else {
-		s.log.Info("Successfully marked events as published", zap.Int("count", len(events)))
+	// 3. Mark Published ONLY after successful Kafka ACK
+	if err := s.store.MarkPublished(ctx, shardID, eventIDs); err != nil {
+		s.log.Error("Failed to mark events as published", zap.Error(err), zap.String("shard", shardID))
+		return
 	}
 }
