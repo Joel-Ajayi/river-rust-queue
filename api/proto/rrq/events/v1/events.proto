@@ -31,17 +31,21 @@ message EventEnvelope {
     ReconciliationCompletedPayload reconciliation_completed = 22;
     ReconciliationAlertPayload    reconciliation_alert    = 23;
     OperatorActionPayload         operator_action         = 24;
+    XShardTransferRequestedPayload xshard_transfer_requested = 25;
+    XShardTransferSettledPayload   xshard_transfer_settled   = 26;
+    XShardTransferFailedPayload    xshard_transfer_failed    = 27;
   }
 }
 
 // ---- Job lifecycle ----
 
 message TransferData {
-  string from_wallet = 1;
-  string to_wallet   = 2;
-  int64  amount      = 3;
-  string currency    = 4;
-  string reference   = 5;
+  string from_wallet    = 1;
+  string to_wallet      = 2;
+  string to_merchant_id = 6;
+  int64  amount         = 3;
+  string currency       = 4;
+  string reference      = 5;
 }
 
 message BulkPayoutRecipient {
@@ -72,6 +76,7 @@ message JobRequestedPayload {
 message TransferCompletedPayload {
   string job_id      = 1;
   string transfer_id = 2;
+  string merchant_id = 7;
   string from_wallet = 3;
   string to_wallet   = 4;
   int64  amount      = 5;
@@ -81,6 +86,7 @@ message TransferCompletedPayload {
 message TransferFailedPayload {
   string job_id      = 1;
   string transfer_id = 2;
+  string merchant_id = 4;
   string reason      = 3;
 }
 
@@ -98,6 +104,34 @@ message BulkPayoutCompletedPayload {
 }
 
 // ---- Fraud ----
+
+// ---- XShard ----
+
+message XShardTransferRequestedPayload {
+  string transfer_id = 1;
+  string job_id      = 2;
+  string merchant_id = 3;
+  string src_shard   = 4;
+  string dst_shard   = 5;
+  string from_wallet = 6;
+  string to_wallet   = 7;
+  int64  amount      = 8;
+  string currency    = 9;
+  string status      = 10;
+}
+
+message XShardTransferSettledPayload {
+  string transfer_id = 1;
+  string src_shard   = 2;
+  string dst_shard   = 3;
+}
+
+message XShardTransferFailedPayload {
+  string transfer_id = 1;
+  string src_shard   = 2;
+  string dst_shard   = 3;
+  string reason      = 4;
+}
 
 message FraudSuspectedPayload {
   string wallet_id      = 1;
