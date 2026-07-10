@@ -47,21 +47,27 @@ func writeError(w http.ResponseWriter, err error) {
 		appErr = platform.ErrIdempotencyMismatch()
 	case errors.Is(err, domain.ErrJobNotFound):
 		appErr = platform.ErrNotFound(string(platform.AggregateTypeJob))
-	case errors.Is(err, domain.ErrInvalidAPIKey):
+	case errors.Is(err, domain.ErrInvalidAPIKey), errors.Is(err, domain.ErrInvalidCredentials):
 		appErr = platform.ErrInvalidAPIKey(err.Error())
 	case errors.Is(err, domain.ErrWalletNotOwned):
 		appErr = platform.ErrForeignWallet()
 	case errors.Is(err, domain.ErrWalletNotFound):
 		appErr = platform.ErrValidation(string(platform.AggregateTypeWallet), domain.ErrWalletNotFound.Error())
+	case errors.Is(err, domain.ErrServiceUnavailable):
+		appErr = platform.ErrLedgerUnavailable(domain.ErrServiceUnavailable.Error())
+	case errors.Is(err, domain.ErrInvalidFromWallet):
+		appErr = platform.ErrValidation(ParamFromWallet, domain.ErrInvalidFromWallet.Error())
+	case errors.Is(err, domain.ErrInvalidToWallet):
+		appErr = platform.ErrValidation(ParamToWallet, domain.ErrInvalidToWallet.Error())
+	case errors.Is(err, domain.ErrInvalidAmount):
+		appErr = platform.ErrValidation(ParamAmount, domain.ErrInvalidAmount.Error())
+	case errors.Is(err, domain.ErrInvalidCurrency):
+		appErr = platform.ErrValidation(ParamCurrency, domain.ErrInvalidCurrency.Error())
+	case errors.Is(err, domain.ErrSameWallet):
+		appErr = platform.ErrValidation(ParamToWallet, domain.ErrSameWallet.Error())
 	default:
-		// Check for Validation errors
-		var valErr domain.ValidationError
-		if errors.As(err, &valErr) {
-			appErr = platform.ErrValidation(valErr.Field, valErr.Msg)
-		} else {
-			// Catch-all for unexpected errors (e.g., database connection dropped)
-			appErr = platform.ErrInternal(domain.ErrInternal.Error())
-		}
+		// Catch-all for unexpected errors (e.g., database connection dropped)
+		appErr = platform.ErrInternal(domain.ErrInternal.Error())
 	}
 
 	pbErr := &apiv1.ErrorResponse{

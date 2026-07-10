@@ -19,12 +19,11 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
-
-
 // setupEnvironment creates the real HTTP handler backed by testcontainers DBs.
-func setupEnvironment(t *testing.T) (http.Handler, string, testutil.TestDB) {
+func setupEnvironment(t *testing.T) (http.Handler, string, testutil.TestDB, string) {
 	merchantsDB, shardA, shardB := testutil.SetupTestDB(t)
 
 	log := zap.NewNop()
@@ -41,39 +40,24 @@ func setupEnvironment(t *testing.T) (http.Handler, string, testutil.TestDB) {
 	}
 	t.Cleanup(func() { pools.Close() })
 
-	// Seed a test merchant
-	merchantID := "m_123"
-	_, err = merchantsDB.Pool.Exec(context.Background(),
-		`INSERT INTO merchants (id, name, tier, status, shard_id, api_key_hash) VALUES ($1, 'Test', 'starter', 'active', 'shard-a', 'dummy-hash')`, merchantID)
-	if err != nil {
-		t.Fatalf("failed to seed merchant: %v", err)
-	}
-
-	// Seed wallets for the merchant in the shard DB
-	_, err = shardA.Pool.Exec(context.Background(),
-		`INSERT INTO wallets (id, merchant_id, currency) VALUES
-		('m_123.wal_A', $1, 'NGN'),
-		('m_123.wal_B', $1, 'NGN'),
-		('m_999.wal_foreign', 'm_999', 'NGN')`, merchantID)
-	if err != nil {
-		t.Fatalf("failed to seed wallets: %v", err)
-	}
+	// Use the shared testutil component to provision a merchant and wallets
+	merchantID := testutil.SeedMerchantAndWallets(t, merchantsDB, shardA)
 
 	jwtSecret := "test-secret"
-	merchants := postgres.NewMerchantDirectory(pools)
-	wallets := postgres.NewWalletDirectory(pools)
-	jobs := postgres.NewJobStore(pools)
-	// Use the split services for tests
-	authSvc := app.NewAuthService(merchants)
-	jobSvc := app.NewJobService(merchants, jobs)
-	transferSvc := app.NewTransferService(merchants, wallets, jobs, func() string { return "job_123" })
+	mDir := postgres.NewMerchantDirectory(pools)
+	wDir := postgres.NewWalletDirectory(pools)
+	jobsStore := postgres.NewJobStore(pools)
+	transferSvc := app.NewTransferService(mDir, wDir, jobsStore, platform.NewJobID)
+	authSvc := app.NewAuthService(mDir)
+	jobSvc := app.NewJobService(mDir, jobsStore)
 
 	// Set up the Server with our mocked/ephemeral dependencies
 	server := rest.NewServer(
+		8080,
+		[]byte(jwtSecret),
 		authSvc,
 		transferSvc,
 		jobSvc,
-		jwtSecret,
 		func(ctx context.Context) error { return nil },
 		zap.NewNop(),
 	)
@@ -81,22 +65,23 @@ func setupEnvironment(t *testing.T) (http.Handler, string, testutil.TestDB) {
 	// Mint a token for tests
 	now := time.Now()
 	claims := jwt.MapClaims{
-		"sub":  "m_123",
+		"sub":  merchantID,
 		"iat":  now.Unix(),
 		"exp":  now.Add(1 * time.Hour).Unix(),
 		"tier": 1,
 	}
 	tokenStr, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(jwtSecret))
 
-	return server, tokenStr, shardA
+	return server, tokenStr, shardA, merchantID
 }
 
 func TestIdempotency_ConcurrentDuplicates(t *testing.T) {
-	handler, tokenStr, shardA := setupEnvironment(t)
+	t.Parallel()
+	handler, tokenStr, shardA, mID := setupEnvironment(t)
 
 	reqDTO := apiv1.CreateTransferRequest{
-		FromWallet: "m_123.wal_A",
-		ToWallet:   "m_123.wal_B",
+		FromWallet: mID + ".wal_A",
+		ToWallet:   mID + ".wal_B",
 		Amount:     1000,
 		Currency:   "NGN",
 		Reference:  "ref123",
@@ -132,7 +117,7 @@ func TestIdempotency_ConcurrentDuplicates(t *testing.T) {
 		if res.Code == http.StatusAccepted {
 			accepted++
 			var resp apiv1.CreateTransferResponse
-			json.Unmarshal(res.Body.Bytes(), &resp)
+			protojson.Unmarshal(res.Body.Bytes(), &resp)
 			capturedJobID = resp.JobId
 		} else if res.Code == http.StatusOK {
 			ok++
@@ -155,7 +140,7 @@ func TestIdempotency_ConcurrentDuplicates(t *testing.T) {
 
 	// 2. Exactly one row in jobs table
 	var count int
-	err := shardA.Pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM jobs WHERE merchant_id = 'm_123' AND idempotency_key = $1`, idempKey).Scan(&count)
+	err := shardA.Pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM jobs WHERE merchant_id = $1 AND idempotency_key = $2`, mID, idempKey).Scan(&count)
 	if err != nil || count != 1 {
 		t.Errorf("expected exactly 1 job in DB, got %d (err: %v)", count, err)
 	}
@@ -168,14 +153,15 @@ func TestIdempotency_ConcurrentDuplicates(t *testing.T) {
 }
 
 func TestIdempotency_DifferentBody(t *testing.T) {
-	handler, tokenStr, _ := setupEnvironment(t)
+	t.Parallel()
+	handler, tokenStr, _, mID := setupEnvironment(t)
 
-	reqDTO1 := apiv1.CreateTransferRequest{FromWallet: "m_123.wal_A", ToWallet: "m_123.wal_B", Amount: 1000, Currency: "NGN"}
-	reqDTO2 := apiv1.CreateTransferRequest{FromWallet: "m_123.wal_A", ToWallet: "m_123.wal_B", Amount: 5000, Currency: "NGN"}
+	reqDTO1 := apiv1.CreateTransferRequest{FromWallet: mID + ".wal_A", ToWallet: mID + ".wal_B", Amount: 1000, Currency: "NGN"}
+	reqDTO2 := apiv1.CreateTransferRequest{FromWallet: mID + ".wal_A", ToWallet: mID + ".wal_B", Amount: 5000, Currency: "NGN"}
 
 	body1, _ := json.Marshal(&reqDTO1)
 	body2, _ := json.Marshal(&reqDTO2)
-	idempKey := "idem_diff_123"
+	idempKey := "idem_diff_" + mID
 
 	// First Request
 	req1 := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(body1))
@@ -201,8 +187,9 @@ func TestIdempotency_DifferentBody(t *testing.T) {
 }
 
 func TestAuth_InvalidTokens(t *testing.T) {
-	handler, _, _ := setupEnvironment(t)
-	body, _ := json.Marshal(&apiv1.CreateTransferRequest{FromWallet: "A", ToWallet: "B", Amount: 100, Currency: "NGN"})
+	t.Parallel()
+	handler, _, _, mID := setupEnvironment(t)
+	body, _ := json.Marshal(&apiv1.CreateTransferRequest{FromWallet: mID + ".wal_A", ToWallet: mID + ".wal_B", Amount: 100, Currency: "NGN"})
 
 	tests := []struct {
 		name       string
@@ -231,7 +218,8 @@ func TestAuth_InvalidTokens(t *testing.T) {
 }
 
 func TestValidation_InvalidFields(t *testing.T) {
-	handler, tokenStr, _ := setupEnvironment(t)
+	t.Parallel()
+	handler, tokenStr, _, mID := setupEnvironment(t)
 
 	tests := []struct {
 		name    string
@@ -239,8 +227,8 @@ func TestValidation_InvalidFields(t *testing.T) {
 		wantErr string
 	}{
 		{"MissingFields", &apiv1.CreateTransferRequest{}, "from_wallet"},
-		{"NegativeAmount", &apiv1.CreateTransferRequest{FromWallet: "A", ToWallet: "B", Amount: -100, Currency: "NGN"}, "amount"},
-		{"SameWallet", &apiv1.CreateTransferRequest{FromWallet: "A", ToWallet: "A", Amount: 100, Currency: "NGN"}, "to_wallet"},
+		{"NegativeAmount", &apiv1.CreateTransferRequest{FromWallet: mID + ".wal_A", ToWallet: mID + ".wal_B", Amount: -100, Currency: "NGN"}, "amount"},
+		{"SameWallet", &apiv1.CreateTransferRequest{FromWallet: mID + ".wal_A", ToWallet: mID + ".wal_A", Amount: 100, Currency: "NGN"}, "to_wallet"},
 	}
 
 	for _, tt := range tests {
@@ -261,19 +249,20 @@ func TestValidation_InvalidFields(t *testing.T) {
 }
 
 func TestAuthz_ForeignWalletRejected(t *testing.T) {
-	server, tokenStr, _ := setupEnvironment(t)
+	t.Parallel()
+	server, tokenStr, _, mID := setupEnvironment(t)
 	handler := server
 
-	// Test trying to transfer from a wallet not owned by m_123
+	// Test trying to transfer from a wallet not owned by the merchant
 	reqDTO := apiv1.CreateTransferRequest{
 		FromWallet: "m_999.wal_foreign",
-		ToWallet:   "m_123.wal_B",
+		ToWallet:   mID + ".wal_B",
 		Amount:     1000,
 		Currency:   "NGN",
 		Reference:  "ref123",
 	}
 	body, _ := json.Marshal(&reqDTO)
-	idempKey := "idem_authz_123"
+	idempKey := "idem_authz_" + mID
 
 	req := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(body))
 	req.Header.Set(string(rest.HeaderAuthorization), string(rest.HeaderValBearer)+tokenStr)
@@ -287,5 +276,25 @@ func TestAuthz_ForeignWalletRejected(t *testing.T) {
 	// Our wallet directory will return ErrWalletNotOwned, mapping to 403.
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 Forbidden for foreign wallet, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestValidation_OversizedPayload(t *testing.T) {
+	t.Parallel()
+	handler, tokenStr, _, _ := setupEnvironment(t)
+
+	// 1. Generate a 2MB JSON payload (larger than domain.MaxRequestBytes which is typically 1MB)
+	largeBody := make([]byte, 2*1024*1024)
+	req := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(largeBody))
+	req.Header.Set(string(rest.HeaderAuthorization), string(rest.HeaderValBearer)+tokenStr)
+	req.Header.Set(string(rest.HeaderIdempotencyKey), "idem_oversized")
+	req.Header.Set(string(rest.ContentType), string(rest.ApplicationJSON))
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// 2. Assert response is HTTP 413 Payload Too Large
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 Payload Too Large, got %d: %s", w.Code, w.Body.String())
 	}
 }

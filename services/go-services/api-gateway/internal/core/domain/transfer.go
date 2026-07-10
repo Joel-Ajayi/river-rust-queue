@@ -16,18 +16,23 @@ type Transfer struct {
 	Reference    string
 }
 
+type CircuitBreakerWalletBalanceRes struct {
+	Bal int64
+	Cur string
+}
+
 func (t Transfer) Validate() error {
 	switch {
 	case t.FromWallet == "":
-		return ValidationError{Field: "from_wallet", Msg: "is required"}
+		return ErrInvalidFromWallet
 	case t.ToWallet == "":
-		return ValidationError{Field: "to_wallet", Msg: "is required"}
+		return ErrInvalidToWallet
 	case t.Amount <= 0:
-		return ValidationError{Field: "amount", Msg: "must be greater than 0"}
+		return ErrInvalidAmount
 	case t.Currency == "":
-		return ValidationError{Field: "currency", Msg: "is required"}
+		return ErrInvalidCurrency
 	case t.FromWallet == t.ToWallet:
-		return ValidationError{Field: "to_wallet", Msg: "must differ from from_wallet"}
+		return ErrSameWallet
 	default:
 		return nil
 	}

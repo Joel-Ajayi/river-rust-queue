@@ -56,5 +56,23 @@ func (s *TransferService) Submit(ctx context.Context, t domain.Transfer, idempKe
 		Status:         domain.JobStatusPending,
 	}
 
-	return s.jobs.ClaimAndRecord(ctx, shard, job, t, idempKey)
+	res, err := s.jobs.ClaimAndRecord(ctx, shard, job, t, idempKey)
+	if err != nil {
+		return domain.SubmitResult{}, err
+	}
+
+	return res, nil
+}
+
+func (s *TransferService) GetBalance(ctx context.Context, walletID, merchantID string) (int64, string, error) {
+	shard, err := s.merchantsDir.ShardFor(ctx, merchantID)
+	if err != nil {
+		return 0, "", err
+	}
+
+	if err := s.walletsDir.CheckWalletOwnership(ctx, shard, walletID, merchantID); err != nil {
+		return 0, "", err
+	}
+
+	return s.walletsDir.GetBalance(ctx, shard, walletID)
 }

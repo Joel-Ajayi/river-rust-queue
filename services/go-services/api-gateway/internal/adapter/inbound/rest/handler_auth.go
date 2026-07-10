@@ -16,12 +16,12 @@ import (
 // (the API-key lookup) is delegated to the inbound port; minting the JWT is a
 // transport detail and stays here.
 func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
-	authHeader := r.Header.Get(string(HeaderAuthorization))
-	if !strings.HasPrefix(authHeader, string(HeaderValBearer)) {
+	authHeader := r.Header.Get(HeaderAuthorization)
+	if !strings.HasPrefix(authHeader, HeaderValBearer) {
 		writeError(w, domain.ErrInvalidAPIKey)
 		return
 	}
-	apiKey := strings.TrimPrefix(authHeader, string(HeaderValBearer))
+	apiKey := strings.TrimPrefix(authHeader, HeaderValBearer)
 	apiKey = strings.TrimSpace(apiKey)
 	principal, err := s.auth.Authenticate(r.Context(), apiKey)
 	if err != nil {
@@ -31,10 +31,10 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	claims := jwt.MapClaims{
-		"sub":  principal.MerchantID,
-		"iat":  now.Unix(),
-		"exp":  now.Add(1 * time.Hour).Unix(), // 1 hour expiration
-		"tier": principal.Tier,
+		domain.ClaimSub:  principal.MerchantID,
+		domain.ClaimIat:  now.Unix(),
+		domain.ClaimExp:  now.Add(domain.JWTExpiration).Unix(),
+		domain.ClaimTier: principal.Tier,
 	}
 	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.jwtKey)
 	if err != nil {
@@ -45,7 +45,7 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 
 	resp := &apiv1.AuthTokenResponse{
 		Token:     signed,
-		ExpiresIn: 3600, // 1 hour in seconds
+		ExpiresIn: int32(domain.JWTExpiration.Seconds()),
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

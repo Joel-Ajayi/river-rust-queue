@@ -16,9 +16,9 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobID := r.PathValue("id")
+	jobID := r.PathValue(ParamJobID)
 	if jobID == "" {
-		writeError(w, platform.ErrValidation("id", "job id is required"))
+		writeError(w, platform.ErrValidation(ParamJobID, domain.ErrMsgJobIDRequired))
 		return
 	}
 

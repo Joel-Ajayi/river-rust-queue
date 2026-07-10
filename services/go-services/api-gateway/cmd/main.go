@@ -10,7 +10,9 @@ import (
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/adapter/inbound/rest"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/adapter/outbound/postgres"
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/adapter/outbound/resilience"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/app"
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/port"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -47,18 +49,23 @@ func main() {
 	defer rdb.Close()
 
 	// --- Driven adapters (outbound) ---
-	merchantDir := postgres.NewMerchantDirectory(pools)
-	wallterDir := postgres.NewWalletDirectory(pools)
-	jobStore := postgres.NewJobStore(pools)
+	var merchantDir port.MerchantDirectory = postgres.NewMerchantDirectory(pools)
+	merchantDir = resilience.NewMerchantDirectoryCB(merchantDir)
+
+	var walletDir port.WalletDirectory = postgres.NewWalletDirectory(pools)
+	walletDir = resilience.NewWalletDirectoryCB(walletDir)
+
+	var jobStore port.JobStore = postgres.NewJobStore(pools)
+	jobStore = resilience.NewJobStoreCB(jobStore)
 
 	// --- Core use-cases ---
 	authSvc := app.NewAuthService(merchantDir)
 	jobSvc := app.NewJobService(merchantDir, jobStore)
-	transferSvc := app.NewTransferService(merchantDir, wallterDir, jobStore, platform.NewJobID)
+	transferSvc := app.NewTransferService(merchantDir, walletDir, jobStore, platform.NewJobID)
 
 	// --- Driving adapter (inbound) ---
 	ready := func(ctx context.Context) error { return readiness(ctx, pools, rdb) }
-	srv := rest.NewServer(authSvc, transferSvc, jobSvc, string(cfg.JWTSigningKey), ready, log)
+	srv := rest.NewServer(cfg.HTTPPort, cfg.JWTSigningKey, authSvc, transferSvc, jobSvc, ready, log)
 
 	// -- Graceful Shutdown --
 	sigCh := make(chan os.Signal, 1)

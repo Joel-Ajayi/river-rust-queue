@@ -12,6 +12,7 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/port"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -57,6 +58,9 @@ func (s *JobStore) ClaimAndRecord(ctx context.Context, shardId string, job domai
 			`SELECT id, request_hash, status FROM jobs WHERE merchant_id = $1 AND idempotency_key=$2`,
 			job.MerchantID, job.IdempotencyKey,
 		).Scan(&existing.ID, &existing.PayloadHash, &existing.Status); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return domain.SubmitResult{}, domain.ErrJobNotFound
+			}
 			return domain.SubmitResult{}, err
 		}
 
@@ -122,7 +126,11 @@ func (s *JobStore) ClaimAndRecord(ctx context.Context, shardId string, job domai
 }
 
 func (s *JobStore) GetJob(ctx context.Context, shardID, jobID string) (domain.Job, error) {
-	pool, err := s.pools.ShardPool(shardID)
+	if _, err := uuid.Parse(jobID); err != nil {
+		return domain.Job{}, domain.ErrJobNotFound
+	}
+
+	pool, err := s.pools.ShardPoolRO(shardID)
 	if err != nil {
 		return domain.Job{}, err
 	}

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 
 	"strings"
 
@@ -28,16 +29,19 @@ func NewMerchantDirectory(pools *platform.ShardPools) *MerchantDirectory {
 // ShardFor returns the shard owning an active merchant.
 func (md *MerchantDirectory) ShardFor(ctx context.Context, merchantID string) (string, error) {
 	var shardID string
-	err := md.pools.MerchantsPool().QueryRow(
+	err := md.pools.MerchantsPoolRO().QueryRow(
 		ctx,
 		`SELECT shard_id FROM merchants WHERE id = $1 AND status = $2`,
 		merchantID, platform.MerchantStatusActive,
 	).Scan(&shardID)
-	if err != nil || err == pgx.ErrNoRows {
-		return "", domain.ErrMerchantInactive
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", domain.ErrMerchantInactive
+		}
+		return "", err
 	}
 
-	return shardID, err
+	return shardID, nil
 }
 
 func (md *MerchantDirectory) AuthenticateAPIKey(ctx context.Context, apiKey string) (domain.Principal, error) {
@@ -50,13 +54,13 @@ func (md *MerchantDirectory) AuthenticateAPIKey(ctx context.Context, apiKey stri
 	secretPart := parts[1]
 
 	var tier, status, hash string
-	err := md.pools.MerchantsPool().QueryRow(ctx,
+	err := md.pools.MerchantsPoolRO().QueryRow(ctx,
 		`SELECT tier, status, api_key_hash FROM merchants WHERE id = $1 AND status != $2`,
 		merchantID, platform.MerchantStatusClosed,
 	).Scan(&tier, &status, &hash)
 
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.Principal{}, domain.ErrInvalidCredentials
 		}
 		return domain.Principal{}, err

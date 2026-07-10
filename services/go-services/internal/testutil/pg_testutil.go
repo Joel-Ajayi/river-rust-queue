@@ -94,7 +94,9 @@ func SetupTestDB(t *testing.T) (merchantsDB TestDB, shardA TestDB, shardB TestDB
 			t.Fatalf("could not find go.mod")
 		}
 	}
-	baseDir := filepath.Join(filepath.Dir(cwd), "deploy", "db", "migrations")
+	// baseDir should point to /home/ayotunde/dev/me/rrq/river-rust-queue/deploy/db/migrations
+	// If cwd is /home/ayotunde/dev/me/rrq/river-rust-queue/services/go-services, we need to go up two directories
+	baseDir := filepath.Join(filepath.Dir(filepath.Dir(cwd)), "deploy", "db", "migrations")
 
 	setupDB := func(dbName, migrationSubDir string) TestDB {
 		uri := fmt.Sprintf("postgres://postgres:postgres@%s:%s/%s?sslmode=disable", host, port.Port(), dbName)

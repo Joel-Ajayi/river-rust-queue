@@ -3,29 +3,17 @@ package rest
 import (
 	"context"
 	"net/http"
-	"time"
+	"strconv"
 
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/port"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"go.uber.org/zap"
+	"golang.org/x/sync/semaphore"
+	"golang.org/x/time/rate"
 )
 
-type HeaderKey string
-type ContextKey string
-type HeaderVal string
 
-const (
-	HeaderIdempotencyKey HeaderKey  = "Idempotency-Key"
-	ContextPrincipal     ContextKey = "principal"
-	HeaderAuthorization  HeaderKey  = "Authorization"
-
-	HeaderValBearer HeaderVal = "Bearer"
-	ApplicationJSON HeaderVal = "application/json"
-
-	ContentType HeaderKey = "Content-Type"
-
-	PORT string = ":8080"
-)
 
 // ReadinessFunc provides the function to check liveness/readiness
 type ReadinessFunc func(ctx context.Context) error
@@ -37,13 +25,16 @@ type Server struct {
 	jwtKey    []byte
 	ready     ReadinessFunc
 	log       *zap.Logger
+	bulkhead  *semaphore.Weighted // Bulkhead isolation (Netflix Pattern)
+	limiter   *rate.Limiter       // Rate limiting against thundering herds
 }
 
 func NewServer(
+	httpPort int,
+	jwtKey []byte,
 	auth port.Authenticator,
 	transfers port.TransferSubmitter,
 	jobs port.JobReader,
-	jwtKey string,
 	ready ReadinessFunc,
 	log *zap.Logger,
 ) *Server {
@@ -51,21 +42,23 @@ func NewServer(
 		auth:      auth,
 		transfers: transfers,
 		jobs:      jobs,
-		jwtKey:    []byte(jwtKey),
+		jwtKey:    jwtKey,
 		ready:     ready,
 		log:       log,
+		bulkhead:  semaphore.NewWeighted(domain.BulkheadLimit),
+		limiter:   rate.NewLimiter(rate.Limit(domain.RateLimitReqPerSec), domain.RateLimitBurst),
 	}
 
 	mux := http.NewServeMux()
 	s.RegisterRoutes(mux)
 
 	s.httpSrv = &http.Server{
-		Addr:              PORT,
+		Addr:              ":" + strconv.Itoa(httpPort),
 		Handler:           mux,
-		ReadTimeout:       10 * time.Second,
-		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       15 * time.Second,
+		ReadTimeout:       ServerReadTimeout,
+		ReadHeaderTimeout: ServerReadTimeout,
+		WriteTimeout:      ServerWriteTimeout,
+		IdleTimeout:       ServerIdleTimeout,
 	}
 
 	return s
@@ -94,9 +87,13 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+platform.APIReadyPath, s.handleReady)
 
 	// Token exchange (API key -> JWT).
-	mux.HandleFunc("POST "+platform.APIAuthTokenPath, s.handleAuthToken)
+	mux.Handle("POST "+platform.APIAuthTokenPath, s.withRateLimit(s.withBulkhead(http.HandlerFunc(s.handleAuthToken))))
 
 	// Protected routes (require a valid JWT).
-	mux.Handle("POST "+platform.APITransfersPath, s.requireAuth(http.HandlerFunc(s.handleCreateTransfer)))
-	mux.Handle("GET "+platform.APIJobPathPrefix+"{id}", s.requireAuth(http.HandlerFunc(s.handleGetJob)))
+	// We apply RateLimit -> Bulkhead -> Auth
+	mux.Handle("POST "+platform.APITransfersPath, s.withRateLimit(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleCreateTransfer)))))
+	mux.Handle("GET "+platform.APIJobPathPrefix+"{id}", s.withRateLimit(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleGetJob)))))
+	mux.Handle("GET "+platform.APIBalancesPath, s.withRateLimit(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleGetBalance)))))
 }
+
+

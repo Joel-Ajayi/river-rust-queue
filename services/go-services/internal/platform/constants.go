@@ -1,5 +1,6 @@
 package platform
 
+
 type AggregateType string
 type EventType string
 
@@ -10,6 +11,7 @@ const (
 	APIPathPrefix    = APIVersionV1
 	APIJobPathPrefix = APIPathPrefix + "/jobs/"
 	APITransfersPath = APIPathPrefix + "/transfers"
+	APIBalancesPath  = APIPathPrefix + "/balances"
 	APIAuthTokenPath = APIPathPrefix + "/auth/token"
 	APIHealthPath    = "/health"
 	APIReadyPath     = "/ready"

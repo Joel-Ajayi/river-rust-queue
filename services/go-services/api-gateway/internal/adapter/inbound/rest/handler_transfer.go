@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,8 +22,15 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// b. Decode JSON to Transfer Struct
+	// Limit request body to prevent OOM
+	r.Body = http.MaxBytesReader(w, r.Body, domain.MaxRequestBytes)
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, platform.ErrPayloadTooLarge(domain.ErrMsgPayloadTooLarge))
+			return
+		}
 		writeError(w, platform.ErrInvalidBody(domain.ErrInvalidBody.Error()))
 		return
 	}
@@ -65,5 +73,8 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	statusCode := http.StatusAccepted
+	if res.AlreadyExisted {
+		statusCode = http.StatusOK
+	}
 	writeJSON(w, statusCode, &resp)
 }

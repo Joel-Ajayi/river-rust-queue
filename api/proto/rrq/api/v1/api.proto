@@ -78,6 +78,14 @@ message GetJobResponse {
   BulkPayoutSummary  summary      = 8;
 }
 
+// ---- Balances ----
+
+message GetBalanceResponse {
+  string wallet_id = 1;
+  int64  balance   = 2;
+  string currency  = 3;
+}
+
 // ---- Errors ----
 
 message ErrorResponse {

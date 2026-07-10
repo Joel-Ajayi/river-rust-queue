@@ -7,9 +7,11 @@ import (
 
 const (
 	// Publish topics
-	TopicJobs         = "jobs"
-	TopicNotify       = "notify"
+	TopicJobs                 = "jobs"
+	TopicJobsRetry            = "jobs.retry"
+	TopicNotify               = "notify"
 	TopicXShardPrefix         = "xshard."
+	TopicXShardRetryPrefix    = "xshard.retry."
 	ConsumerGroupLedgerWorker = "ledger-worker"
 )
 
