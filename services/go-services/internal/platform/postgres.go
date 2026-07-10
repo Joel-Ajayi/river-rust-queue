@@ -33,6 +33,8 @@ type ShardPools struct {
 
 // NewShardPools creates pools for the global merchants DB and each shard.
 func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPools, error) {
+	pgLog := log.Named(LogComponentPostgres)
+
 	sp := &ShardPools{
 		shards:   make(map[string]*pgxpool.Pool),
 		roShards: make(map[string]*pgxpool.Pool),
@@ -40,7 +42,7 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 
 	pool, err := pgxpool.New(ctx, cfg.MerchantsDBURI)
 	if err != nil {
-		return nil, fmt.Errorf("merchants db pool: %w", err)
+		return nil, err
 	}
 	sp.merchants = pool
 
@@ -52,17 +54,19 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 	roPool, err := pgxpool.New(ctx, roURI)
 	if err != nil {
 		sp.Close()
-		return nil, fmt.Errorf("merchants ro db pool: %w", err)
+		return nil, err
 	}
 	sp.roMerchants = roPool
-	log.Info("connected to merchants-db")
+	pgLog.Info("Connected to merchants database", zap.String(LogFieldEvent, LogEventMerchantsDBConnected))
 
 	for shardID, uri := range cfg.ShardURIs {
+		shardLog := pgLog.With(zap.String(LogFieldShardID, shardID))
+
 		// Read-Write Pool
 		pool, err := pgxpool.New(ctx, uri)
 		if err != nil {
 			sp.Close()
-			return nil, fmt.Errorf("shard %s pool: %w", shardID, err)
+			return nil, err
 		}
 		sp.shards[shardID] = pool
 
@@ -75,11 +79,11 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 		roPool, err := pgxpool.New(ctx, roURI)
 		if err != nil {
 			sp.Close()
-			return nil, fmt.Errorf("shard %s RO pool: %w", shardID, err)
+			return nil, err
 		}
 		sp.roShards[shardID] = roPool
 
-		log.Info("connected to shard", zap.String("shard_id", shardID))
+		shardLog.Info("Connected to database shard", zap.String(LogFieldEvent, LogEventShardDBConnected))
 	}
 
 	return sp, nil
@@ -136,18 +140,18 @@ func (sp *ShardPools) GetAvailableShardIDs() []string {
 // Ping verifies connectivity to all pools (readiness probe).
 func (sp *ShardPools) Ping(ctx context.Context) error {
 	if err := sp.merchants.Ping(ctx); err != nil {
-		return fmt.Errorf("merchants db ping: %w", err)
+		return err
 	}
 	if sp.roMerchants != nil {
 		if err := sp.roMerchants.Ping(ctx); err != nil {
-			return fmt.Errorf("merchants ro db ping: %w", err)
+			return err
 		}
 	}
 	sp.mu.RLock()
 	defer sp.mu.RUnlock()
-	for id, pool := range sp.shards {
+	for _, pool := range sp.shards {
 		if err := pool.Ping(ctx); err != nil {
-			return fmt.Errorf("shard %s ping: %w", id, err)
+			return err
 		}
 	}
 	return nil

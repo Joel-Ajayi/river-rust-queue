@@ -18,8 +18,8 @@ type RetryConfig struct {
 }
 
 // ExecuteWithJitter executes the given function with Exponential Backoff and Full Jitter (AWS Pattern).
-// isTerminal is a function that returns true if the error is a business logic error and should not be retried.
-func ExecuteWithJitter(ctx context.Context, cfg RetryConfig, isTerminalError func(error) bool, fn func() error) error {
+// isTransientError is a function that returns true ONLY if the error is a mathematically safe, temporary condition (e.g. Deadlock).
+func ExecuteWithJitter(ctx context.Context, cfg RetryConfig, isTransientError func(error) bool, fn func() error) error {
 	var lastErr error
 
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
@@ -29,10 +29,14 @@ func ExecuteWithJitter(ctx context.Context, cfg RetryConfig, isTerminalError fun
 			return nil
 		}
 
-		// Fast-fail immediately if the error is terminal (e.g., Hard Card Decline, Invalid API Key)
-		if isTerminalError != nil && isTerminalError(err) {
+		// Strict Error Taxonomy: If we do not have an explicit transient error check, or if the error is NOT transient,
+		// we must FAIL FAST immediately. We do NOT retry infrastructure outages (Connection Refused) or Business Errors.
+		if isTransientError == nil || !isTransientError(err) {
 			return err
 		}
+
+		// Record the transient infrastructure error for alerting
+		RecordInfrastructureError(context.Background())
 
 		lastErr = err
 		if attempt == cfg.MaxRetries {
@@ -104,6 +108,21 @@ func NewCircuitBreaker(cfg CircuitBreakerConfig) *gobreaker.CircuitBreaker {
 			}
 			return false
 		},
-		OnStateChange: cfg.OnStateChange,
+		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
+			var stateVal int64
+			switch to {
+			case gobreaker.StateClosed:
+				stateVal = 0
+			case gobreaker.StateHalfOpen:
+				stateVal = 1
+			case gobreaker.StateOpen:
+				stateVal = 2
+			}
+			RecordCircuitBreakerState(context.Background(), name, stateVal)
+
+			if cfg.OnStateChange != nil {
+				cfg.OnStateChange(name, from, to)
+			}
+		},
 	})
 }

@@ -24,7 +24,8 @@ func NewKafkaWriter(brokers []string, topic string, log *zap.Logger) *kafka.Writ
 		RequiredAcks: kafka.RequireAll,
 		Async:        false,
 	}
-	log.Info("kafka writer created", zap.String("topic", topic))
+	kafkaLog := log.Named(LogComponentKafka)
+	kafkaLog.Info("Created Kafka writer", zap.String(LogFieldEvent, LogEventKafkaWriterCreated), zap.String(LogFieldTopic, topic))
 	return w
 }
 
@@ -37,6 +38,7 @@ func NewKafkaReader(brokers []string, topic, groupID string, log *zap.Logger) *k
 		MinBytes: 1,
 		MaxBytes: 10e6,
 	})
-	log.Info("kafka reader created", zap.String("topic", topic), zap.String("group", groupID))
+	kafkaLog := log.Named(LogComponentKafka)
+	kafkaLog.Info("Created Kafka reader", zap.String(LogFieldEvent, LogEventKafkaReaderCreated), zap.String(LogFieldTopic, topic), zap.String(LogFieldGroup, groupID))
 	return r
 }

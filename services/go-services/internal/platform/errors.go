@@ -1,8 +1,16 @@
 package platform
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"syscall"
+
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/segmentio/kafka-go"
 )
 
 // AppError is a structured error that carries a code, message, and HTTP status.
@@ -73,4 +81,62 @@ func ErrServiceUnavailable(msg string) *AppError {
 
 func ErrPayloadTooLarge(msg string) *AppError {
 	return &AppError{Code: "PAYLOAD_TOO_LARGE", Message: msg, Status: http.StatusRequestEntityTooLarge}
+}
+
+func IsTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// 1. PostgreSQL Structural Error Inspection (pgx/v5)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case pgerrcode.DeadlockDetected, // 40P01: Concurrent transaction deadlock lock victim
+			pgerrcode.SerializationFailure,  // 40001: SSI isolation failure (safe to replay transaction)
+			pgerrcode.InsufficientResources, // 53000: DB out of memory/disk space (temporary spike)
+			pgerrcode.TooManyConnections:    // 53300: Connection pool limit hit on Postgres
+			return true
+		// We explicitly DO NOT include 08000, 08003, 08006 (Connection drops)
+		default:
+			return false
+		}
+	}
+
+	// 2. Kafka Network & State Failures (segmentio/kafka-go)
+	var kErr kafka.Error
+	if errors.As(err, &kErr) {
+		if kErr.Temporary() || kErr.Timeout() {
+			return true
+		}
+		switch kErr {
+		case kafka.RequestTimedOut,
+			kafka.LeaderNotAvailable,
+			kafka.NotLeaderForPartition,
+			kafka.NetworkException:
+			return true
+		}
+	}
+
+	// 3. Robust Network and Socket Level Timeouts
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout()) {
+		// Differentiate between a transient network timeout and a hard dial failure (Connection Refused).
+		// We explicitly do NOT want to retry dial failures or reset connections.
+		var sysErr *net.OpError
+		if errors.As(err, &sysErr) {
+			if errors.Is(sysErr.Err, syscall.ECONNREFUSED) || errors.Is(sysErr.Err, syscall.ECONNRESET) {
+				return false // Fail fast!
+			}
+		}
+		return true
+	}
+
+	// 4. Go Context Deadlines
+	// A context timeout (e.g., http client request timeout) is highly transient.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	return false
 }

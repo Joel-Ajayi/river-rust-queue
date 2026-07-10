@@ -157,7 +157,7 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 		return err
 	}
 
-	// 9. Emit Outbox Event (unified outcome payload)
+	// 9. Emit Outbox Event
 	eventID := platform.NewEventID()
 	now := time.Now()
 

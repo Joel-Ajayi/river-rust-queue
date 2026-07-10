@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/adapter/outbound/resilience"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/domain"
@@ -40,8 +39,8 @@ func TestJobStoreCB_RetriesOnTransientError(t *testing.T) {
 		getJobFunc: func(ctx context.Context, shardID, jobID string) (domain.Job, error) {
 			callCount++
 			if callCount < 3 {
-				// Return a generic error to simulate transient network failure (not non-retryable)
-				return domain.Job{}, errors.New("transient network error")
+				// Return context.DeadlineExceeded to strictly match our taxonomy for a transient error
+				return domain.Job{}, context.DeadlineExceeded
 			}
 			return domain.Job{ID: "success"}, nil
 		},
@@ -95,16 +94,15 @@ func TestJobStoreCB_CircuitBreakerTrips(t *testing.T) {
 	cbStore := resilience.NewJobStoreCB(mockStore)
 
 	// MaxFails is 3. We must fail 3 times across the circuit breaker to trip it.
-	// Since each call to cbStore retries 3 times itself (so 4 attempts total per call),
-	// a single call to cbStore.GetJob that completely exhausts retries will register as 4 failures to the circuit breaker.
-	// Therefore, one completely failed call will trip the circuit breaker.
-	_, _ = cbStore.GetJob(context.Background(), "shard-a", "job-123")
+	// Since "fatal database crash" is not transient, the Jitter layer fails fast without retrying.
+	// So we must manually make 3 calls to trip the circuit breaker.
+	for i := 0; i < 3; i++ {
+		cbStore.GetJob(context.Background(), "shard-a", "job-123")
+	}
 
-	// Wait briefly just to ensure state changes
-	time.Sleep(10 * time.Millisecond)
+	// Now the circuit breaker should be OPEN. The 4th call should return domain.ErrServiceUnavailable.
+	_, err := cbStore.GetJob(context.Background(), "shard-a", "job-123")
 
-	// The next immediate call should fail instantly with ErrServiceUnavailable (mapped from ErrOpenState)
-	_, err := cbStore.GetJob(context.Background(), "shard-a", "job-456")
 	if !errors.Is(err, domain.ErrServiceUnavailable) {
 		t.Fatalf("expected ErrServiceUnavailable (circuit breaker open), got: %v", err)
 	}
@@ -122,15 +120,15 @@ func TestJobStoreCB_CellBasedIsolation(t *testing.T) {
 
 	cbStore := resilience.NewJobStoreCB(mockStore)
 
-	// Trip the circuit breaker for shard-a by exhausting retries
-	_, _ = cbStore.GetJob(context.Background(), "shard-a", "job-123")
+	// Make 3 calls to shard-a to trip its circuit breaker (since it fails fast on non-transient errors)
+	for i := 0; i < 3; i++ {
+		cbStore.GetJob(context.Background(), "shard-a", "job-123")
+	}
 
-	time.Sleep(10 * time.Millisecond)
-
-	// Ensure shard-a is blocked
-	_, err := cbStore.GetJob(context.Background(), "shard-a", "job-456")
-	if !errors.Is(err, domain.ErrServiceUnavailable) {
-		t.Fatalf("expected ErrServiceUnavailable for shard-a, got: %v", err)
+	// The 4th call to shard-a should return ErrServiceUnavailable
+	_, errA := cbStore.GetJob(context.Background(), "shard-a", "job-123")
+	if !errors.Is(errA, domain.ErrServiceUnavailable) {
+		t.Fatalf("expected ErrServiceUnavailable for shard-a, got: %v", errA)
 	}
 
 	// Route a request to shard-b, it should SUCCEED and not be impacted by shard-a's failure!

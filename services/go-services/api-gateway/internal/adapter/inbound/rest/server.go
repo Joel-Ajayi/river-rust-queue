@@ -13,8 +13,6 @@ import (
 	"golang.org/x/time/rate"
 )
 
-
-
 // ReadinessFunc provides the function to check liveness/readiness
 type ReadinessFunc func(ctx context.Context) error
 type Server struct {
@@ -44,7 +42,7 @@ func NewServer(
 		jobs:      jobs,
 		jwtKey:    jwtKey,
 		ready:     ready,
-		log:       log,
+		log:       log.Named(platform.LogComponentRESTServer),
 		bulkhead:  semaphore.NewWeighted(domain.BulkheadLimit),
 		limiter:   rate.NewLimiter(rate.Limit(domain.RateLimitReqPerSec), domain.RateLimitBurst),
 	}
@@ -54,7 +52,7 @@ func NewServer(
 
 	s.httpSrv = &http.Server{
 		Addr:              ":" + strconv.Itoa(httpPort),
-		Handler:           mux,
+		Handler:           s.withStructuredLogging(mux),
 		ReadTimeout:       ServerReadTimeout,
 		ReadHeaderTimeout: ServerReadTimeout,
 		WriteTimeout:      ServerWriteTimeout,
@@ -71,13 +69,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Start begins serving and blocks until the server stops.
 func (s *Server) Start() error {
-	s.log.Info("starting api-gateway", zap.String("addr", s.httpSrv.Addr))
+	s.log.Info("Starting API Gateway server", zap.String(platform.LogFieldEvent, platform.LogEventServerStarted), zap.String(platform.LogFieldAddr, s.httpSrv.Addr))
 	return s.httpSrv.ListenAndServe()
 }
 
 // Shutdown gracefully drains in-flight requests.
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.log.Info("shutting down api-gateway")
+	s.log.Info("Shutting down API Gateway server", zap.String(platform.LogFieldEvent, platform.LogEventServerShutdown))
 	return s.httpSrv.Shutdown(ctx)
 }
 
@@ -95,5 +93,3 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET "+platform.APIJobPathPrefix+"{id}", s.withRateLimit(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleGetJob)))))
 	mux.Handle("GET "+platform.APIBalancesPath, s.withRateLimit(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleGetBalance)))))
 }
-
-

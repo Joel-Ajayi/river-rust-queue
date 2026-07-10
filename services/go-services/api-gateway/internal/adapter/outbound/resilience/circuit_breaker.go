@@ -24,15 +24,18 @@ func mapCBError(err error) error {
 
 func newCB(name string) *gobreaker.CircuitBreaker {
 	return platform.NewCircuitBreaker(platform.CircuitBreakerConfig{
-		Name:        name,
-		MaxRequests: CircuitBreakerMaxRequest,
-		Timeout:     CircuitBreakerTimeout,
-		MaxFails:    CircuitBreakerMaxFails,
-		IsSuccessful: func(err error) bool {
-			if err == nil {
-				return true
+		Name:         name,
+		MaxRequests:  CircuitBreakerMaxRequest,
+		Timeout:      CircuitBreakerTimeout,
+		MaxFails:     CircuitBreakerMaxFails,
+		IsSuccessful: func(err error) bool { return domain.IsTerminalError(err) },
+		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
+			if to == gobreaker.StateOpen {
+				platform.RecordCircuitBreakerOpen(context.Background(), name)
+				if from == gobreaker.StateHalfOpen {
+					platform.RecordCircuitBreakerHalfOpenFailure(context.Background(), name)
+				}
 			}
-			return domain.IsNonRetryableError(err)
 		},
 	})
 }
@@ -47,7 +50,7 @@ type merchantDirCB struct {
 func NewMerchantDirectoryCB(next port.MerchantDirectory) port.MerchantDirectory {
 	return &merchantDirCB{
 		next:   next,
-		readCB: newCB(CircuitBreakerReadName + "_MerchantDir"),
+		readCB: newCB(CircuitBreakerReadName + CBSuffixMerchantDir),
 	}
 }
 
@@ -58,7 +61,7 @@ func (c *merchantDirCB) ShardFor(ctx context.Context, merchantID string) (string
 		MaxRetries: RetryMaxAttempts,
 		BaseDelay:  RetryBaseDelay,
 		MaxDelay:   RetryMaxDelay,
-	}, domain.IsNonRetryableError, func() error {
+	}, platform.IsTransientError, func() error {
 		var err error
 		res, err = c.readCB.Execute(func() (interface{}, error) {
 			return c.next.ShardFor(ctx, merchantID)
@@ -78,7 +81,7 @@ func (c *merchantDirCB) AuthenticateAPIKey(ctx context.Context, apiKey string) (
 		MaxRetries: RetryMaxAttempts,
 		BaseDelay:  RetryBaseDelay,
 		MaxDelay:   RetryMaxDelay,
-	}, domain.IsNonRetryableError, func() error {
+	}, platform.IsTransientError, func() error {
 		var err error
 		res, err = c.readCB.Execute(func() (interface{}, error) {
 			return c.next.AuthenticateAPIKey(ctx, apiKey)
@@ -105,7 +108,7 @@ func NewWalletDirectoryCB(next port.WalletDirectory) port.WalletDirectory {
 }
 
 func (c *walletDirCB) getReadCB(shardID string) *gobreaker.CircuitBreaker {
-	name := CircuitBreakerReadName + "_WalletDir_" + shardID
+	name := CircuitBreakerReadName + CBSuffixWalletDir + shardID
 	if cb, ok := c.readCBs.Load(name); ok {
 		return cb.(*gobreaker.CircuitBreaker)
 	}
@@ -120,7 +123,7 @@ func (c *walletDirCB) CheckWalletOwnership(ctx context.Context, shardID, walletI
 		MaxRetries: RetryMaxAttempts,
 		BaseDelay:  RetryBaseDelay,
 		MaxDelay:   RetryMaxDelay,
-	}, domain.IsNonRetryableError, func() error {
+	}, platform.IsTransientError, func() error {
 		_, e := cb.Execute(func() (interface{}, error) {
 			return nil, c.next.CheckWalletOwnership(ctx, shardID, walletID, merchantID)
 		})
@@ -146,7 +149,7 @@ func (c *walletDirCB) GetBalance(ctx context.Context, shardID, walletID string) 
 		MaxRetries: RetryMaxAttempts,
 		BaseDelay:  RetryBaseDelay,
 		MaxDelay:   RetryMaxDelay,
-	}, domain.IsNonRetryableError, func() error {
+	}, platform.IsTransientError, func() error {
 		var err error
 		res, err = cb.Execute(func() (interface{}, error) {
 			bal, cur, e := c.next.GetBalance(ctx, shardID, walletID)
@@ -176,7 +179,7 @@ func NewJobStoreCB(next port.JobStore) port.JobStore {
 }
 
 func (c *jobStoreCB) getReadCB(shardID string) *gobreaker.CircuitBreaker {
-	name := CircuitBreakerReadName + "_JobStore_" + shardID
+	name := CircuitBreakerReadName + CBSuffixJobStore + shardID
 	if cb, ok := c.readCBs.Load(name); ok {
 		return cb.(*gobreaker.CircuitBreaker)
 	}
@@ -186,7 +189,7 @@ func (c *jobStoreCB) getReadCB(shardID string) *gobreaker.CircuitBreaker {
 }
 
 func (c *jobStoreCB) getWriteCB(shardID string) *gobreaker.CircuitBreaker {
-	name := CircuitBreakerWriteName + "_JobStore_" + shardID
+	name := CircuitBreakerWriteName + CBSuffixJobStore + shardID
 	if cb, ok := c.writeCBs.Load(name); ok {
 		return cb.(*gobreaker.CircuitBreaker)
 	}
@@ -202,7 +205,7 @@ func (c *jobStoreCB) GetJob(ctx context.Context, shardID, jobID string) (domain.
 		MaxRetries: RetryMaxAttempts,
 		BaseDelay:  RetryBaseDelay,
 		MaxDelay:   RetryMaxDelay,
-	}, domain.IsNonRetryableError, func() error {
+	}, platform.IsTransientError, func() error {
 		var err error
 		res, err = cb.Execute(func() (interface{}, error) {
 			return c.next.GetJob(ctx, shardID, jobID)
@@ -222,7 +225,7 @@ func (c *jobStoreCB) ClaimAndRecord(ctx context.Context, shardId string, job dom
 		MaxRetries: RetryMaxAttempts,
 		BaseDelay:  RetryBaseDelay,
 		MaxDelay:   RetryMaxDelay,
-	}, domain.IsNonRetryableError, func() error {
+	}, platform.IsTransientError, func() error {
 		var err error
 		res, err = cb.Execute(func() (interface{}, error) {
 			return c.next.ClaimAndRecord(ctx, shardId, job, t, idempKey)

@@ -6,10 +6,6 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 )
 
-
-
-
-
 var (
 	ErrIdempotencyConflict = errors.New("idempotency key reused with different body")
 	ErrMerchantInactive    = errors.New("merchant is not active")
@@ -42,11 +38,10 @@ var (
 	ErrMsgRequestBodyLarge   = "http: request body too large"
 )
 
-// IsNonRetryableError returns true if the error is a client-driven business logic error.
 // These errors should not trip circuit breakers or trigger infrastructure alerts.
-func IsNonRetryableError(err error) bool {
+func IsTerminalError(err error) bool {
 	if err == nil {
-		return false
+		return true
 	}
 	var appErr *platform.AppError
 	if errors.As(err, &appErr) {

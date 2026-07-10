@@ -46,6 +46,7 @@ func main() {
 	merchantDir := postgres.NewMerchantDirectory(pools, logger)
 	ledgerStore := postgres.NewLedgerStore(pools, logger)
 	xshardStore := postgres.NewCrossShardStore(pools, logger)
+	dlqStore := postgres.NewDLQStore(pools, logger)
 
 	// 3. Initialize Services
 	processor := app.NewProcessor(logger, ledgerStore, xshardStore, merchantDir)
@@ -57,6 +58,7 @@ func main() {
 	defer jobReader.Close()
 
 	var xshardReaders []*segmentio.Reader
+	
 	for shardID := range cfg.ShardURIs {
 		topic := platform.TopicXShardPrefix + shardID
 		consumerGroup := groupID + "-" + shardID
@@ -66,7 +68,7 @@ func main() {
 	}
 
 	// 5. Start Consumer Manager
-	consumerManager := kafka.NewConsumerManager(logger, jobReader, xshardReaders, processor, xshardService)
+	consumerManager := kafka.NewConsumerManager(logger, jobReader, xshardReaders, processor, xshardService, dlqStore, pools)
 	consumerManager.Start(ctx)
 	logger.Info("ledger-worker started successfully")
 

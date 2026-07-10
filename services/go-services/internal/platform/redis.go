@@ -13,6 +13,7 @@ func NewRedisClient(ctx context.Context, addr string, log *zap.Logger) (*redis.C
 	if err := client.Ping(ctx).Err(); err != nil {
 		return nil, err
 	}
-	log.Info("connected to redis", zap.String("addr", addr))
+	redisLog := log.Named(LogComponentRedis)
+	redisLog.Info("Connected to Redis database", zap.String(LogFieldEvent, LogEventRedisConnected), zap.String(LogFieldAddr, addr))
 	return client, nil
 }

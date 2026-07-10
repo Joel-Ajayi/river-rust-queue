@@ -5,9 +5,12 @@ import (
 	"net/http"
 	"strings"
 
+	"time"
+
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/api-gateway/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -70,8 +73,9 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 
 func (s *Server) withRateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqLog := platform.LoggerFromContext(r.Context(), s.log)
 		if !s.limiter.Allow() {
-			s.log.Warn("Rate limit exceeded: rejecting request", zap.String("path", r.URL.Path))
+			reqLog.Warn("Rate limit exceeded", zap.String(platform.LogFieldEvent, platform.LogEventRateLimitExceeded), zap.String(platform.LogFieldPath, r.URL.Path))
 			writeError(w, platform.ErrRateLimitExceeded(domain.ErrMsgRateLimitExceeded))
 			return
 		}
@@ -81,12 +85,53 @@ func (s *Server) withRateLimit(next http.Handler) http.Handler {
 
 func (s *Server) withBulkhead(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqLog := platform.LoggerFromContext(r.Context(), s.log)
 		if !s.bulkhead.TryAcquire(1) {
-			s.log.Warn("Bulkhead full: rejecting request", zap.String("path", r.URL.Path))
+			reqLog.Warn("Bulkhead full", zap.String(platform.LogFieldEvent, platform.LogEventBulkheadRejected), zap.String(platform.LogFieldPath, r.URL.Path))
 			writeError(w, platform.ErrServiceUnavailable(domain.ErrMsgBulkheadExhausted))
 			return
 		}
 		defer s.bulkhead.Release(1)
 		next.ServeHTTP(w, r)
+	})
+}
+
+// statusRecorder is a custom ResponseWriter that tracks the HTTP status code
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (s *Server) withStructuredLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		traceID := uuid.NewString()
+
+		// Inject traceID into context
+		ctx := platform.InjectTraceID(r.Context(), traceID)
+		r = r.WithContext(ctx)
+
+		recorder := &statusRecorder{
+			ResponseWriter: w,
+			status:         http.StatusOK, // Default if WriteHeader is never called
+		}
+
+		next.ServeHTTP(recorder, r)
+
+		// Canonical Log Line (Stripe Style)
+		duration := time.Since(start).Milliseconds()
+		s.log.Info("Handled HTTP request",
+			zap.String(platform.LogFieldEvent, platform.LogEventHTTPRequestHandled),
+			zap.String(platform.LogFieldTraceID, traceID),
+			zap.String(platform.LogFieldMethod, r.Method),
+			zap.String(platform.LogFieldPath, r.URL.Path),
+			zap.Int(platform.LogFieldStatus, recorder.status),
+			zap.Int64(platform.LogFieldDuration, duration),
+		)
 	})
 }

@@ -38,13 +38,13 @@ func main() {
 	// --- Infrastructure ---
 	pools, err := platform.NewShardPools(ctx, cfg, log)
 	if err != nil {
-		log.Fatal("postgres pools", zap.Error(err))
+		log.Panic("Failed to initialize PostgreSQL pools", zap.String(platform.LogFieldEvent, platform.LogEventStartupFailed), zap.Error(err))
 	}
 	defer pools.Close()
 
 	rdb, err := platform.NewRedisClient(ctx, cfg.RedisAddr(), log)
 	if err != nil {
-		log.Fatal("redis", zap.Error(err))
+		log.Panic("Failed to initialize Redis", zap.String(platform.LogFieldEvent, platform.LogEventStartupFailed), zap.Error(err))
 	}
 	defer rdb.Close()
 
@@ -72,15 +72,15 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh // Blocker until signal is received
 
-	log.Info("received shutdown signal")
+	log.Info("Received shutdown signal", zap.String(platform.LogFieldEvent, platform.LogEventShutdownSignalReceived))
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error("shutdown error", zap.Error(err))
+		log.Error("Failed to shutdown gracefully", zap.String(platform.LogFieldEvent, platform.LogEventShutdownFailed), zap.Error(err))
 	}
 	cancel()
 	if err := srv.Start(); err != nil && err != http.ErrServerClosed {
-		log.Fatal("server error", zap.Error(err))
+		log.Panic("Server encountered fatal error", zap.String(platform.LogFieldEvent, platform.LogEventServerFailed), zap.Error(err))
 	}
 }
 

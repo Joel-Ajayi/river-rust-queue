@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"context"
 	"os"
 	"strings"
 
@@ -44,4 +45,22 @@ func RedactedEnv() []string {
 		}
 	}
 	return out
+}
+
+type contextKey string
+
+const traceIDKey contextKey = "trace_id"
+
+// InjectTraceID adds a trace ID to the context.
+func InjectTraceID(ctx context.Context, traceID string) context.Context {
+	return context.WithValue(ctx, traceIDKey, traceID)
+}
+
+// LoggerFromContext extracts the trace ID from the context (if present)
+// and returns a pre-populated child logger.
+func LoggerFromContext(ctx context.Context, baseLogger *zap.Logger) *zap.Logger {
+	if traceID, ok := ctx.Value(traceIDKey).(string); ok {
+		return baseLogger.With(zap.String(LogFieldTraceID, traceID))
+	}
+	return baseLogger
 }

@@ -16,6 +16,7 @@ import (
 // (the API-key lookup) is delegated to the inbound port; minting the JWT is a
 // transport detail and stays here.
 func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
+	reqLog := platform.LoggerFromContext(r.Context(), s.log)
 	authHeader := r.Header.Get(HeaderAuthorization)
 	if !strings.HasPrefix(authHeader, HeaderValBearer) {
 		writeError(w, domain.ErrInvalidAPIKey)
@@ -38,7 +39,7 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	}
 	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.jwtKey)
 	if err != nil {
-		s.log.Error("jwt signing failed", zap.Error(err))
+		reqLog.Error("Failed to sign JWT token", zap.String(platform.LogFieldEvent, platform.LogEventJWTSigningFailed), zap.Error(err))
 		writeError(w, platform.ErrInternal(domain.ErrInternal.Error()))
 		return
 	}
