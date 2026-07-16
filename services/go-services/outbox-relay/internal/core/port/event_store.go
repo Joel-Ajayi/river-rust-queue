@@ -2,6 +2,7 @@ package port
 
 import (
 	"context"
+	"time"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
 )
@@ -9,6 +10,8 @@ import (
 // EventStore is a driven (outbound) port for retrieving and updating outbox events in the database.
 type EventStore interface {
 	// FetchUnpublished retrieves up to 'limit' events that haven't been published yet.
-	FetchUnpublishedEvents(ctx context.Context, shardID string, limit int) ([]domain.Event, error)
-	MarkPublished(ctx context.Context, shardID string, eventIDs []string) error
+	ProcessUnpublishedEvents(ctx context.Context, shardID string, limit int, publisher func(ctx context.Context, events []domain.Event) error) error
+	PurgePublishedEvents(ctx context.Context, shardID string, olderThan time.Duration) error
+	GetOldestUnpublishedEventAge(ctx context.Context, shardID string) (time.Duration, error)
+	RouteToDLQ(ctx context.Context, shardID string, event domain.Event, errorMsg string) error
 }

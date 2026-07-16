@@ -2,48 +2,48 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/port"
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 type EventStore struct {
-	pools  *platform.ShardPools
-	logger *zap.Logger
+	pools *platform.ShardPools
 }
 
 var _ port.EventStore = (*EventStore)(nil)
 
-func NewEventStore(pools *platform.ShardPools, logger *zap.Logger) *EventStore {
+func NewEventStore(pools *platform.ShardPools, _ *zap.Logger) *EventStore {
 	return &EventStore{
-		pools:  pools,
-		logger: logger,
+		pools: pools,
 	}
 }
 
-func (e *EventStore) FetchUnpublishedEvents(ctx context.Context, shardID string, limit int) ([]domain.Event, error) {
+// ProcessUnpublishedEvents processes unpublished events with At-Least-Once Delivery pattern
+// 1. Get unpublished events and lock rows with "for update skip locked"
+// 2. Publish events
+// 3. Mark as published
+func (e *EventStore) ProcessUnpublishedEvents(ctx context.Context, shardID string, limit int, publisher func(ctx context.Context, events []domain.Event) error) error {
 	pool, err := e.pools.ShardPool(shardID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	txCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	// Begin a transaction so FOR UPDATE SKIP LOCKED holds locks until we mark as published.
-	tx, err := pool.BeginTx(txCtx, pgx.TxOptions{})
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer tx.Rollback(txCtx)
+	defer tx.Rollback(ctx)
 
-	// ORDER BY id preserves causal ordering (I4, I5).
-	// FOR UPDATE SKIP LOCKED prevents duplicate relay pods from grabbing the same rows.
-	rows, err := tx.Query(txCtx,
+	// 1. Get unpublished events and lock rows with "for update skip locked"
+	rows, err := tx.Query(ctx,
 		`SELECT event_id, event_type, aggregate_type, aggregate_id, correlation_id, payload, occurred_at, publish_topic
 		 FROM events
 		 WHERE published_at IS NULL AND publish_topic IS NOT NULL
@@ -52,13 +52,12 @@ func (e *EventStore) FetchUnpublishedEvents(ctx context.Context, shardID string,
 		 FOR UPDATE SKIP LOCKED`,
 		limit)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
 
 	var events []domain.Event
 	var eventIDs []string
-
 	for rows.Next() {
 		var event domain.Event
 		if err := rows.Scan(
@@ -71,46 +70,100 @@ func (e *EventStore) FetchUnpublishedEvents(ctx context.Context, shardID string,
 			&event.OccurredAt,
 			&event.PublishTopic,
 		); err != nil {
-			return nil, err
+			return err
 		}
 		events = append(events, event)
 		eventIDs = append(eventIDs, event.ID)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return err
 	}
+	rows.Close()
 
-	// The transaction commits and releases the locks. If another relayer polls
-	// before we MarkPublished, it will fetch the same events and publish duplicates.
-	// This is safe because consumers are strictly idempotent.
-	if err := tx.Commit(txCtx); err != nil {
-		return nil, err
-	}
-	if len(eventIDs) > 0 {
-		e.logger.Info("Fetched unpublished events", zap.Int("count", len(eventIDs)), zap.String("shard_id", shardID))
-	}
-
-	return events, nil
-}
-
-func (e *EventStore) MarkPublished(ctx context.Context, shardID string, eventIDs []string) error {
-	if len(eventIDs) == 0 {
+	if len(events) == 0 {
 		return nil
 	}
 
+	// 2. Publish events
+	if err := publisher(ctx, events); err != nil {
+		return err
+	}
+
+	// 3. Mark as published
+	_, err = tx.Exec(ctx, `UPDATE events SET published_at = NOW() WHERE event_id = ANY($1)`, eventIDs)
+	if err != nil {
+		return err
+	}
+
+	// 4. Commit transaction
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (e *EventStore) PurgePublishedEvents(ctx context.Context, shardID string, olderThan time.Duration) error {
 	pool, err := e.pools.ShardPool(shardID)
 	if err != nil {
 		return err
 	}
 
-	txCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	_, err = pool.Exec(txCtx, `UPDATE events SET published_at = NOW() WHERE event_id = ANY($1)`, eventIDs)
+	cutoff := time.Now().Add(-olderThan)
+	tag, err := pool.Exec(ctx, `DELETE FROM events WHERE published_at IS NOT NULL AND occurred_at < $1`, cutoff)
 	if err != nil {
 		return err
 	}
 
-	e.logger.Info("Marked events as published", zap.Int("count", len(eventIDs)), zap.String("shard_id", shardID))
+	platform.RecordOutboxPurgedEvents(ctx, shardID, tag.RowsAffected())
+	return nil
+}
+
+func (e *EventStore) GetOldestUnpublishedEventAge(ctx context.Context, shardID string) (time.Duration, error) {
+	pool, err := e.pools.ShardPool(shardID)
+	if err != nil {
+		return 0, err
+	}
+
+	var occurredAt time.Time
+	err = pool.QueryRow(ctx, `SELECT occurred_at FROM events WHERE published_at IS NULL AND publish_topic IS NOT NULL ORDER BY occurred_at ASC LIMIT 1`).Scan(&occurredAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	return time.Since(occurredAt), nil
+}
+
+func (e *EventStore) RouteToDLQ(ctx context.Context, shardID string, event domain.Event, errorMsg string) error {
+	pool, err := e.pools.ShardPool(shardID)
+	if err != nil {
+		return err
+	}
+
+	var traceID, spanID string
+	var envelope eventsv1.EventEnvelope
+	if err := protojson.Unmarshal(event.Payload, &envelope); err == nil && envelope.Traceparent != "" {
+		traceID, spanID = platform.ExtractTraceFromParentString(envelope.Traceparent)
+	}
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO dlq_entries (id, source, original_payload, error_message, error_classification, attempt_count, first_failed_at, last_failed_at, status, created_at, trace_id, span_id)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), $7, NOW(), NULLIF($8, ''), NULLIF($9, ''))
+		ON CONFLICT (id) DO UPDATE SET
+			error_message = EXCLUDED.error_message,
+			error_classification = EXCLUDED.error_classification,
+			attempt_count = EXCLUDED.attempt_count,
+			last_failed_at = EXCLUDED.last_failed_at,
+			status = EXCLUDED.status
+	`, event.ID, platform.ServiceNameOutboxRelay, event.Payload, errorMsg, string(platform.ClassificationPoison), 0, platform.DLQStatusOpen, traceID, spanID)
+
+	if err != nil {
+		return err
+	}
+
+	platform.RecordDLQIngestion(ctx, platform.ServiceNameOutboxRelay)
 	return nil
 }

@@ -33,10 +33,12 @@ func (p *EventPublisher) PublishEvents(ctx context.Context, events []domain.Even
 
 		key := []byte(e.AggregateID)
 
-		// For webhook notifications, we must key by merchant_id to guarantee per-merchant ordering (I5).
-		if e.PublishTopic == platform.TopicNotify {
-			var envelope eventsv1.EventEnvelope
-			if err := protojson.Unmarshal(e.Payload, &envelope); err == nil {
+		var traceparent string
+		var envelope eventsv1.EventEnvelope
+		if err := protojson.Unmarshal(e.Payload, &envelope); err == nil {
+			traceparent = envelope.Traceparent
+			// For webhook notifications, we must key by merchant_id to guarantee per-merchant ordering (I5).
+			if e.PublishTopic == platform.TopicNotify {
 				if whDeliv := envelope.GetWebhookDelivered(); whDeliv != nil {
 					key = []byte(whDeliv.MerchantId)
 				} else if whFail := envelope.GetWebhookFailed(); whFail != nil {
@@ -45,10 +47,19 @@ func (p *EventPublisher) PublishEvents(ctx context.Context, events []domain.Even
 			}
 		}
 
+		var headers []kafka.Header
+		if traceparent != "" {
+			headers = append(headers, kafka.Header{
+				Key:   platform.TraceparentHeader,
+				Value: []byte(traceparent),
+			})
+		}
+
 		msg := kafka.Message{
-			Topic: e.PublishTopic,
-			Key:   key,
-			Value: valueBytes,
+			Topic:   e.PublishTopic,
+			Key:     key,
+			Value:   valueBytes,
+			Headers: headers,
 		}
 
 		messages = append(messages, msg)
