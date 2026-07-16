@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "api-gateway",
+    "core-api",
     "outbox-relay",
     "proto"
 ]

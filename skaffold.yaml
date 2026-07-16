@@ -1,3 +1,9 @@
+# =========================================================================
+# IMPORTANT: This skaffold configuration requires the `rrq-gitops` repository
+# to be cloned as a sibling directory to this repository (`../rrq-gitops`).
+# Run `git clone https://github.com/Joel-Ajayi/rrq-gitops ../rrq-gitops` if missing.
+# =========================================================================
+
 apiVersion: skaffold/v4beta11
 kind: Config
 metadata:
@@ -6,18 +12,18 @@ build:
   local:
     push: false
   artifacts:
-    - image: rrq/api-gateway-go
+    - image: rrq/core-api-go
       context: services/go-services
       docker:
         dockerfile: Dockerfile
         buildArgs:
-          SERVICE: api-gateway
-    - image: rrq/api-gateway-rust
+          SERVICE: core-api
+    - image: rrq/core-api-rust
       context: services/rust-services
       docker:
         dockerfile: Dockerfile
         buildArgs:
-          SERVICE: api-gateway
+          SERVICE: core-api
     - image: rrq/outbox-relay-go
       context: services/go-services
       docker:
