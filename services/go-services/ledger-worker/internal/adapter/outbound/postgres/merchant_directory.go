@@ -3,13 +3,11 @@ package postgres
 import (
 	"context"
 	"errors"
-	"fmt"
-
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
-	"github.com/Joel-Ajayi/river-rust-queue/go-services/ledger-worker/internal/core/ports"
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/ledger-worker/internal/core/domain"
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/ledger-worker/internal/core/port"
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
-	"time"
 )
 
 // MerchantDirectory reads the global merchants database.
@@ -19,7 +17,7 @@ type MerchantDirectory struct {
 }
 
 // compile time interface implementation check
-var _ ports.MerchantDirectory = (*MerchantDirectory)(nil)
+var _ port.MerchantDirectory = (*MerchantDirectory)(nil)
 
 // NewMerchantDirectory builds the adapter over the shared connection pools.
 func NewMerchantDirectory(pools *platform.ShardPools, logger *zap.Logger) *MerchantDirectory {
@@ -28,18 +26,15 @@ func NewMerchantDirectory(pools *platform.ShardPools, logger *zap.Logger) *Merch
 
 // ShardFor returns the shard owning an active merchant.
 func (md *MerchantDirectory) ShardFor(ctx context.Context, merchantID string) (string, error) {
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
 	var shardID string
-	err := md.pools.MerchantsPool().QueryRow(
-		qCtx,
+	err := md.pools.MerchantsPoolRO().QueryRow(
+		ctx,
 		`SELECT shard_id FROM merchants WHERE id = $1 AND status = $2`,
 		merchantID, platform.MerchantStatusActive,
 	).Scan(&shardID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", fmt.Errorf("merchant %q not found or not active", merchantID)
+			return "", domain.ErrMerchantInactive
 		}
 		return "", err
 	}

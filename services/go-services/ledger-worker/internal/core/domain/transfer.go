@@ -2,19 +2,7 @@ package domain
 
 import "time"
 
-type TransferState string
-type XShardTransferState string
-const (
-	TransferStatePending   TransferState = "pending"
-	TransferStateCompleted TransferState = "completed"
-	TransferStateFailed    TransferState = "failed"
-
-	ReversalPrefix = "rev_"
-
-	XShardTransferStatePending   XShardTransferState = "pending"
-	XShardTransferStateCompleted XShardTransferState = "completed"
-	XShardTransferStateReversed  XShardTransferState = "reversed"
-)
+const ReversalPrefix = "rev_"
 
 type Transfer struct {
 	ID            string
@@ -24,7 +12,7 @@ type Transfer struct {
 	ToWallet      string
 	Amount        int64
 	Currency      string
-	Status        TransferState
+	Status        string
 	FailureReason *string
 	PostedAt      time.Time
 }
@@ -38,7 +26,7 @@ type XShardTransfer struct {
 	ToWallet   string
 	Amount     int64
 	Currency   string
-	State      XShardTransferState
+	State      string
 	Reason     string
 }
 

@@ -13,18 +13,19 @@ import (
 	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/ledger-worker/internal/core/domain"
-	"github.com/Joel-Ajayi/river-rust-queue/go-services/ledger-worker/internal/core/ports"
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/ledger-worker/internal/core/port"
 )
 
 type LedgerStore struct {
-	pools  *platform.ShardPools
-	logger *zap.Logger
+	pools *platform.ShardPools
 }
 
-var _ ports.LedgerStore = (*LedgerStore)(nil)
+var _ port.LedgerStore = (*LedgerStore)(nil)
 
-func NewLedgerStore(pools *platform.ShardPools, logger *zap.Logger) *LedgerStore {
-	return &LedgerStore{pools: pools, logger: logger}
+func NewLedgerStore(pools *platform.ShardPools, _ *zap.Logger) *LedgerStore {
+	return &LedgerStore{
+		pools: pools,
+	}
 }
 
 func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer domain.Transfer) error {
@@ -34,14 +35,11 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 		return err
 	}
 
-	txCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	tx, err := pool.BeginTx(txCtx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(txCtx)
+	defer tx.Rollback(ctx)
 
 	// 2. Prevent self-transfers
 	if transfer.FromWallet == transfer.ToWallet {
@@ -50,17 +48,15 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 
 	// 3. Lock job to ensure idempotency and prevent concurrent processing
 	var jobStatus string
-	err = tx.QueryRow(txCtx, `SELECT status FROM jobs WHERE id = $1 FOR UPDATE`, transfer.JobID).Scan(&jobStatus)
+	err = tx.QueryRow(ctx, `SELECT status FROM jobs WHERE id = $1 FOR UPDATE`, transfer.JobID).Scan(&jobStatus)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			// If job doesn't exist on this shard, it's an orchestration error
-			s.logger.Error("Job not found on shard", zap.String("job_id", transfer.JobID))
 			return nil // Ack to kafka to drop it
 		}
 		return err
 	}
-	if jobStatus != string(domain.JobStatusPending) {
-		s.logger.Info("Job already processed, skipping PostTransfer", zap.String("job_id", transfer.JobID), zap.String("status", jobStatus))
+	if jobStatus != platform.JobStatusPending {
 		return nil
 	}
 
@@ -68,7 +64,7 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 	wallets := []string{transfer.FromWallet, transfer.ToWallet}
 	slices.Sort(wallets)
 
-	rows, err := tx.Query(txCtx, `
+	rows, err := tx.Query(ctx, `
 		SELECT id, currency, status FROM wallets WHERE id = ANY($1) ORDER BY id FOR UPDATE
 	`, wallets)
 	if err != nil {
@@ -101,9 +97,8 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 		return domain.ErrWalletNotFound
 	}
 
-	// 5. Balance check (under lock — I2)
 	var fromBal, toBal int64
-	err = tx.QueryRow(txCtx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id=$1`, transfer.FromWallet).Scan(&fromBal)
+	err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id=$1`, transfer.FromWallet).Scan(&fromBal)
 	if err != nil {
 		return err
 	}
@@ -111,28 +106,27 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 		return domain.ErrInsufficientBalance
 	}
 
-	err = tx.QueryRow(txCtx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id=$1`, transfer.ToWallet).Scan(&toBal)
+	err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id=$1`, transfer.ToWallet).Scan(&toBal)
 	if err != nil {
 		return err
 	}
 
 	// 6. Record transfer — ON CONFLICT DO NOTHING handles redelivery idempotency
-	tag, err := tx.Exec(txCtx, `
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO transfers (id, job_id, from_wallet, to_wallet, amount, currency, status, posted_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
 		ON CONFLICT (id) DO NOTHING
-	`, transfer.ID, transfer.JobID, transfer.FromWallet, transfer.ToWallet, transfer.Amount, transfer.Currency, string(domain.TransferStateCompleted))
+	`, transfer.ID, transfer.JobID, transfer.FromWallet, transfer.ToWallet, transfer.Amount, transfer.Currency, platform.TransferStatusCompleted)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		s.logger.Info("idempotency guard hit on PostTransfer redelivery", zap.String("transfer_id", transfer.ID))
 		return nil // Duplicate redelivery — already completed
 	}
 
 	// 7. Insert ledger entries
 	// Debit leg (negative amount)
-	_, err = tx.Exec(txCtx, `
+	_, err = tx.Exec(ctx, `
 		INSERT INTO ledger_entries (wallet_id, transfer_id, leg, amount, balance_after, created_at)
 		VALUES ($1, $2, $3, $4, $5, NOW())
 	`, transfer.FromWallet, transfer.ID, string(domain.LegDebit), -transfer.Amount, fromBal-transfer.Amount)
@@ -141,7 +135,7 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 	}
 
 	// Credit leg (positive amount)
-	_, err = tx.Exec(txCtx, `
+	_, err = tx.Exec(ctx, `
 		INSERT INTO ledger_entries (wallet_id, transfer_id, leg, amount, balance_after, created_at)
 		VALUES ($1, $2, $3, $4, $5, NOW())
 	`, transfer.ToWallet, transfer.ID, string(domain.LegCredit), transfer.Amount, toBal+transfer.Amount)
@@ -150,9 +144,9 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 	}
 
 	// 8. Update job status
-	_, err = tx.Exec(txCtx, `
+	_, err = tx.Exec(ctx, `
 		UPDATE jobs SET status = $1, completed_at = NOW() WHERE id = $2
-	`, domain.JobStatusCompleted, transfer.JobID)
+	`, platform.JobStatusCompleted, transfer.JobID)
 	if err != nil {
 		return err
 	}
@@ -168,6 +162,7 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 		AggregateId:   transfer.ID,
 		CorrelationId: transfer.JobID,
 		OccurredAt:    timestamppb.New(now),
+		Traceparent:   platform.ExtractTraceparent(ctx),
 		Payload: &eventsv1.EventEnvelope_TransferCompleted{
 			TransferCompleted: &eventsv1.TransferCompletedPayload{
 				JobId:      transfer.JobID,
@@ -186,7 +181,7 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 		return err
 	}
 
-	_, err = tx.Exec(txCtx, `
+	_, err = tx.Exec(ctx, `
 		INSERT INTO events (event_id, event_type, aggregate_type, aggregate_id, correlation_id, payload, occurred_at, publish_topic)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`, eventID, string(platform.EventTypeTransferCompleted), string(platform.AggregateTypeTransfer), transfer.ID, transfer.JobID, payloadBytes, now, platform.TopicNotify)
@@ -194,10 +189,9 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 		return err
 	}
 
-	if err := tx.Commit(txCtx); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	s.logger.Info("PostTransfer committed", zap.String("transfer_id", transfer.ID), zap.String("job_id", transfer.JobID))
 	return nil
 }
 
@@ -209,33 +203,29 @@ func (s *LedgerStore) FailTransfer(ctx context.Context, shardID string, transfer
 		return err
 	}
 
-	txCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	tx, err := pool.BeginTx(txCtx, pgx.TxOptions{})
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(txCtx)
+	defer tx.Rollback(ctx)
 
 	// 2. Record the transfer as failed — ON CONFLICT handles redelivery idempotency
-	tag, err := tx.Exec(txCtx, `
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO transfers (id, job_id, from_wallet, to_wallet, amount, currency, status, failure_reason, posted_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
 		ON CONFLICT (id) DO NOTHING
-	`, transfer.ID, transfer.JobID, transfer.FromWallet, transfer.ToWallet, transfer.Amount, transfer.Currency, string(domain.TransferStateFailed), reason)
+	`, transfer.ID, transfer.JobID, transfer.FromWallet, transfer.ToWallet, transfer.Amount, transfer.Currency, platform.TransferStatusFailed, reason)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		s.logger.Info("idempotency guard hit on FailTransfer redelivery", zap.String("transfer_id", transfer.ID))
 		return nil // Duplicate redelivery — already recorded
 	}
 
 	// 3. Update job status to failed
-	_, err = tx.Exec(txCtx, `
+	_, err = tx.Exec(ctx, `
 		UPDATE jobs SET status = $1, failure_reason = $2, completed_at = NOW() WHERE id = $3
-	`, domain.JobStatusFailed, reason, transfer.JobID)
+	`, platform.JobStatusFailed, reason, transfer.JobID)
 	if err != nil {
 		return err
 	}
@@ -251,6 +241,7 @@ func (s *LedgerStore) FailTransfer(ctx context.Context, shardID string, transfer
 		AggregateId:   transfer.ID,
 		CorrelationId: transfer.JobID,
 		OccurredAt:    timestamppb.New(now),
+		Traceparent:   platform.ExtractTraceparent(ctx),
 		Payload: &eventsv1.EventEnvelope_TransferFailed{
 			TransferFailed: &eventsv1.TransferFailedPayload{
 				JobId:      transfer.JobID,
@@ -266,7 +257,7 @@ func (s *LedgerStore) FailTransfer(ctx context.Context, shardID string, transfer
 		return err
 	}
 
-	_, err = tx.Exec(txCtx, `
+	_, err = tx.Exec(ctx, `
 		INSERT INTO events (event_id, event_type, aggregate_type, aggregate_id, correlation_id, payload, occurred_at, publish_topic)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`, eventID, string(platform.EventTypeTransferFailed), string(platform.AggregateTypeTransfer), transfer.ID, transfer.JobID, payloadBytes, now, platform.TopicNotify)
@@ -274,9 +265,8 @@ func (s *LedgerStore) FailTransfer(ctx context.Context, shardID string, transfer
 		return err
 	}
 
-	if err := tx.Commit(txCtx); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	s.logger.Info("FailTransfer committed", zap.String("transfer_id", transfer.ID), zap.String("reason", reason))
 	return nil
 }
