@@ -2,6 +2,9 @@
 
 The precise, testable statements about what RRQ guarantees — not slogans, but statements a test can falsify, and that the suite *does* try to falsify. Each has a name (`I1`…`I9`) used across the system design.
 
+> [!CAUTION]
+> **Work In Progress**: The invariants listed below describe the target architectural guarantees of the system. Currently, only I3 and I6 are fully enforced by the codebase. The rest are **aspirational and pending implementation**. See [STATUS.md](../STATUS.md) for actual implementation status.
+
 ## I1 — Conservation of value
 
 > Every transfer posts exactly one `debit` and one `credit` leg of equal magnitude, to two distinct wallets, in a single transaction. For every `transfer_id` there is exactly one `(transfer_id,'debit')` and one `(transfer_id,'credit')` row in `ledger_entries`, with `|debit.amount| = credit.amount`.

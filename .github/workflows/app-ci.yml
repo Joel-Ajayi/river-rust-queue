@@ -112,10 +112,22 @@ jobs:
         with:
           push: true
 
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [images]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Integration Tests
+        run: |
+          echo "TODO: Implement integration tests against the built images"
+          echo "For now, this acts as a placeholder gate before prod promotion."
+
   gitops-promote:
     name: Promote to GitOps
     runs-on: ubuntu-latest
-    needs: [images]
+    needs: [images, integration-test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout GitOps repo

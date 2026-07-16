@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package rrq.events.v1;
+
+option go_package = "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1";
+
+import "google/protobuf/timestamp.proto";
+
+enum ErrorClassification {
+  ERROR_CLASSIFICATION_UNSPECIFIED = 0;
+  ERROR_CLASSIFICATION_POISON = 1;        // corrupted payload, unmarshal failure
+  ERROR_CLASSIFICATION_TRANSIENT = 2;     // retryable: timeout, rate limit, deadlock
+  ERROR_CLASSIFICATION_TERMINAL = 3;      // business rule: insufficient balance, frozen wallet
+  ERROR_CLASSIFICATION_INFRASTRUCTURE = 4; // DB down, Kafka down, network partition
+}
+
+message DLQEntry {
+  string id = 1;
+  string source = 2;  // "ledger", "webhook", "fraud", "outbox-relay"
+  bytes original_payload = 3;  // Original message payload (protobuf or JSON)
+  string error_message = 4;
+  ErrorClassification error_classification = 5;
+  int32 attempt_count = 6;
+  google.protobuf.Timestamp first_failed_at = 7;
+  google.protobuf.Timestamp last_failed_at = 8;
+  DLQStatus status = 9;
+  string trace_id = 10;
+  string span_id = 11;
+  google.protobuf.Timestamp created_at = 12;
+  string replayed_job_id = 13;
+  google.protobuf.Timestamp replayed_at = 14;
+  string resolved_by = 15;
+  google.protobuf.Timestamp resolved_at = 16;
+  string resolution_note = 17;
+}
+
+enum DLQStatus {
+  DLQ_STATUS_UNSPECIFIED = 0;
+  DLQ_STATUS_OPEN = 1;
+  DLQ_STATUS_REPLAYED = 2;
+  DLQ_STATUS_RESOLVED = 3;
+}

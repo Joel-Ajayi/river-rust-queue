@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package rrq.events.v1;
 
+option go_package = "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1";
 
 import "google/protobuf/timestamp.proto";
 
@@ -14,6 +15,7 @@ message EventEnvelope {
   string aggregate_id   = 4;
   string correlation_id = 5;
   google.protobuf.Timestamp occurred_at = 6;
+  string traceparent    = 7;
 
   oneof payload {
     JobRequestedPayload           job_requested           = 10;

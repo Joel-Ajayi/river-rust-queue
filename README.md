@@ -9,6 +9,9 @@ It utilizes a polyglot microservice architecture combining **Go** and **Rust**.
 
 > **Status — Architectural foundation complete.**
 > The system infrastructure, event-driven topology, and database sharding patterns are fully established via Kustomize and GitOps. The microservices are currently scaffolded as minimal boilerplates, ready for domain logic implementation.
+>
+
+> **Work In Progress**: This project is currently in early development. See [STATUS.md](STATUS.md) for the exact implementation state of each microservice.
 
 ---
 
@@ -30,7 +33,7 @@ RRQ is built _with_ the countermeasures, and nothing else. The decisive design c
 
 ## What it guarantees
 
-Nine invariants, each stated precisely enough to be tested and adversarially validated:
+The system is being designed to guarantee nine invariants. While the architecture supports these, **note that most are currently aspirational and pending implementation (see [STATUS.md](STATUS.md))**:
 
 1. **Conservation of value** — every transfer is exactly one debit and one credit of equal magnitude, written atomically.
 2. **No negative balances** on active wallets.
@@ -55,8 +58,8 @@ graph TD
   merchantEndpoint["Merchant Endpoint"]
 
   %% API Edge
-  kong["Kong (Edge Gateway)<br/>TLS · JWT precheck · rate limit"]
-  gateway["API Gateway<br/>(Auth, validation, idempotency)"]
+  kong["Kong (Edge Gateway)<br/>TLS · Path Routing"]
+  gateway["API Gateway<br/>(JWT Auth, Rate Limit, Validation, Idempotency)"]
 
   merchant -->|HTTPS request| kong
   kong -->|routes /v1| gateway
@@ -164,7 +167,6 @@ sequenceDiagram
     WW->>DB: record delivery
 ```
 
-The system relies on core microservices implemented in both Go and Rust, running behind a Kong edge gateway. **The single durable write on the request path is one Postgres transaction**; everything past it is asynchronous and crash-recoverable. **Every correctness guarantee is enforced in Postgres** (via transactions, row locks, and unique constraints).
 
 The stateful backend relies heavily on Kubernetes operators (CloudNativePG, Strimzi, KEDA) which are decoupled and managed externally by our GitOps repository.
 
@@ -172,7 +174,7 @@ The stateful backend relies heavily on Kubernetes operators (CloudNativePG, Stri
 
 ## Tech Stack
 
-- **Core Languages:** **Go 1.22+** (Standard library-heavy) and **Rust** (Actix-web, Tokio).
+- **Core Languages:** **Go 1.26+** (Leveraging robust external libraries like `pgx`, `kafka-go`, and OpenTelemetry).
 - **Contracts:** **Protocol Buffers** (Protobuf) for cross-language event and API schemas.
 - **Database:** **PostgreSQL 16** (Sharded, utilizing `pgx` and `sqlx`).
 - **Messaging & Events:** **Kafka** (Driving the Transactional Outbox pattern).
@@ -188,12 +190,15 @@ The stateful backend relies heavily on Kubernetes operators (CloudNativePG, Stri
 ## Getting Started
 
 ### Prerequisites
+\n> [!IMPORTANT]\
+> **GitOps Sibling Repository Required:** To run this project locally using Skaffold, you must have the `rrq-gitops` repository cloned as a sibling directory (`../rrq-gitops`). Run `git clone https://github.com/Joel-Ajayi/rrq-gitops ../rrq-gitops` if you have not already.
+
 
 Before you begin, ensure you have the following installed:
 - **Docker** (for building container images)
 - **Kubernetes Cluster** (e.g., `kind`, `minikube`, or Docker Desktop)
 - **Skaffold** (for the local development loop)
-- **Go 1.22+** and **Rust** (for local development and testing)
+- **Go 1.26+** and **Rust** (for local development and testing)
 
 ### Running Locally
 

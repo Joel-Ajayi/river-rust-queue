@@ -1,3 +1,7 @@
 # Engineer-only working docs (not part of the public design set)
 PLAN.md
 docs/archive/
+
+# Generated code
+services/go-services/internal/gen/proto/
+services/rust-services/proto/src/gen/
