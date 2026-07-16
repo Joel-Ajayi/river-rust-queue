@@ -1,28 +1,84 @@
 package platform
 
 import (
-	"crypto/rand"
-	"encoding/binary"
 	"fmt"
-	"sync/atomic"
+	"math/rand"
+	"strings"
+	"sync"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/oklog/ulid/v2"
 )
 
-var counter uint64
+var (
+	entropyPool = sync.Pool{
+		New: func() interface{} {
+			return rand.New(rand.NewSource(time.Now().UnixNano()))
+		},
+	}
+)
 
-func init() {
-	var b [8]byte
-	rand.Read(b[:])
-	counter = binary.BigEndian.Uint64(b[:])
+// generateULID securely and concurrently generates a new ULID
+func generateULID() string {
+	entropy := entropyPool.Get().(*rand.Rand)
+	defer entropyPool.Put(entropy)
+	return ulid.MustNew(ulid.Timestamp(time.Now()), entropy).String()
 }
 
-// NewID generates a time-sortable, collision-resistant ID with the given prefix.
-func NewID(prefix string) string {
-	ts := time.Now().UnixMicro()
-	seq := atomic.AddUint64(&counter, 1)
-	return fmt.Sprintf("%s_%d_%06x", prefix, ts, seq&0xFFFFFF)
+// NewJobID generates a prefixed ULID for Jobs.
+func NewJobID() string {
+	return fmt.Sprintf("%s_%s", AggregateTypeJob, generateULID())
 }
 
-func NewJobID() string      { return NewID(string(AggregateTypeJob)) }
-func NewEventID() string    { return NewID(string(AggregateTypeEvent)) }
-func NewTransferID() string { return NewID(string(AggregateTypeTransfer)) }
+func IsValidJobID(jobID string) bool {
+	parts := strings.Split(jobID, "_")
+	if len(parts) != 2 {
+		return false
+	}
+	if parts[0] != string(AggregateTypeJob) {
+		return false
+	}
+	_, err := ulid.Parse(parts[1])
+	return err == nil
+}
+
+// NewEventID generates a prefixed ULID for Events.
+func NewEventID() string {
+	return fmt.Sprintf("%s_%s", AggregateTypeEvent, generateULID())
+}
+
+// NewTransferID generates a UUID v7 for Transfers.
+func NewTransferID() string {
+	id, _ := uuid.NewV7()
+	return fmt.Sprintf("%s_%s", AggregateTypeTransfer, id.String())
+}
+
+// NewMerchantID generates a UUID v7 for Merchants.
+func NewMerchantID() string {
+	id, _ := uuid.NewV7()
+	return fmt.Sprintf("%s_%s", AggregateTypeMerchant, id.String())
+}
+
+// Validate merchant id
+func IsValidMerchantID(merchantID string) bool {
+	parts := strings.Split(merchantID, "_")
+	if len(parts) != 2 {
+		return false
+	}
+	return parts[0] == string(AggregateTypeMerchant) && uuid.Validate(parts[1]) == nil
+}
+
+// NewWalletID generates a composite Wallet ID: {merchant_id_uuidv7}.{uuidv7}
+func NewWalletID(merchantID string) string {
+	id, _ := uuid.NewV7()
+	return fmt.Sprintf("%s.%s", merchantID, id.String())
+}
+
+func IsValidWalletID(walletID string) (string, string, bool) {
+	parts := strings.Split(walletID, ".")
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return parts[0], parts[1], IsValidMerchantID(parts[0]) && uuid.Validate(parts[1]) == nil
+}

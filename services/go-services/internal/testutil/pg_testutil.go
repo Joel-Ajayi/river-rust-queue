@@ -3,8 +3,8 @@ package testutil
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -83,20 +83,15 @@ func SetupTestDB(t *testing.T) (merchantsDB TestDB, shardA TestDB, shardB TestDB
 	pool.Close()
 
 	// 3. Helper to create connection pools & run migrations
-	// Find the project root by walking up
-	cwd, _ := os.Getwd()
-	for {
-		if _, err := os.Stat(filepath.Join(cwd, "go.mod")); err == nil {
-			break
-		}
-		cwd = filepath.Dir(cwd)
-		if cwd == "/" || cwd == "." {
-			t.Fatalf("could not find go.mod")
-		}
+	// Find the project root reliably using runtime.Caller
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatalf("failed to get caller information")
 	}
-	// baseDir should point to /home/ayotunde/dev/me/rrq/river-rust-queue/deploy/db/migrations
-	// If cwd is /home/ayotunde/dev/me/rrq/river-rust-queue/services/go-services, we need to go up two directories
-	baseDir := filepath.Join(filepath.Dir(filepath.Dir(cwd)), "deploy", "db", "migrations")
+	
+	// filename is .../services/go-services/internal/testutil/pg_testutil.go
+	// Project root is 5 levels up
+	baseDir := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filename))))), "deploy", "db", "migrations")
 
 	setupDB := func(dbName, migrationSubDir string) TestDB {
 		uri := fmt.Sprintf("postgres://postgres:postgres@%s:%s/%s?sslmode=disable", host, port.Port(), dbName)

@@ -7,22 +7,23 @@ import (
 
 const (
 	// Publish topics
-	TopicJobs                 = "jobs"
-	TopicJobsRetry            = "jobs.retry"
-	TopicNotify               = "notify"
-	TopicXShardPrefix         = "xshard."
-	TopicXShardRetryPrefix    = "xshard.retry."
-	ConsumerGroupLedgerWorker = "ledger-worker"
+	TopicJobs         = "jobs"
+	TopicNotify       = "notify"
+	TopicXShardPrefix = "xshard."
+
+	// consumer groups
+	ConsumerGroupLedgerWorker = "ledger-worker-"
 )
 
 // NewKafkaWriter creates a synchronous Kafka writer for the given topic.
 func NewKafkaWriter(brokers []string, topic string, log *zap.Logger) *kafka.Writer {
 	w := &kafka.Writer{
-		Addr:         kafka.TCP(brokers...),
-		Topic:        topic,
-		Balancer:     &kafka.LeastBytes{},
-		RequiredAcks: kafka.RequireAll,
-		Async:        false,
+		Addr:                   kafka.TCP(brokers...),
+		Topic:                  topic,
+		Balancer:               &kafka.LeastBytes{},
+		RequiredAcks:           kafka.RequireAll,
+		Async:                  false,
+		AllowAutoTopicCreation: true,
 	}
 	kafkaLog := log.Named(LogComponentKafka)
 	kafkaLog.Info("Created Kafka writer", zap.String(LogFieldEvent, LogEventKafkaWriterCreated), zap.String(LogFieldTopic, topic))

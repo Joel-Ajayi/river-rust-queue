@@ -11,17 +11,6 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	// Merchant Statuses
-	MerchantStatusActive = "active"
-	MerchantStatusFrozen = "frozen"
-	MerchantStatusClosed = "closed"
-
-	// Merchant Shard Status
-	ShardStatusActive    = "active"
-	ShardStatusMigrating = "migrating"
-)
-
 // ShardPools manages pgx connection pools keyed by shard ID.
 type ShardPools struct {
 	merchants   *pgxpool.Pool
