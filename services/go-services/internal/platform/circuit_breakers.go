@@ -25,11 +25,11 @@ const (
 	CBNameKafkaEgress     = "kafka-egress"
 )
 
-// cbGauge values for breaker state metrics: 0=closed, 1=half-open, 2=open.
+// CBGauge values for breaker state metrics: 0=closed, 1=half-open, 2=open.
 const (
-	cbGaugeClosed   int64 = 0
-	cbGaugeHalfOpen int64 = 1
-	cbGaugeOpen     int64 = 2
+	CBGaugeClosed   int64 = 0
+	CBGaugeHalfOpen int64 = 1
+	CBGaugeOpen     int64 = 2
 )
 
 // --- Circuit Breaker ---
@@ -77,11 +77,11 @@ func newCircuitBreaker(cfg CircuitBreakerConfig) *gobreaker.CircuitBreaker {
 			var stateVal int64
 			switch to {
 			case gobreaker.StateClosed:
-				stateVal = 0
+				stateVal = CBGaugeClosed
 			case gobreaker.StateHalfOpen:
-				stateVal = 1
+				stateVal = CBGaugeHalfOpen
 			case gobreaker.StateOpen:
-				stateVal = 2
+				stateVal = CBGaugeOpen
 			}
 			RecordCircuitBreakerState(context.Background(), name, stateVal)
 
@@ -183,7 +183,7 @@ func NewDBCircuitBreakers(merchantPoolName string, shardIDs []string, isTerminal
 		merchantPoolName = CBNameMerchantsGlobal
 	}
 	reg.merchants = reg.newDBBreaker(merchantPoolName)
-	RecordCircuitBreakerState(context.Background(), merchantPoolName, cbGaugeClosed)
+	RecordCircuitBreakerState(context.Background(), merchantPoolName, CBGaugeClosed)
 	for _, sid := range shardIDs {
 		if sid == "" {
 			continue
@@ -191,11 +191,11 @@ func NewDBCircuitBreakers(merchantPoolName string, shardIDs []string, isTerminal
 
 		rwName := CBNameShardRWPrefix + sid
 		reg.shardsRW[sid] = reg.newDBBreaker(rwName)
-		RecordCircuitBreakerState(context.Background(), rwName, cbGaugeClosed)
+		RecordCircuitBreakerState(context.Background(), rwName, CBGaugeClosed)
 
 		roName := CBNameShardROPrefix + sid
 		reg.shardsRO[sid] = reg.newDBBreaker(roName)
-		RecordCircuitBreakerState(context.Background(), roName, cbGaugeClosed)
+		RecordCircuitBreakerState(context.Background(), roName, CBGaugeClosed)
 	}
 	return reg
 }
@@ -214,11 +214,11 @@ func recordBreakerStateChange(name string, from gobreaker.State, to gobreaker.St
 	var stateVal int64
 	switch to {
 	case gobreaker.StateClosed:
-		stateVal = cbGaugeClosed
+		stateVal = CBGaugeClosed
 	case gobreaker.StateHalfOpen:
-		stateVal = cbGaugeHalfOpen
+		stateVal = CBGaugeHalfOpen
 	case gobreaker.StateOpen:
-		stateVal = cbGaugeOpen
+		stateVal = CBGaugeOpen
 	}
 	RecordCircuitBreakerState(context.Background(), name, stateVal)
 	if to == gobreaker.StateOpen {
@@ -286,7 +286,7 @@ func NewKafkaCircuitBreaker(name string, cbConfig CircuitBreakerConfig) *KafkaCi
 	cbConfig.IsSuccessful = kafkaEgressIsSuccessful
 	cbConfig.OnStateChange = recordBreakerStateChange
 
-	RecordCircuitBreakerState(context.Background(), name, cbGaugeClosed)
+	RecordCircuitBreakerState(context.Background(), name, CBGaugeClosed)
 
 	return &KafkaCircuitBreaker{
 		cb: newCircuitBreaker(cbConfig),

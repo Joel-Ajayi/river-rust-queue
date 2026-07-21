@@ -29,6 +29,10 @@ const (
 	MetricConsumerMsgDuration        = "rrq_consumer_message_duration_seconds"
 	MetricConsumerBackoffDuration    = "rrq_consumer_backoff_duration_seconds"
 	MetricConsumerCommitsTotal       = "rrq_consumer_commits_total"
+	MetricLedgerImbalanceTotal       = "rrq_ledger_imbalance_total"
+	MetricSagaUnresolvedCount        = "rrq_saga_unresolved_count"
+	MetricVelocityLimitExceededTotal = "rrq_velocity_limit_exceeded_total"
+
 	// label
 	MetricLabelCircuitBreaker = "circuit_breaker"
 	MetricLabelService        = "service"
@@ -36,6 +40,12 @@ const (
 	MetricLabelShard          = "shard"
 	MetricLabelTopic          = "topic"
 	MetricLabelMerchantID     = "merchant_id"
+	MetricLabelJobID          = "job_id"
+	MetricLabelWalletID       = "wallet_id"
+	MetricLabelErrorType      = "error.type"
+	MetricLabelErrorMessage   = "error.message"
+	MetricLabelHandler        = "handler"
+	MetricLabelLimitType      = "limit_type"
 )
 
 var (
@@ -52,10 +62,12 @@ var (
 	outboxPurgedEventsTotal       metric.Int64Counter
 	outboxPanicsTotal             metric.Int64Counter
 	idempotencyConflictsTotal     metric.Int64Counter
-	weakAPIKeyAuthTotal           metric.Int64Counter
 	consumerMsgDuration           metric.Float64Histogram
 	consumerBackoffDuration       metric.Float64Histogram
 	consumerCommitsTotal          metric.Int64Counter
+	ledgerImbalanceTotal          metric.Int64Gauge
+	sagaUnresolvedCount           metric.Int64Gauge
+	velocityLimitExceededTotal    metric.Int64Counter
 
 	metricsOnce sync.Once
 )
@@ -147,18 +159,10 @@ func init() {
 
 		idempotencyConflictsTotal, err = meter.Int64Counter(
 			MetricIdempotencyConflictsTotal,
-			metric.WithDescription("Total number of idempotency key conflicts"),
+			metric.WithDescription("Total number of idempotency conflicts"),
 		)
 		if err != nil {
-			panic("failed to initialize idempotency conflicts metric: " + err.Error())
-		}
-
-		weakAPIKeyAuthTotal, err = meter.Int64Counter(
-			MetricWeakAPIKeyAuth,
-			metric.WithDescription("Total number of authentications using a weak bcrypt factor API key"),
-		)
-		if err != nil {
-			panic("failed to initialize weak api key metric: " + err.Error())
+			panic(err)
 		}
 
 		consumerMsgDuration, err = meter.Float64Histogram(
@@ -186,6 +190,32 @@ func init() {
 		if err != nil {
 			panic("failed to initialize consumer commits metric: " + err.Error())
 		}
+
+		ledgerImbalanceTotal, err = meter.Int64Gauge(
+			MetricLedgerImbalanceTotal,
+			metric.WithDescription("Total double-entry ledger imbalance sum"),
+		)
+		if err != nil {
+			panic("failed to initialize ledger imbalance metric: " + err.Error())
+		}
+
+		sagaUnresolvedCount, err = meter.Int64Gauge(
+			MetricSagaUnresolvedCount,
+			metric.WithDescription("Total count of hanging cross-shard sagas unresolved > 120s"),
+		)
+		if err != nil {
+			panic("failed to initialize saga unresolved count metric: " + err.Error())
+		}
+
+		velocityLimitExceededTotal, err = meter.Int64Counter(
+			MetricVelocityLimitExceededTotal,
+			metric.WithDescription("Total number of velocity limit violations"),
+		)
+		if err != nil {
+			panic("failed to initialize velocity limit exceeded metric: " + err.Error())
+		}
+
+
 	})
 }
 
@@ -264,7 +294,7 @@ func RecordOutboxPanic(ctx context.Context, shardID string) {
 func RecordIdempotencyConflict(ctx context.Context, merchantID, jobID, shardID string) {
 	idempotencyConflictsTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(MetricLabelMerchantID, merchantID),
-		attribute.String("job_id", jobID),
+		attribute.String(MetricLabelJobID, jobID),
 		attribute.String(MetricLabelShard, shardID),
 	))
 }
@@ -272,7 +302,7 @@ func RecordIdempotencyConflict(ctx context.Context, merchantID, jobID, shardID s
 // RecordMessageProcessingDuration records the duration of message processing with a custom label.
 func RecordMessageProcessingDuration(ctx context.Context, duration time.Duration, label string) {
 	consumerMsgDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
-		attribute.String("handler", label),
+		attribute.String(MetricLabelHandler, label),
 	))
 }
 
@@ -296,3 +326,22 @@ func RecordConsumerCommit(ctx context.Context, topic string) {
 		attribute.String(MetricLabelTopic, topic),
 	))
 }
+
+// RecordLedgerImbalance records the absolute ledger imbalance sum.
+func RecordLedgerImbalance(ctx context.Context, value int64) {
+	ledgerImbalanceTotal.Record(ctx, value)
+}
+
+// RecordSagaUnresolvedCount records the unresolved saga count.
+func RecordSagaUnresolvedCount(ctx context.Context, count int64) {
+	sagaUnresolvedCount.Record(ctx, count)
+}
+
+// RecordVelocityLimitExceeded records a velocity limit violation.
+func RecordVelocityLimitExceeded(ctx context.Context, walletID, limitType string) {
+	velocityLimitExceededTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(MetricLabelWalletID, walletID),
+		attribute.String(MetricLabelLimitType, limitType),
+	))
+}
+

@@ -17,15 +17,14 @@ import (
 )
 
 type ConsumerManager struct {
-	logger           *zap.Logger
-	jobReader        *kafka.Reader
-	xshardReaders    []*kafka.Reader
-	jobHandler       port.JobHandler
-	sagaHandler      port.SagaHandler
-	dlqStore         port.DLQStore
-	directory        port.MerchantDirectory
-	pools            *platform.ShardPools
-	dlqFallbackShard string
+	logger        *zap.Logger
+	jobReader     *kafka.Reader
+	xshardReaders []*kafka.Reader
+	jobHandler    port.JobHandler
+	sagaHandler   port.SagaHandler
+	dlqStore      port.DLQStore
+	directory     port.MerchantDirectory
+	pools         *platform.ShardPools
 
 	wg           sync.WaitGroup
 	shutdownCh   chan struct{}
@@ -41,19 +40,17 @@ func NewConsumerManager(
 	dlqStore port.DLQStore,
 	directory port.MerchantDirectory,
 	pools *platform.ShardPools,
-	dlqFallbackShard string,
 ) *ConsumerManager {
 	return &ConsumerManager{
-		logger:           logger,
-		jobReader:        jobReader,
-		xshardReaders:    xshardReaders,
-		jobHandler:       jobHandler,
-		sagaHandler:      sagaHandler,
-		dlqStore:         dlqStore,
-		directory:        directory,
-		pools:            pools,
-		dlqFallbackShard: dlqFallbackShard,
-		shutdownCh:       make(chan struct{}),
+		logger:        logger,
+		jobReader:     jobReader,
+		xshardReaders: xshardReaders,
+		jobHandler:    jobHandler,
+		sagaHandler:   sagaHandler,
+		dlqStore:      dlqStore,
+		directory:     directory,
+		pools:         pools,
+		shutdownCh:    make(chan struct{}),
 	}
 }
 
@@ -63,7 +60,7 @@ func (m *ConsumerManager) Start(ctx context.Context) {
 
 	for _, r := range m.xshardReaders {
 		m.wg.Add(1)
-		go m.consumeXShard(ctx, r)
+		go m.consumeXShardJob(ctx, r)
 	}
 }
 
@@ -115,9 +112,10 @@ func (m *ConsumerManager) consumeJobs(ctx context.Context) {
 		var envelope eventsv1.EventEnvelope
 		if err := protojson.Unmarshal(msg.Value, &envelope); err != nil {
 			if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrUnmarshal, err)); dlqErr != nil {
-				m.logger.Error("Failed to write poison message to DLQ, message will be retried", zap.Error(dlqErr))
+				platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventPoisonDLQWriteFailed, zap.Error(dlqErr))
 			} else {
 				m.jobReader.CommitMessages(ctx, msg)
+				platform.RecordConsumerCommit(ctx, msg.Topic)
 			}
 			attempt = 0
 			continue
@@ -126,6 +124,7 @@ func (m *ConsumerManager) consumeJobs(ctx context.Context) {
 		if payload := envelope.GetJobRequested(); payload != nil {
 			// Extract trace context from Kafka headers and inject into processCtx
 			tracedCtx := platform.InjectTraceIntoContext(ctx, &msg)
+
 			processCtx, cancel := context.WithTimeout(tracedCtx, processTimeout)
 			err := m.processMessage(processCtx, msg, func() error {
 				return m.jobHandler.ProcessJob(processCtx, payload)
@@ -142,13 +141,14 @@ func (m *ConsumerManager) consumeJobs(ctx context.Context) {
 			m.sleepBackoff(ctx, &attempt)
 			continue
 		}
+		platform.RecordConsumerCommit(ctx, msg.Topic)
 
 		attempt = 0
 	}
 }
 
-// consumeXShard polls for xshard saga events
-func (m *ConsumerManager) consumeXShard(ctx context.Context, r *kafka.Reader) {
+// consumeXShardJob polls for xshard saga events
+func (m *ConsumerManager) consumeXShardJob(ctx context.Context, r *kafka.Reader) {
 	defer m.wg.Done()
 
 	attempt := 0
@@ -177,6 +177,7 @@ func (m *ConsumerManager) consumeXShard(ctx context.Context, r *kafka.Reader) {
 			if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrUnmarshal, err)); dlqErr != nil {
 			} else {
 				r.CommitMessages(ctx, msg)
+				platform.RecordConsumerCommit(ctx, msg.Topic)
 			}
 			attempt = 0
 			continue
@@ -184,6 +185,7 @@ func (m *ConsumerManager) consumeXShard(ctx context.Context, r *kafka.Reader) {
 
 		// Extract trace context from Kafka headers and inject into processCtx
 		tracedCtx := platform.InjectTraceIntoContext(ctx, &msg)
+
 		processCtx, cancel := context.WithTimeout(tracedCtx, processTimeout)
 		err = m.processMessage(processCtx, msg, func() error {
 			switch {
@@ -207,6 +209,7 @@ func (m *ConsumerManager) consumeXShard(ctx context.Context, r *kafka.Reader) {
 			m.sleepBackoff(ctx, &attempt)
 			continue
 		}
+		platform.RecordConsumerCommit(ctx, msg.Topic)
 
 		attempt = 0
 	}
@@ -231,43 +234,44 @@ func (m *ConsumerManager) sleepBackoff(ctx context.Context, attempt *int) {
 // Returns nil for terminal errors (offset should be committed) and infra errors for backoff.
 func (m *ConsumerManager) processMessage(ctx context.Context, msg kafka.Message, processFn func() error) (err error) {
 	start := time.Now()
-	defer func() {
-		duration := time.Since(start)
-		if r := recover(); r != nil {
-			var panicErr error
-			if e, ok := r.(error); ok {
-				panicErr = e
-			} else {
-				panicErr = fmt.Errorf("%w: %v", domain.ErrPanic, r)
+
+	// Panic recovery to ensure that a panic in the handler does not crash the consumer.
+		defer func() {
+			duration := time.Since(start)
+			if r := recover(); r != nil {
+				var panicErr error
+				if e, ok := r.(error); ok {
+					panicErr = e
+				} else {
+					panicErr = fmt.Errorf("%w: %v", domain.ErrPanic, r)
+				}
+				platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventPanicRecoveredDLQ, zap.Any(platform.LogFieldPanic, r), zap.Duration(platform.LogFieldDuration, duration))
+				if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrPanic, panicErr)); dlqErr != nil {
+					platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventPanicDLQWriteFailed, zap.Error(dlqErr))
+				}
+				err = nil
+				_ = panicErr
 			}
-			m.logger.Error("Recovered from panic, routing to DLQ", zap.Any(platform.LogFieldPanic, r), zap.Duration(platform.LogFieldDuration, duration))
-			if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrPanic, panicErr)); dlqErr != nil {
-				m.logger.Error("Failed to write panic message to DLQ", zap.Error(dlqErr))
-			}
-			err = nil    // Allow offset commit
-			_ = panicErr // explicitly mark as used
-		}
-	}()
+		}()
 
 	if err := processFn(); err != nil {
 		if domain.IsTerminalError(err) {
-			// Check if this is a cross-shard message (B9) vs local transfer (B8)
+			// Check if this is a cross-shard message
 			isXShard := msg.Topic != platform.TopicJobs
 
 			if isXShard {
-				// B9: Cross-shard terminal error -> route to DLQ after compensation event emitted
-				m.logger.Warn("Cross-shard terminal business error, routing to DLQ",
+				platform.LoggerWithTrace(ctx, m.logger).Warn(platform.LogEventCrossShardTerminalDLQ,
 					zap.Error(err),
 					zap.String(platform.LogFieldTopic, msg.Topic),
 					zap.ByteString(platform.LogFieldKey, msg.Key),
 				)
 				if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrCrossShardTerminal, err)); dlqErr != nil {
-					m.logger.Error("Failed to write cross-shard terminal error to DLQ", zap.Error(dlqErr))
+					platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventCrossShardDLQWriteFailed, zap.Error(dlqErr))
 				}
 				return nil // Offset committed, no backoff
 			}
 
-			// B8: Local transfer terminal error -> record failure, commit offset, NO DLQ
+			//Local transfer terminal error -> record failure, commit offset, NO DLQ
 			return nil // Offset will be committed, no backoff
 		}
 
@@ -287,25 +291,22 @@ func (m *ConsumerManager) routeToDLQ(ctx context.Context, msg kafka.Message, rea
 	// 2. Extract trace context from Kafka headers
 	traceID, spanID := platform.ExtractTraceFromMessageHeaders(&msg)
 
-	// 3. Extract shard ID from message payload if possible
-	shardID := m.dlqFallbackShard
+	// 3. Extract shard ID from message payload
+	shardID := m.pools.GetAvailableShardIDs()[0]
 	var envelope eventsv1.EventEnvelope
 	if err := protojson.Unmarshal(msg.Value, &envelope); err == nil {
-		var merchantID string
 		switch {
 		case envelope.GetJobRequested() != nil:
-			merchantID = envelope.GetJobRequested().MerchantId
-		case envelope.GetXshardTransferRequested() != nil:
-			merchantID = envelope.GetXshardTransferRequested().MerchantId
-		case envelope.GetXshardTransferSettled() != nil:
-			merchantID = envelope.GetXshardTransferSettled().SrcShard // use src shard
-		case envelope.GetXshardTransferFailed() != nil:
-			merchantID = envelope.GetXshardTransferFailed().SrcShard
-		}
-		if merchantID != "" {
+			merchantID := envelope.GetJobRequested().MerchantId
 			if s, err := m.directory.ShardFor(ctx, merchantID); err == nil {
 				shardID = s
 			}
+		case envelope.GetXshardTransferRequested() != nil:
+			shardID = envelope.GetXshardTransferRequested().SrcShard
+		case envelope.GetXshardTransferSettled() != nil:
+			shardID = envelope.GetXshardTransferSettled().DstShard
+		case envelope.GetXshardTransferFailed() != nil:
+			shardID = envelope.GetXshardTransferFailed().SrcShard
 		}
 	}
 
@@ -326,23 +327,23 @@ func (m *ConsumerManager) routeToDLQ(ctx context.Context, msg kafka.Message, rea
 	}
 
 	// Retry DLQ write with exponential backoff
-	var lastErr error
-	for i := 0; i < domain.ConsumerDLQMaxRetries; i++ {
-		if err := m.dlqStore.WriteDLQEntry(ctx, shardID, entry); err != nil {
-			lastErr = err
-			m.logger.Error("Failed to write to DLQ, retrying", zap.Error(err), zap.Int(platform.LogFieldAttempt, i+1), zap.String(platform.LogFieldTopic, msg.Topic))
-			delay := platform.CalculateJitterBackoff(i, domain.ConsumerDLQRetryBaseDelay, domain.ConsumerDLQMaxBackoff)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(delay):
+		var lastErr error
+		for i := 0; i < domain.ConsumerDLQMaxRetries; i++ {
+			if err := m.dlqStore.WriteDLQEntry(ctx, shardID, entry); err != nil {
+				lastErr = err
+				platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventDLQRetryFailed, zap.Error(err), zap.Int(platform.LogFieldAttempt, i+1), zap.String(platform.LogFieldTopic, msg.Topic))
+				delay := platform.CalculateJitterBackoff(i, domain.ConsumerDLQRetryBaseDelay, domain.ConsumerDLQMaxBackoff)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(delay):
+				}
+				continue
 			}
-			continue
+			platform.RecordDLQIngestion(ctx, platform.ServiceNameLedgerWorker)
+			return nil
 		}
-		platform.RecordDLQIngestion(ctx, platform.ServiceNameLedgerWorker)
-		return nil
-	}
 
-	m.logger.Error("Failed to write to DLQ after retries. Message will be reprocessed.", zap.Error(lastErr), zap.String(platform.LogFieldTopic, msg.Topic), zap.ByteString(platform.LogFieldKey, msg.Key))
+		platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventDLQWriteExhausted, zap.Error(lastErr), zap.String(platform.LogFieldTopic, msg.Topic), zap.ByteString(platform.LogFieldKey, msg.Key))
 	return lastErr
 }

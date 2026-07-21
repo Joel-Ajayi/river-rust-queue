@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"time"
 
@@ -65,21 +66,23 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 	slices.Sort(wallets)
 
 	rows, err := tx.Query(ctx, `
-		SELECT id, currency, status FROM wallets WHERE id = ANY($1) ORDER BY id FOR UPDATE
+		SELECT id, currency, status, wallet_type FROM wallets WHERE id = ANY($1) ORDER BY id FOR UPDATE
 	`, wallets)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
-	// 4. Validate wallet existence, currencies, and statuses
+	// Validate wallet existence, currencies, statuses, and type mapping.
 	foundWallets := 0
+	walletTypes := make(map[string]string)
 	for rows.Next() {
-		var id, currency, status string
-		if err := rows.Scan(&id, &currency, &status); err != nil {
+		var id, currency, status, wtype string
+		if err := rows.Scan(&id, &currency, &status, &wtype); err != nil {
 			return err
 		}
 		foundWallets++
+		walletTypes[id] = wtype
 		if status == string(domain.WalletStatusFrozen) {
 			return domain.ErrWalletFrozen
 		}
@@ -93,22 +96,55 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if foundWallets != 2 {
+	if foundWallets != platform.LedgerTransferWalletCount {
 		return domain.ErrWalletNotFound
 	}
 
-	var fromBal, toBal int64
-	err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id=$1`, transfer.FromWallet).Scan(&fromBal)
-	if err != nil {
-		return err
-	}
-	if fromBal < transfer.Amount {
-		return domain.ErrInsufficientBalance
+	// Lock and get cached balances in sorted order to prevent deadlocks.
+	balances := make(map[string]int64)
+	for _, walletID := range wallets {
+		var bal int64
+		err = tx.QueryRow(ctx, `
+			SELECT balance FROM wallet_balance_cache WHERE wallet_id = $1 FOR UPDATE
+		`, walletID).Scan(&bal)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Initialize by summing existing ledger entries (bootstrapping step).
+				err = tx.QueryRow(ctx, `
+					SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id = $1
+				`, walletID).Scan(&bal)
+				if err != nil {
+					return err
+				}
+				// Insert bootstrapped balance into cache and lock it.
+				_, err = tx.Exec(ctx, `
+					INSERT INTO wallet_balance_cache (wallet_id, balance, last_entry_id, updated_at)
+					VALUES ($1, $2, 0, NOW())
+					ON CONFLICT (wallet_id) DO UPDATE SET balance = EXCLUDED.balance, updated_at = NOW()
+				`, walletID, bal)
+				if err != nil {
+					return err
+				}
+				// Lock again to ensure consistency.
+				err = tx.QueryRow(ctx, `
+					SELECT balance FROM wallet_balance_cache WHERE wallet_id = $1 FOR UPDATE
+				`, walletID).Scan(&bal)
+				if err != nil {
+					return err
+				}
+			} else {
+				return err
+			}
+		}
+		balances[walletID] = bal
 	}
 
-	err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id=$1`, transfer.ToWallet).Scan(&toBal)
-	if err != nil {
-		return err
+	fromBal := balances[transfer.FromWallet]
+	toBal := balances[transfer.ToWallet]
+
+	fromWType := walletTypes[transfer.FromWallet]
+	if !domain.IsSystemWallet(fromWType) && fromBal < transfer.Amount {
+		return domain.ErrInsufficientBalance
 	}
 
 	// 6. Record transfer — ON CONFLICT DO NOTHING handles redelivery idempotency
@@ -141,6 +177,22 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 	`, transfer.ToWallet, transfer.ID, string(domain.LegCredit), transfer.Amount, toBal+transfer.Amount)
 	if err != nil {
 		return err
+	}
+
+	// Update cached balances
+	for walletID := range balances {
+		var delta int64
+		if walletID == transfer.FromWallet {
+			delta = -transfer.Amount
+		} else {
+			delta = transfer.Amount
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE wallet_balance_cache SET balance = balance + $1, updated_at = NOW() WHERE wallet_id = $2
+		`, delta, walletID)
+		if err != nil {
+			return err
+		}
 	}
 
 	// 8. Update job status

@@ -97,11 +97,7 @@ func isPoisonError(err error) bool {
 
 	// 3. JSON Schema / Type Mismatch Errors (e.g., String sent instead of Integer)
 	var jsonTypeErr *json.UnmarshalTypeError
-	if errors.As(err, &jsonTypeErr) {
-		return true
-	}
-
-	return false
+	return errors.As(err, &jsonTypeErr)
 }
 
 // isInfrastructureError determines if an error represents a fatal

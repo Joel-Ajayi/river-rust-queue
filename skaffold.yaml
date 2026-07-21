@@ -11,15 +11,11 @@ metadata:
 build:
   local:
     push: false
+    concurrency: 1
+    useBuildkit: true
   artifacts:
     - image: rrq/core-api-go
       context: services/go-services
-      docker:
-        dockerfile: Dockerfile
-        buildArgs:
-          SERVICE: core-api
-    - image: rrq/core-api-rust
-      context: services/rust-services
       docker:
         dockerfile: Dockerfile
         buildArgs:
@@ -54,19 +50,18 @@ build:
         dockerfile: Dockerfile
         buildArgs:
           SERVICE: recon-worker
-    - image: rrq/outbox-relay-rust
-      context: services/rust-services
+    - image: rrq/webhook-echo-go
+      context: services/go-services
       docker:
         dockerfile: Dockerfile
         buildArgs:
-          SERVICE: outbox-relay
-
-    - image: rrq/admin-dashboard
-      context: services/admin-dashboard
-      docker:
-        dockerfile: Dockerfile
+          SERVICE: webhook-echo
     - image: rrq/migrate
       context: deploy/db/migrations
+      docker:
+        dockerfile: Dockerfile
+    - image: rrq/seed-performance
+      context: deploy/db/seed
       docker:
         dockerfile: Dockerfile
 manifests:

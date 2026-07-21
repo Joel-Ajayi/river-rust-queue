@@ -36,7 +36,7 @@ func main() {
 
 	// Initialize Telemetry
 	if err := platform.InitTelemetry(platform.ServiceNameLedgerWorker); err != nil {
-		logger.Panic("Failed to initialize telemetry", zap.String(platform.LogFieldEvent, platform.LogEventStartupFailed), zap.Error(err))
+		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 
 	// Init context
@@ -46,7 +46,7 @@ func main() {
 	// Initialize Database Pools
 	pools, err := platform.NewShardPools(ctx, cfg, logger)
 	if err != nil {
-		logger.Panic("Failed to initialize PostgreSQL pools", zap.String(platform.LogFieldEvent, platform.LogEventStartupFailed), zap.Error(err))
+		logger.Panic(platform.LogEventPostgresInitFailed, zap.Error(err))
 	}
 	defer pools.Close()
 
@@ -70,9 +70,9 @@ func main() {
 
 	// Initialize Services
 	jobService := app.NewJobService(logger, ledgerStore, xshardStore, merchantDir)
-	jobHandler := observability.NewJobHandlerMetrics(jobService)
+	jobHandler := observability.NewJobHandlerTraces(observability.NewJobHandlerMetrics(jobService))
 	xshardService := app.NewXShardService(logger, xshardStore)
-	sagaHandler := observability.NewSagaHandlerMetrics(xshardService)
+	sagaHandler := observability.NewSagaHandlerTraces(observability.NewSagaHandlerMetrics(xshardService))
 
 	// Initialize Kafka Readers
 	groupID := platform.ConsumerGroupLedgerWorker
@@ -90,7 +90,7 @@ func main() {
 	}
 
 	// Start Consumer Manager
-	consumerManager := kafka.NewConsumerManager(logger, jobReader, xshardReaders, jobHandler, sagaHandler, dlqStore, merchantDir, pools, pools.GetAvailableShardIDs()[0])
+	consumerManager := kafka.NewConsumerManager(logger, jobReader, xshardReaders, jobHandler, sagaHandler, dlqStore, merchantDir, pools)
 	consumerManager.Start(ctx)
 	logger.Info(platform.LogEventServerStarted)
 
@@ -116,9 +116,9 @@ func main() {
 
 	select {
 	case <-done:
-		logger.Info("All consumers shut down gracefully")
+		logger.Info(platform.LogEventAllConsumersShutdown)
 	case <-shutdownCtx.Done():
-		logger.Warn("Shutdown timeout exceeded for consumers, forcing exit")
+		logger.Warn(platform.LogEventConsumerShutdownTimeout)
 	}
 
 	_ = platform.ShutdownTelemetry(shutdownCtx)

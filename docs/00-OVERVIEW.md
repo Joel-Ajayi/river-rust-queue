@@ -51,21 +51,9 @@ A saga returns in exactly one place. The ledger is **sharded by merchant** for w
 
 ## The merchant's view
 
-Merchants use a small HTTP API; two endpoints carry essentially all traffic:
+Merchants use a small HTTP API. Two endpoints carry essentially all traffic: `POST /v1/transfers` to move value between two wallets, and `POST /v1/payouts` to submit many transfers as one bulk payout. Both require an `Idempotency-Key` header.
 
-```
-POST /v1/transfers   ── move value between two wallets
-POST /v1/payouts     ── many transfers as one batch (bulk payout)
-```
-
-A `POST /v1/transfers` (carrying an `Idempotency-Key` header) returns almost immediately:
-
-```http
-HTTP/1.1 202 Accepted
-{ "job_id": "job_01HQX4...", "status": "pending" }
-```
-
-It's `202`, not `200`: the transfer hasn't happened yet — it's been _durably accepted_. The response is fast because the gateway's job is to persist work, not to wait for it. The merchant learns the outcome from a signed **webhook** (`transfer.completed` / `transfer.failed`) under a second later, or by polling `GET /v1/jobs/<id>`. That is the whole surface; everything else exists behind it to make it correct under failure.
+A transfer request returns HTTP 202 Accepted, not 200 — the transfer hasn't happened yet; it has been durably accepted. The response body contains a `job_id` and a `pending` status. The merchant learns the outcome from a signed webhook (`transfer.completed` or `transfer.failed`) under a second later, or by polling `GET /v1/jobs/{id}`. That is the whole surface; everything else exists behind it to make it correct under failure.
 
 ## Architecture at a glance
 
@@ -99,3 +87,6 @@ Not PayPal: no custody, settlement to banks, card networks, KYC/AML, FX, dispute
 ## Where to read next
 
 - The testable correctness statements → [`01-INVARIANTS.md`](01-INVARIANTS.md)
+- Observability (traces, logs, metrics, dashboards, alerting) → [`03-OBSERVABILITY.md`](03-OBSERVABILITY.md)
+- Testing strategy and conventions → [`04-TESTING.md`](04-TESTING.md)
+

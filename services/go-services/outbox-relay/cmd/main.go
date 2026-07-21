@@ -14,6 +14,7 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/adapter/outbound/resilience"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/app"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/port"
 	"go.uber.org/zap"
 )
 
@@ -31,7 +32,7 @@ func main() {
 	defer logger.Sync()
 
 	if err := platform.InitTelemetry(platform.ServiceNameOutboxRelay); err != nil {
-		logger.Panic("Failed to initialize telemetry", zap.Error(err))
+		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 
 	// --- Context ---
@@ -41,7 +42,7 @@ func main() {
 	// --- Infrastructure ---
 	pools, err := platform.NewShardPools(ctx, cfg, logger)
 	if err != nil {
-		logger.Panic("Failed to initialize PostgreSQL pools", zap.String(platform.LogFieldEvent, platform.LogEventStartupFailed), zap.Error(err))
+		logger.Panic(platform.LogEventPostgresInitFailed, zap.Error(err))
 	}
 	defer pools.Close()
 
@@ -56,8 +57,12 @@ func main() {
 	})
 
 	// --- Driven adapters (outbound base) ---
-	baseEventStore := postgres.NewEventStore(pools, logger)
+	var baseEventStore port.EventStore = postgres.NewEventStore(pools, logger)
 	baseEventPublisher := resilience.NewEventPublisherCB(kafka.NewEventPublisher(kafkaWriter), kafkaCB)
+
+	// Add trace decorators (global, not per-shard)
+	baseEventStore = observability.NewEventStoreTraces(baseEventStore)
+	baseEventPublisher = observability.NewEventPublisherTraces(baseEventPublisher)
 
 	// --- Workers ---
 	var wg sync.WaitGroup
@@ -106,10 +111,10 @@ func main() {
 
 	select {
 	case <-done:
-		logger.Info("All relayers shut down gracefully")
+		logger.Info(platform.LogEventAllRelayersShutdown)
 	case <-shutdownCtx.Done():
 		// Force close the database pool and telemetry here to release handles before crashing
-		logger.Warn("Outbox shutdown timeout exceeded, forcing process termination")
+		logger.Warn(platform.LogEventOutboxShutdownTimeout)
 	}
 
 	_ = platform.ShutdownTelemetry(context.Background())

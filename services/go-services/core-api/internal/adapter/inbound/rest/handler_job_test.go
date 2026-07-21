@@ -1,3 +1,5 @@
+//go:build integration
+
 package rest_test
 
 import (
@@ -12,7 +14,8 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 )
 
-func TestGetJobStatus(t *testing.T) {
+func TestJobHandler_GetJobStatus_Success(t *testing.T) {
+	t.Parallel()
 	handler, shardA, mID := setupEnvironment(t)
 
 	// Seed some jobs directly in the database

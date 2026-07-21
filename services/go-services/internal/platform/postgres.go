@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
@@ -16,8 +17,32 @@ type ShardPools struct {
 	merchants   *pgxpool.Pool
 	roMerchants *pgxpool.Pool
 	shards      map[string]*pgxpool.Pool
-	roShards  map[string]*pgxpool.Pool
-	mu        sync.RWMutex
+	roShards    map[string]*pgxpool.Pool
+	hashRing    *HashRing
+	mu          sync.RWMutex
+}
+
+const (
+	DBMaxConnIdleTime     = 10 * time.Minute
+	DBMaxConnLifetime     = 1 * time.Hour
+	MerchantsDBMaxConns   = 5
+	MerchantsROMaxConns   = 2
+	ShardRWMaxConns       = 20
+	ShardROMaxConns       = 5
+	DBHostRWSuffix        = "-rw"
+	DBHostROSuffix        = "-ro"
+	DefaultShardLetters   = "ABCDE"
+)
+
+func createPool(ctx context.Context, uri string, maxConns int32) (*pgxpool.Pool, error) {
+	config, err := pgxpool.ParseConfig(uri)
+	if err != nil {
+		return nil, err
+	}
+	config.MaxConns = maxConns
+	config.MaxConnIdleTime = DBMaxConnIdleTime
+	config.MaxConnLifetime = DBMaxConnLifetime
+	return pgxpool.NewWithConfig(ctx, config)
 }
 
 // NewShardPools creates pools for the global merchants DB and each shard.
@@ -29,18 +54,20 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 		roShards: make(map[string]*pgxpool.Pool),
 	}
 
-	pool, err := pgxpool.New(ctx, cfg.MerchantsDBURI)
+	pool, err := createPool(ctx, cfg.MerchantsDBURI, MerchantsDBMaxConns)
 	if err != nil {
 		return nil, err
 	}
 	sp.merchants = pool
 
 	roURI := cfg.MerchantsDBURI
-	if u, err := url.Parse(cfg.MerchantsDBURI); err == nil {
-		u.Host = strings.Replace(u.Host, "-rw", "-ro", 1)
+	if u, err := url.Parse(cfg.MerchantsDBURI); err != nil {
+		pgLog.Warn("failed to parse merchants DB URI for RO pool, falling back to RW URI", zap.String(LogFieldEvent, "merchants_ro_uri_parse_failed"), zap.Error(err))
+	} else {
+		u.Host = strings.Replace(u.Host, DBHostRWSuffix, DBHostROSuffix, 1)
 		roURI = u.String()
 	}
-	roPool, err := pgxpool.New(ctx, roURI)
+	roPool, err := createPool(ctx, roURI, MerchantsROMaxConns)
 	if err != nil {
 		sp.Close()
 		return nil, err
@@ -52,7 +79,7 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 		shardLog := pgLog.With(zap.String(LogFieldShardID, shardID))
 
 		// Read-Write Pool
-		pool, err := pgxpool.New(ctx, uri)
+		pool, err := createPool(ctx, uri, ShardRWMaxConns)
 		if err != nil {
 			sp.Close()
 			return nil, err
@@ -61,11 +88,13 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 
 		// Read-Only Pool (Zero Downtime Reads pattern)
 		roURI := uri
-		if u, err := url.Parse(uri); err == nil {
-			u.Host = strings.Replace(u.Host, "-rw", "-ro", 1)
+		if u, err := url.Parse(uri); err != nil {
+			shardLog.Warn("failed to parse shard URI for RO pool, falling back to RW URI", zap.String(LogFieldEvent, "shard_ro_uri_parse_failed"), zap.Error(err))
+		} else {
+			u.Host = strings.Replace(u.Host, DBHostRWSuffix, DBHostROSuffix, 1)
 			roURI = u.String()
 		}
-		roPool, err := pgxpool.New(ctx, roURI)
+		roPool, err := createPool(ctx, roURI, ShardROMaxConns)
 		if err != nil {
 			sp.Close()
 			return nil, err
@@ -75,12 +104,19 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 		shardLog.Info("Connected to database shard", zap.String(LogFieldEvent, LogEventShardDBConnected))
 	}
 
+	// Build consistent hash ring from configured shard IDs
+	shardIDs := make([]string, 0, len(sp.shards))
+	for sid := range sp.shards {
+		shardIDs = append(shardIDs, sid)
+	}
+	sp.hashRing = NewHashRing(shardIDs, HashRingDefaultVNodes)
+
 	return sp, nil
 }
 
-func (sp *ShardPools) MerchantsPool() *pgxpool.Pool { return sp.merchants }
-
+func (sp *ShardPools) MerchantsPool() *pgxpool.Pool   { return sp.merchants }
 func (sp *ShardPools) MerchantsPoolRO() *pgxpool.Pool { return sp.roMerchants }
+func (sp *ShardPools) HashRing() *HashRing             { return sp.hashRing }
 
 func (sp *ShardPools) AllShardPools() map[string]*pgxpool.Pool {
 	sp.mu.RLock()
@@ -98,7 +134,7 @@ func (sp *ShardPools) ShardPool(shardID string) (*pgxpool.Pool, error) {
 	defer sp.mu.RUnlock()
 	pool, ok := sp.shards[shardID]
 	if !ok {
-		return nil, fmt.Errorf("unknown shard: %q", shardID)
+		return nil, fmt.Errorf("%w: %q", ErrUnknownShard, shardID)
 	}
 	return pool, nil
 }
@@ -109,7 +145,7 @@ func (sp *ShardPools) ShardPoolRO(shardID string) (*pgxpool.Pool, error) {
 	defer sp.mu.RUnlock()
 	pool, ok := sp.roShards[shardID]
 	if !ok {
-		return nil, fmt.Errorf("unknown shard: %q", shardID)
+		return nil, fmt.Errorf("%w: %q", ErrUnknownShard, shardID)
 	}
 	return pool, nil
 }

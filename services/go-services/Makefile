@@ -13,8 +13,27 @@ build: ## Build all Go services
 	go build ./...
 
 .PHONY: test
-test: ## Run tests with the race detector
-	go test -race ./...
+test: test-unit test-integration ## Run all tests
+
+.PHONY: test-unit
+test-unit: ## Unit tests only (fast, no containers)
+	go test -race -short -count=1 ./...
+
+.PHONY: test-integration
+test-integration: ## Integration tests (requires Docker containers)
+	go test -tags=integration -race -count=1 ./...
+
+.PHONY: test-coverage
+test-coverage: ## Generate HTML coverage report
+	go test -race -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report: coverage.html"
+
+.PHONY: test-coverage-unit
+test-coverage-unit: ## Unit coverage (excludes integration-tagged files)
+	go test -race -short -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report: coverage.html"
 
 .PHONY: vet
 vet: ## Run go vet
@@ -27,3 +46,7 @@ lint: vet ## gofmt check + go vet
 .PHONY: fmt
 fmt: ## Format Go code
 	gofmt -w .
+
+.PHONY: generate
+generate: ## Run go generate (mockgen, etc.)
+	go generate ./...

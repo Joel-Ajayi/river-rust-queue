@@ -3,7 +3,7 @@
 The precise, testable statements about what RRQ guarantees — not slogans, but statements a test can falsify, and that the suite *does* try to falsify. Each has a name (`I1`…`I9`) used across the system design.
 
 > [!CAUTION]
-> **Work In Progress**: The invariants listed below describe the target architectural guarantees of the system. Currently, only I3 and I6 are fully enforced by the codebase. The rest are **aspirational and pending implementation**. See [STATUS.md](../STATUS.md) for actual implementation status.
+> **Work In Progress**: The invariants listed below describe the target architectural guarantees of the system. Currently, only I3 and I6 are fully enforced by the codebase. The rest are **aspirational and pending implementation**.
 
 ## I1 — Conservation of value
 
@@ -72,3 +72,5 @@ Stated so reviewers know the exact boundary of the promises:
 ## Where to read next
 
 - The system shape that upholds these → [`00-OVERVIEW.md`](00-OVERVIEW.md)
+- Architecture and service topology → [`02-ARCHITECTURE.md`](02-ARCHITECTURE.md)
+- How each invariant is tested → [`04-TESTING.md`](04-TESTING.md)

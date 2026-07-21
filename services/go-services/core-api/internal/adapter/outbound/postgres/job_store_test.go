@@ -1,3 +1,5 @@
+//go:build integration
+
 package postgres_test
 
 import (
@@ -144,6 +146,73 @@ func TestJobStore_ClaimAndRecord(t *testing.T) {
 		_, err2 := jobStore.ClaimAndRecord(ctx, shardID, job2, transfer2, idempKey)
 		if !errors.Is(err2, domain.ErrIdempotencyConflict) {
 			t.Errorf("expected ErrIdempotencyConflict, got %v", err2)
+		}
+	})
+}
+
+func TestJobStore_GetJob(t *testing.T) {
+	merchantsDB, shardA, _ := testutil.SetupTestDB(t)
+
+	log := zap.NewNop()
+	cfg := &platform.Config{
+		MerchantsDBURI: merchantsDB.URI,
+		ShardURIs: map[string]string{
+			"shard-a": shardA.URI,
+		},
+	}
+	pools, err := platform.NewShardPools(context.Background(), cfg, log)
+	if err != nil {
+		t.Fatalf("failed to init pools: %v", err)
+	}
+	t.Cleanup(func() { pools.Close() })
+
+	merchantID := testutil.SeedMerchantAndWallets(t, merchantsDB, shardA)
+	jobStore := postgres.NewJobStore(pools)
+	ctx := context.Background()
+	shardID := "shard-a"
+
+	t.Run("GetJob_Success", func(t *testing.T) {
+		jobID := platform.NewJobID()
+		idempKey := "idem_test_getjob"
+		transfer := domain.Transfer{
+			MerchantID: merchantID,
+			FromWallet: merchantID + ".01905335-9781-7000-8000-000000000001",
+			ToWallet:   merchantID + ".01905335-9781-7000-8000-000000000002",
+			Amount:     1000,
+			Currency:   "NGN",
+		}
+		job := domain.Job{
+			ID:             jobID,
+			MerchantID:     merchantID,
+			IdempotencyKey: idempKey,
+			PayloadHash:    transfer.Hash(),
+			Type:           platform.JobTypeTransfer,
+			Status:         platform.JobStatusPending,
+			CreatedAt:      time.Now(),
+		}
+
+		_, err := jobStore.ClaimAndRecord(ctx, shardID, job, transfer, idempKey)
+		if err != nil {
+			t.Fatalf("ClaimAndRecord failed: %v", err)
+		}
+
+		retrieved, err := jobStore.GetJob(ctx, shardID, jobID)
+		if err != nil {
+			t.Fatalf("GetJob failed: %v", err)
+		}
+		if retrieved.ID != jobID {
+			t.Errorf("expected job ID %s, got %s", jobID, retrieved.ID)
+		}
+		if retrieved.MerchantID != merchantID {
+			t.Errorf("expected merchant ID %s, got %s", merchantID, retrieved.MerchantID)
+		}
+	})
+
+	t.Run("GetJob_NotFound", func(t *testing.T) {
+		nonExistentJobID := platform.NewJobID()
+		_, err := jobStore.GetJob(ctx, shardID, nonExistentJobID)
+		if !errors.Is(err, domain.ErrJobNotFound) {
+			t.Errorf("expected ErrJobNotFound, got %v", err)
 		}
 	})
 }

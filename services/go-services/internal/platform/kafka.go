@@ -7,12 +7,28 @@ import (
 
 const (
 	// Publish topics
-	TopicJobs         = "jobs"
-	TopicNotify       = "notify"
-	TopicXShardPrefix = "xshard."
+	TopicJobs            = "jobs"
+	TopicNotify          = "notify"
+	TopicXShardPrefix    = "xshard."
+	TopicSuffixRequested = "requested"
+	TopicSuffixSettled   = "settled"
+	TopicSuffixFailed    = "failed"
+
+	TopicXShardRequested = TopicXShardPrefix + TopicSuffixRequested
+	TopicXShardSettled   = TopicXShardPrefix + TopicSuffixSettled
+	TopicXShardFailed    = TopicXShardPrefix + TopicSuffixFailed
 
 	// consumer groups
-	ConsumerGroupLedgerWorker = "ledger-worker-"
+	ConsumerGroupLedgerWorker  = "ledger-worker-"
+	ConsumerGroupWebhookWorker = "webhook-worker"
+	ConsumerGroupFraudWorker   = "fraud-worker"
+
+	// Kafka reader default buffer limits
+	KafkaReaderMinBytes = 1
+	KafkaReaderMaxBytes = 10e6
+
+	// Label for xshard topics in metrics
+	TopicLabelXShard = "xshard"
 )
 
 // NewKafkaWriter creates a synchronous Kafka writer for the given topic.
@@ -36,8 +52,8 @@ func NewKafkaReader(brokers []string, topic, groupID string, log *zap.Logger) *k
 		Brokers:  brokers,
 		Topic:    topic,
 		GroupID:  groupID,
-		MinBytes: 1,
-		MaxBytes: 10e6,
+		MinBytes: KafkaReaderMinBytes,
+		MaxBytes: KafkaReaderMaxBytes,
 	})
 	kafkaLog := log.Named(LogComponentKafka)
 	kafkaLog.Info("Created Kafka reader", zap.String(LogFieldEvent, LogEventKafkaReaderCreated), zap.String(LogFieldTopic, topic), zap.String(LogFieldGroup, groupID))

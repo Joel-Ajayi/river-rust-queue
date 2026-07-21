@@ -1,8 +1,9 @@
+//go:build integration
+
 package app_test
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,12 +17,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	kafkalib "github.com/segmentio/kafka-go"
-	"github.com/testcontainers/testcontainers-go/modules/redpanda"
+	tc_kafka "github.com/testcontainers/testcontainers-go/modules/kafka"
 	"go.uber.org/zap"
 )
 
-// setupEnvironment spins up real Postgres and Redpanda containers.
-func setupEnvironment(t *testing.T) (*platform.ShardPools, *testutil.TestDB, *redpanda.Container, []string, *kafkalib.Reader) {
+// setupEnvironment spins up real Postgres and Kafka containers.
+func setupEnvironment(t *testing.T) (*platform.ShardPools, *testutil.TestDB, *tc_kafka.KafkaContainer, []string, *kafkalib.Reader) {
 	ctx := context.Background()
 	log, _ := zap.NewDevelopment()
 
@@ -39,16 +40,16 @@ func setupEnvironment(t *testing.T) (*platform.ShardPools, *testutil.TestDB, *re
 	require.NoError(t, err)
 	t.Cleanup(func() { pools.Close() })
 
-	// 2. Start Redpanda
-	rpContainer, err := redpanda.Run(ctx, "docker.redpanda.com/redpandadata/redpanda:v23.2.28")
+	// 2. Start Kafka
+	kafkaContainer, err := tc_kafka.Run(ctx, "confluentinc/cp-kafka:7.3.2")
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		rpContainer.Terminate(context.Background())
+		kafkaContainer.Terminate(context.Background())
 	})
 
-	brokerStr, err := rpContainer.KafkaSeedBroker(ctx)
+	brokers, err := kafkaContainer.Brokers(ctx)
 	require.NoError(t, err)
-	brokers := strings.Split(brokerStr, ",")
+	t.Logf("TEST KAFKA BROKERS: %v", brokers)
 
 	// 3. Setup a Kafka Consumer to assert published messages
 	conn, err := kafkalib.Dial("tcp", brokers[0])
@@ -64,20 +65,21 @@ func setupEnvironment(t *testing.T) (*platform.ShardPools, *testutil.TestDB, *re
 
 	reader := kafkalib.NewReader(kafkalib.ReaderConfig{
 		Brokers:     brokers,
-		GroupTopics: []string{platform.TopicJobs, platform.TopicNotify},
-		GroupID:     "test-group",
+		Topic:       platform.TopicJobs,
+		Partition:   0,
+		StartOffset: kafkalib.FirstOffset,
 		MaxWait:     100 * time.Millisecond, // fast for tests
 	})
 	t.Cleanup(func() { reader.Close() })
 
-	return pools, &shardA, rpContainer, brokers, reader
+	return pools, &shardA, kafkaContainer, brokers, reader
 }
 
 func TestOutboxRelay_BasicPublishing(t *testing.T) {
+	pools, shardA, _, brokers, consumer := setupEnvironment(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	pools, shardA, _, brokers, consumer := setupEnvironment(t)
 	log, _ := zap.NewDevelopment()
 
 	eventID := platform.NewEventID()
@@ -98,6 +100,11 @@ func TestOutboxRelay_BasicPublishing(t *testing.T) {
 	pub := kafka.NewEventPublisher(kafkaWriter)
 	pubDecorated := resilience.NewEventPublisherCB(pub, kafkaCB)
 
+	var count int
+	err = shardA.Pool.QueryRow(ctx, "SELECT count(*) FROM events WHERE published_at IS NULL").Scan(&count)
+	require.NoError(t, err)
+	t.Logf("UNPUBLISHED COUNT BEFORE START: %d", count)
+
 	relayer := app.NewRelayService(storeDecorated, pubDecorated, log)
 	go relayer.Start(ctx, "shard_a")
 
@@ -108,19 +115,20 @@ func TestOutboxRelay_BasicPublishing(t *testing.T) {
 	assert.JSONEq(t, `{"foo":"bar"}`, string(msg.Value))
 	assert.Equal(t, platform.TopicJobs, msg.Topic)
 
-	time.Sleep(500 * time.Millisecond) // Wait for update
-
-	var publishedAt *time.Time
-	err = shardA.Pool.QueryRow(ctx, "SELECT published_at FROM events WHERE event_id = $1", eventID).Scan(&publishedAt)
-	require.NoError(t, err)
-	assert.NotNil(t, publishedAt)
+	require.Eventually(t, func() bool {
+		var publishedAt *time.Time
+		if err := shardA.Pool.QueryRow(ctx, "SELECT published_at FROM events WHERE event_id = $1", eventID).Scan(&publishedAt); err != nil {
+			return false
+		}
+		return publishedAt != nil
+	}, 5*time.Second, 50*time.Millisecond)
 }
 
 func TestOutboxRelay_Batching(t *testing.T) {
+	pools, shardA, _, brokers, consumer := setupEnvironment(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-
-	pools, shardA, _, brokers, consumer := setupEnvironment(t)
 	log := zap.NewNop()
 
 	for i := 0; i < 500; i++ {
@@ -151,17 +159,20 @@ func TestOutboxRelay_Batching(t *testing.T) {
 	}
 	assert.Equal(t, 500, consumed)
 
-	time.Sleep(1 * time.Second)
-	var count int
-	shardA.Pool.QueryRow(ctx, "SELECT count(*) FROM events WHERE published_at IS NULL").Scan(&count)
-	assert.Equal(t, 0, count)
+	require.Eventually(t, func() bool {
+		var count int
+		if err := shardA.Pool.QueryRow(ctx, "SELECT count(*) FROM events WHERE published_at IS NULL").Scan(&count); err != nil {
+			return false
+		}
+		return count == 0
+	}, 5*time.Second, 50*time.Millisecond)
 }
 
 func TestOutboxRelay_ConcurrentReplicas(t *testing.T) {
+	pools, shardA, _, brokers, consumer := setupEnvironment(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-
-	pools, shardA, _, brokers, consumer := setupEnvironment(t)
 	log := zap.NewNop()
 
 	// Insert 1000 events
@@ -205,9 +216,9 @@ func TestOutboxRelay_ConcurrentReplicas(t *testing.T) {
 }
 
 func TestOutboxRelay_GracefulShutdown(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-
 	pools, shardA, _, brokers, _ := setupEnvironment(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
 	log := zap.NewNop()
 
 	// Insert 10 events

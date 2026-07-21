@@ -151,7 +151,7 @@ func (m *sagaHandlerMetrics) HandleXShardRequested(ctx context.Context, payload 
 	err := m.next.HandleXShardRequested(ctx, payload)
 	duration := time.Since(start)
 
-	platform.RecordConsumerMsgDuration(ctx, platform.TopicXShardPrefix+"requested", duration)
+	platform.RecordConsumerMsgDuration(ctx, platform.TopicXShardRequested, duration)
 	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
 		platform.RecordInfrastructureError(ctx, platform.ComponentSagaHandler)
 	}
@@ -163,7 +163,7 @@ func (m *sagaHandlerMetrics) HandleXShardSettled(ctx context.Context, payload *e
 	err := m.next.HandleXShardSettled(ctx, payload)
 	duration := time.Since(start)
 
-	platform.RecordConsumerMsgDuration(ctx, platform.TopicXShardPrefix+"settled", duration)
+	platform.RecordConsumerMsgDuration(ctx, platform.TopicXShardSettled, duration)
 	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
 		platform.RecordInfrastructureError(ctx, platform.ComponentSagaHandler)
 	}
@@ -175,7 +175,7 @@ func (m *sagaHandlerMetrics) HandleXShardFailed(ctx context.Context, payload *ev
 	err := m.next.HandleXShardFailed(ctx, payload)
 	duration := time.Since(start)
 
-	platform.RecordConsumerMsgDuration(ctx, platform.TopicXShardPrefix+"failed", duration)
+	platform.RecordConsumerMsgDuration(ctx, platform.TopicXShardFailed, duration)
 	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
 		platform.RecordInfrastructureError(ctx, platform.ComponentSagaHandler)
 	}

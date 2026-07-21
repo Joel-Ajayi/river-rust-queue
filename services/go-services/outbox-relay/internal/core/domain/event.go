@@ -15,4 +15,5 @@ type Event struct {
 	CorrelationID string
 	OccurredAt    time.Time
 	PublishTopic  string
+	Headers       map[string]string // For trace propagation (W3C traceparent, baggage)
 }

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"time"
 
@@ -54,9 +55,9 @@ func (s *CrossShardStore) DebitToClearingAccount(ctx context.Context, srcShard, 
 		return nil
 	}
 
-	// 2. Look up the clearing wallet for the source merchant (lives on this shard)
+	// Look up the clearing wallet for the platform merchant (lives on this shard).
 	var clearingWallet string
-	err = tx.QueryRow(ctx, `SELECT id FROM wallets WHERE merchant_id = $1 AND wallet_type = $2 AND currency = $3`, transfer.MerchantID, string(domain.WalletTypeSystem), transfer.Currency).Scan(&clearingWallet)
+	err = tx.QueryRow(ctx, `SELECT id FROM wallets WHERE merchant_id = $1 AND wallet_type = $2 AND currency = $3`, platform.PlatformMerchantID, string(domain.WalletTypeSystem), transfer.Currency).Scan(&clearingWallet)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return domain.ErrWalletNotFound
@@ -68,19 +69,21 @@ func (s *CrossShardStore) DebitToClearingAccount(ctx context.Context, srcShard, 
 	wallets := []string{transfer.FromWallet, clearingWallet}
 	slices.Sort(wallets)
 
-	rows, err := tx.Query(ctx, `SELECT id, currency, status FROM wallets WHERE id = ANY($1) ORDER BY id FOR UPDATE`, wallets)
+	rows, err := tx.Query(ctx, `SELECT id, currency, status, wallet_type FROM wallets WHERE id = ANY($1) ORDER BY id FOR UPDATE`, wallets)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
 	foundWallets := 0
+	walletTypes := make(map[string]string)
 	for rows.Next() {
-		var id, currency, status string
-		if err := rows.Scan(&id, &currency, &status); err != nil {
+		var id, currency, status, wtype string
+		if err := rows.Scan(&id, &currency, &status, &wtype); err != nil {
 			return err
 		}
 		foundWallets++
+		walletTypes[id] = wtype
 		if status == string(domain.WalletStatusFrozen) {
 			return domain.ErrWalletFrozen
 		}
@@ -94,23 +97,56 @@ func (s *CrossShardStore) DebitToClearingAccount(ctx context.Context, srcShard, 
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if foundWallets != 2 {
+	if foundWallets != platform.LedgerTransferWalletCount {
 		return domain.ErrWalletNotFound
 	}
 
-	// 4. Balance checks
-	var fromBal, clearingBal int64
-	err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id = $1`, transfer.FromWallet).Scan(&fromBal)
-	if err != nil {
-		return err
-	}
-	if fromBal < transfer.Amount {
-		return domain.ErrInsufficientBalance
+	// Lock and get cached balances in sorted order to prevent deadlocks.
+	balances := make(map[string]int64)
+	for _, walletID := range wallets {
+		var bal int64
+		err = tx.QueryRow(ctx, `
+			SELECT balance FROM wallet_balance_cache WHERE wallet_id = $1 FOR UPDATE
+		`, walletID).Scan(&bal)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Initialize by summing existing ledger entries (bootstrapping step).
+				err = tx.QueryRow(ctx, `
+					SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id = $1
+				`, walletID).Scan(&bal)
+				if err != nil {
+					return err
+				}
+				// Insert bootstrapped balance into cache and lock it.
+				_, err = tx.Exec(ctx, `
+					INSERT INTO wallet_balance_cache (wallet_id, balance, last_entry_id, updated_at)
+					VALUES ($1, $2, 0, NOW())
+					ON CONFLICT (wallet_id) DO UPDATE SET balance = EXCLUDED.balance, updated_at = NOW()
+				`, walletID, bal)
+				if err != nil {
+					return err
+				}
+				// Lock again to ensure consistency.
+				err = tx.QueryRow(ctx, `
+					SELECT balance FROM wallet_balance_cache WHERE wallet_id = $1 FOR UPDATE
+				`, walletID).Scan(&bal)
+				if err != nil {
+					return err
+				}
+			} else {
+				return err
+			}
+		}
+		balances[walletID] = bal
 	}
 
-	err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id = $1`, clearingWallet).Scan(&clearingBal)
-	if err != nil {
-		return err
+	fromBal := balances[transfer.FromWallet]
+	clearingBal := balances[clearingWallet]
+	_ = clearingBal
+
+	fromWType := walletTypes[transfer.FromWallet]
+	if !domain.IsSystemWallet(fromWType) && fromBal < transfer.Amount {
+		return domain.ErrInsufficientBalance
 	}
 
 	// 5. Record transfer — ON CONFLICT DO NOTHING handles redelivery idempotency
@@ -138,6 +174,22 @@ func (s *CrossShardStore) DebitToClearingAccount(ctx context.Context, srcShard, 
 		clearingWallet, transfer.ID, string(domain.LegCredit), transfer.Amount, clearingBal+transfer.Amount)
 	if err != nil {
 		return err
+	}
+
+	// Update cached balances
+	for walletID := range balances {
+		var delta int64
+		if walletID == transfer.FromWallet {
+			delta = -transfer.Amount
+		} else {
+			delta = transfer.Amount
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE wallet_balance_cache SET balance = balance + $1, updated_at = NOW() WHERE wallet_id = $2
+		`, delta, walletID)
+		if err != nil {
+			return err
+		}
 	}
 
 	// 6. Record saga
@@ -260,7 +312,7 @@ func (s *CrossShardStore) CreditFromClearingAccount(ctx context.Context, intent 
 	}
 
 	var clearingWallet string
-	err = tx.QueryRow(ctx, `SELECT id FROM wallets WHERE merchant_id = $1 AND wallet_type = $2 AND currency = $3`, destMerchantID, string(domain.WalletTypeSystem), intent.Currency).Scan(&clearingWallet)
+	err = tx.QueryRow(ctx, `SELECT id FROM wallets WHERE merchant_id = $1 AND wallet_type = $2 AND currency = $3`, platform.PlatformMerchantID, string(domain.WalletTypeSystem), intent.Currency).Scan(&clearingWallet)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return emitFailure(domain.ErrWalletNotFound.Error())
@@ -298,20 +350,51 @@ func (s *CrossShardStore) CreditFromClearingAccount(ctx context.Context, intent 
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if foundWallets != 2 {
+	if foundWallets != platform.LedgerTransferWalletCount {
 		return emitFailure(domain.ErrWalletNotFound.Error())
 	}
 
-	// 4. Balance checks
-	var clearingBal, toBal int64
-	err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id = $1`, clearingWallet).Scan(&clearingBal)
-	if err != nil {
-		return err
+	// 4. Lock and get cached balances in sorted order to prevent deadlocks
+	balances := make(map[string]int64)
+	for _, walletID := range wallets {
+		var bal int64
+		err = tx.QueryRow(ctx, `
+			SELECT balance FROM wallet_balance_cache WHERE wallet_id = $1 FOR UPDATE
+		`, walletID).Scan(&bal)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Initialize by summing existing ledger entries (bootstrapping step)
+				err = tx.QueryRow(ctx, `
+					SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id = $1
+				`, walletID).Scan(&bal)
+				if err != nil {
+					return emitFailure(err.Error())
+				}
+				// Insert the bootstrapped balance into cache and lock it
+				_, err = tx.Exec(ctx, `
+					INSERT INTO wallet_balance_cache (wallet_id, balance, last_entry_id, updated_at)
+					VALUES ($1, $2, 0, NOW())
+					ON CONFLICT (wallet_id) DO UPDATE SET balance = EXCLUDED.balance, updated_at = NOW()
+				`, walletID, bal)
+				if err != nil {
+					return emitFailure(err.Error())
+				}
+				// Lock again to ensure consistency
+				err = tx.QueryRow(ctx, `
+					SELECT balance FROM wallet_balance_cache WHERE wallet_id = $1 FOR UPDATE
+				`, walletID).Scan(&bal)
+				if err != nil {
+					return emitFailure(err.Error())
+				}
+			} else {
+				return emitFailure(err.Error())
+			}
+		}
+		balances[walletID] = bal
 	}
-	err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id = $1`, intent.ToWallet).Scan(&toBal)
-	if err != nil {
-		return err
-	}
+
+	clearingBal := balances[clearingWallet]
+	toBal := balances[intent.ToWallet]
 
 	// 5. Record Final Transfer State on Destination Shard (ON CONFLICT DO NOTHING handles redelivery)
 	tag, err := tx.Exec(ctx, `
@@ -334,6 +417,22 @@ func (s *CrossShardStore) CreditFromClearingAccount(ctx context.Context, intent 
 	_, err = tx.Exec(ctx, `INSERT INTO ledger_entries (wallet_id, transfer_id, leg, amount, balance_after, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`, intent.ToWallet, intent.TransferId, string(domain.LegCredit), intent.Amount, toBal+intent.Amount)
 	if err != nil {
 		return err
+	}
+
+	// Update cached balances
+	for walletID := range balances {
+		var delta int64
+		if walletID == clearingWallet {
+			delta = -intent.Amount
+		} else {
+			delta = intent.Amount
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE wallet_balance_cache SET balance = balance + $1, updated_at = NOW() WHERE wallet_id = $2
+		`, delta, walletID)
+		if err != nil {
+			return err
+		}
 	}
 
 	// 7. Emit settled event back to source shard
@@ -504,7 +603,7 @@ func (s *CrossShardStore) ReverseCrossShardTransfer(ctx context.Context, srcShar
 
 	var clearingWallet string
 	err = tx.QueryRow(ctx, `SELECT id FROM wallets WHERE merchant_id = $1 AND wallet_type = $2 AND currency = $3`,
-		merchantID, string(domain.WalletTypeSystem), currency).Scan(&clearingWallet)
+		platform.PlatformMerchantID, string(domain.WalletTypeSystem), currency).Scan(&clearingWallet)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return domain.ErrWalletNotFound
@@ -512,37 +611,50 @@ func (s *CrossShardStore) ReverseCrossShardTransfer(ctx context.Context, srcShar
 		return err
 	}
 
-	// 3. Lock clearing wallet and fromWallet to reverse funds
+	// 3. Lock and get cached balances in sorted order to prevent deadlocks
 	wallets := []string{fromWallet, clearingWallet}
 	slices.Sort(wallets)
 
-	rows, err := tx.Query(ctx, `SELECT id FROM wallets WHERE id = ANY($1) ORDER BY id FOR UPDATE`, wallets)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		// Drain cursor to hold FOR UPDATE locks
-		var walletID string
-		if err := rows.Scan(&walletID); err != nil {
-			rows.Close()
-			return err
+	balances := make(map[string]int64)
+	for _, walletID := range wallets {
+		var bal int64
+		err = tx.QueryRow(ctx, `
+			SELECT balance FROM wallet_balance_cache WHERE wallet_id = $1 FOR UPDATE
+		`, walletID).Scan(&bal)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Initialize by summing existing ledger entries (bootstrapping step)
+				err = tx.QueryRow(ctx, `
+					SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id = $1
+				`, walletID).Scan(&bal)
+				if err != nil {
+					return err
+				}
+				// Insert the bootstrapped balance into cache and lock it
+				_, err = tx.Exec(ctx, `
+					INSERT INTO wallet_balance_cache (wallet_id, balance, last_entry_id, updated_at)
+					VALUES ($1, $2, 0, NOW())
+					ON CONFLICT (wallet_id) DO UPDATE SET balance = EXCLUDED.balance, updated_at = NOW()
+				`, walletID, bal)
+				if err != nil {
+					return err
+				}
+				// Lock again to ensure consistency
+				err = tx.QueryRow(ctx, `
+					SELECT balance FROM wallet_balance_cache WHERE wallet_id = $1 FOR UPDATE
+				`, walletID).Scan(&bal)
+				if err != nil {
+					return err
+				}
+			} else {
+				return err
+			}
 		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
+		balances[walletID] = bal
 	}
 
-	// 4. Balance checks
-	var clearingBal, fromBal int64
-	err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id = $1`, clearingWallet).Scan(&clearingBal)
-	if err != nil {
-		return err
-	}
-	err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE wallet_id = $1`, fromWallet).Scan(&fromBal)
-	if err != nil {
-		return err
-	}
+	fromBal := balances[fromWallet]
+	clearingBal := balances[clearingWallet]
 
 	// 5. Record the reversal in the transfers table (creates a new parent ID for the ledger entries)
 	revTransferID := domain.ReversalPrefix + transferID
@@ -564,6 +676,22 @@ func (s *CrossShardStore) ReverseCrossShardTransfer(ctx context.Context, srcShar
 		fromWallet, revTransferID, string(domain.LegCredit), amount, fromBal+amount)
 	if err != nil {
 		return err
+	}
+
+	// Update cached balances
+	for walletID := range balances {
+		var delta int64
+		if walletID == clearingWallet {
+			delta = -amount
+		} else {
+			delta = amount
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE wallet_balance_cache SET balance = balance + $1, updated_at = NOW() WHERE wallet_id = $2
+		`, delta, walletID)
+		if err != nil {
+			return err
+		}
 	}
 
 	// 6. Update saga state to reversed

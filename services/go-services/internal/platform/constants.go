@@ -1,6 +1,8 @@
 package platform
 
 import (
+	"time"
+
 	"github.com/sony/gobreaker"
 )
 
@@ -9,21 +11,27 @@ type EventType string
 
 const (
 	// Paths
-	APIVersionV1     = "/v1"
-	APIVersionV2     = "/v2"
-	APIPathPrefix    = APIVersionV1
-	APIJobPathPrefix = APIPathPrefix + "/jobs/"
-	APITransfersPath = APIPathPrefix + "/transfers"
-	APIBalancesPath  = APIPathPrefix + "/balances"
-	APIAuthTokenPath = APIPathPrefix + "/auth/token"
-	APIHealthPath    = "/health"
-	APIReadyPath     = "/ready"
+	APIVersionV1          = "/v1"
+	APIVersionV2          = "/v2"
+	APIPathPrefix         = APIVersionV1
+	APIJobPathPrefix      = APIPathPrefix + "/jobs/"
+	APITransfersPath      = APIPathPrefix + "/transfers"
+	APIBalancesPath       = APIPathPrefix + "/balances"
+	APIAuthTokenPath      = APIPathPrefix + "/auth/token"
+	APIMerchantsPath      = APIPathPrefix + "/merchants"
+	APIWalletsPath        = APIPathPrefix + "/wallets"
+	APIAdminDLQReplayPath = APIPathPrefix + "/admin/dlq/replay"
+	APIHealthPath         = "/health"
+	APIReadyPath          = "/ready"
 
 	// Service Names
-	ServiceNameAPIGateway     = "core-api"
+	ServiceNameCoreAPI        = "core-api"
 	ServiceNameLedgerWorker   = "ledger-worker"
 	ServiceNameOutboxRelay    = "outbox-relay"
+	ServiceNameWebhookWorker  = "webhook-worker"
 	ServiceNameKongSyncWorker = "kong-sync-worker"
+	ServiceNameFraudWorker    = "fraud-worker"
+	ServiceNameReconWorker    = "recon-worker"
 
 	// Circuit Breaker Names (legacy Kafka publisher names kept for back-compat)
 	CBNameAPIGatewayKafkaPublisher = "KafkaPublisher"
@@ -48,6 +56,8 @@ const (
 	ComponentSagaHandler        = "saga_handler"
 	ComponentTransferService    = "transfer_service"
 	ComponentKongGateway        = "kong_gateway"
+	ComponentWebhookStore       = "webhook_store"
+	ComponentWebhookHandler     = "webhook_handler"
 
 	ComponentFormatShard  = "%s_%s"
 	ComponentFormatGlobal = "%s_global"
@@ -69,7 +79,26 @@ const (
 	MerchantStatusFrozen = "frozen"
 	MerchantStatusClosed = "closed"
 
+	// Merchant Tiers
+	MerchantTierPremium  = "premium"
+	MerchantTierStandard = "standard"
+
+	// Wallet Types
+	WalletTypeSystem    = "system"
+	WalletTypeCustomer  = "customer"
+	WalletTypeFiatVault = "system_fiat_vault"
+
+	// Wallet Statuses
+	WalletStatusActive = "active"
+	WalletStatusFrozen = "frozen"
+	WalletStatusClosed = "closed"
+
+	// Platform Merchant (infrastructure)
+	PlatformMerchantShardID = "__platform__"
+	PlatformMerchantID      = "merchant_00000000-0000-0000-0000-000000000001"
+
 	// Shard Status
+	DefaultShardID       = ShardIDPrefix + "a"
 	ShardStatusActive    = "active"
 	ShardStatusMigrating = "migrating"
 
@@ -77,5 +106,65 @@ const (
 	DLQStatusOpen     = "open"
 	DLQStatusReplayed = "replayed"
 	DLQStatusResolved = "resolved"
+
+	// DLQ Sources
+	DLQSourceLedger  = "ledger"
+	DLQSourceWebhook = "webhook"
+	DLQSourceFraud   = "fraud"
+	DLQSourceOutbox  = "outbox-relay"
+
 	TraceparentHeader = "traceparent"
+
+	// Shard Types (for business metrics)
+	ShardTypeSame  = "same"
+	ShardTypeCross = "cross"
+
+	// Transfer Statuses (for business metrics — TSR computation)
+	TransferMetricSuccess = "success"
+	TransferMetricFailed  = "failed"
+	TransferMetricPending = "pending"
+
+	// Decline Reasons (for business metrics)
+	DeclineReasonInsufficientBalance = "insufficient_balance"
+	DeclineReasonWalletFrozen        = "wallet_frozen"
+	DeclineReasonWalletClosed        = "wallet_closed"
+	DeclineReasonWalletNotFound      = "wallet_not_found"
+	DeclineReasonCurrencyMismatch    = "currency_mismatch"
+	DeclineReasonSelfTransfer        = "self_transfer"
+	DeclineReasonMerchantInactive    = "merchant_inactive"
+	DeclineReasonSagaCompensated     = "saga_compensated"
+	DeclineReasonUnknown             = "unknown"
+
+	// Ledger Constants
+	LedgerTransferWalletCount = 2
+
+	// Time Constants
+	MillisecondsPerSecond = 1000
+
+	// JWT Header Keys
+	JWTHeaderKeyID = "kid"
+
+	// Health Response Keys/Values
+	HealthStatusKey         = "status"
+	HealthStatusOK          = "ok"
+	HealthStatusReady       = "ready"
+	HealthStatusUnavailable = "Service Unavailable"
+
+	// Redis Key Formats
+	RedisKeyVelocity = "velocity:wallet:%s"
+
+	// Consumer Backoff Defaults
+	ConsumerBackoffMinDelay = 100 * time.Millisecond
+	ConsumerBackoffMaxDelay = 5 * time.Second
+
+	// Canonical Error Codes (used in ErrorCode field of CanonicalLogLine)
+	ErrorCodeSagaFailed            = "saga_failed"
+	ErrorCodeVelocityLimitExceeded = "velocity_limit_exceeded"
+
+	// API and Deposit Onboarding Constants
+	APIKeySecretLength = 32
+	APIKeyPrefix       = "rrq_live_"
+	APIKeyFormat       = "rrq_live_%s_%s"
+	APIKeySeparator    = "_"
+	DepositReference   = "Fiat Deposit"
 )

@@ -1,11 +1,12 @@
-# Multi-stage build for RRQ Go services.
 FROM golang:1.26-alpine AS builder
 
-ARG SERVICE=api-gateway
-
+RUN apk add --no-cache git
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    GOPROXY=direct go mod download
+
+ARG SERVICE=api-gateway
 COPY . .
 # CGO_ENABLED=0 disables CGO, GOOS=linux sets the target OS to Linux
 # CGO means that the Go compiler will not use C code. Useful for building static binaries that can run in minimal environments like Alpine Linux.

@@ -3,12 +3,10 @@ package rest
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
-	"google.golang.org/protobuf/encoding/protojson"
 
 	apiv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/api/v1"
 )
@@ -21,22 +19,8 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Decode JSON to Transfer struct (body limited to prevent OOM)
-	r.Body = http.MaxBytesReader(w, r.Body, domain.MaxRequestBytes)
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		var maxBytesErr *http.MaxBytesError
-		if errors.As(err, &maxBytesErr) {
-			writeError(w, platform.ErrPayloadTooLarge(domain.ErrMsgPayloadTooLarge))
-			return
-		}
-		writeError(w, platform.ErrInvalidBody(domain.ErrInvalidBody))
-		return
-	}
-
 	var req apiv1.CreateTransferRequest
-	if err := protojson.Unmarshal(bodyBytes, &req); err != nil {
-		writeError(w, platform.ErrInvalidBody(domain.ErrInvalidBody))
+	if !decodeProtoBody(w, r, &req) {
 		return
 	}
 	t := domain.Transfer{
@@ -57,7 +41,7 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	// Call service inside the single Layer 1 retry boundary.
 	t.MerchantID = principal.MerchantID
 	var res domain.SubmitResult
-	err = retryBoundary(r.Context(), func() error {
+	err := retryBoundary(r.Context(), func() error {
 		var fnErr error
 		res, fnErr = s.transfers.Submit(r.Context(), t, idempKey)
 		return fnErr
@@ -79,6 +63,16 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 			Self: fmt.Sprintf("%s%s", platform.APIJobPathPrefix, res.Job.ID),
 		},
 	}
+
+	// Canonical log: transfer submitted (after DB commit)
+	platform.LogCanonicalEvent(r.Context(), s.log, platform.ServiceNameCoreAPI, platform.CanonicalLogLine{
+		Event:      platform.EventTransferSubmitted,
+		Status:     platform.StatusSuccess,
+		MerchantID: principal.MerchantID,
+		JobID:      res.Job.ID,
+		Amount:     t.Amount,
+		Currency:   t.Currency,
+	})
 
 	statusCode := http.StatusAccepted
 	if res.AlreadyExisted {

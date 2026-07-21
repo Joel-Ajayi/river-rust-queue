@@ -17,15 +17,15 @@ ARCH           := $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 # Pinned tool versions (bump deliberately).
 KIND_VERSION               ?= v0.31.0
 KUBECTL_VERSION            ?= v1.31.4
-HELM_VERSION               ?= v3.16.4
-KUSTOMIZE_VERSION          ?= v5.5.0
-BUF_VERSION                ?= v1.47.2
-MIGRATE_VERSION            ?= v4.18.1
+HELM_VERSION               ?= v3.17.0
+KUSTOMIZE_VERSION          ?= v5.6.0
+BUF_VERSION                ?= v1.50.0
+MIGRATE_VERSION            ?= v4.18.2
 KUBESEAL_VERSION           ?= 0.27.3
-ARGOCD_VERSION             ?= v2.13.3
+ARGOCD_VERSION             ?= v2.14.0
 SKAFFOLD_VERSION           ?= v2.23.0
 K6_VERSION                 ?= v0.55.0
-PROTOC_GEN_GO_VERSION      ?= v1.35.2
+PROTOC_GEN_GO_VERSION      ?= v1.36.5
 PROTOC_GEN_GO_GRPC_VERSION ?= v1.5.1
 YQ_VERSION                 ?= v4.44.3
 
@@ -39,7 +39,7 @@ help: ## List available targets
 	  | sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 	@echo
 	@echo "Typical flow:  make tools  →  make dev  →  make build"
-	@echo "Sub-Makefiles: make -C deploy help | make -C services/go-services help | make -C services/rust-services help | make -C api/proto help"
+	@echo "Sub-Makefiles: make -C deploy help | make -C services/go-services help | make -C api/proto help"
 
 .PHONY: path
 path: ## Print PATH additions for installed tools
@@ -152,39 +152,20 @@ fmt-go: ## Format Go code
 	$(MAKE) -C services/go-services fmt
 
 # ===========================================================================
-# Delegated targets — rust-services/
-# ===========================================================================
-.PHONY: build-rust
-build-rust: ## Build Rust services
-	$(MAKE) -C services/rust-services build
-
-.PHONY: test-rust
-test-rust: ## Run Rust tests
-	$(MAKE) -C services/rust-services test
-
-.PHONY: lint-rust
-lint-rust: ## Rust lint (clippy)
-	$(MAKE) -C services/rust-services lint
-
-.PHONY: fmt-rust
-fmt-rust: ## Format Rust code
-	$(MAKE) -C services/rust-services fmt
-
-# ===========================================================================
 # Combined targets
 # ===========================================================================
 .PHONY: build
-build: build-go build-rust ## Build all services
+build: build-go ## Build all services
 
 .PHONY: test
-test: test-go test-rust ## Run all tests
+test: test-go ## Run all tests
 
 .PHONY: lint
-lint: lint-go lint-rust ## Lint all services
+lint: lint-go ## Lint all services
 	$(MAKE) -C api/proto lint
 
 .PHONY: fmt
-fmt: fmt-go fmt-rust ## Format all services
+fmt: fmt-go ## Format all services
 
 # ===========================================================================
 # Delegated targets — proto/
@@ -194,9 +175,32 @@ proto: ## Generate Go and Rust code from proto definitions
 	$(MAKE) -C api/proto generate
 
 # ===========================================================================
-# Simulation harness
+# Benchmarks (k6)
 # ===========================================================================
-.PHONY: sim
-sim: ## Run merchant-sim in steady mode
-	cd tools/merchant-sim && go run ./cmd steady
+.PHONY: bench
+bench: ## Run k6 scenario (SCENARIO=a-sustained-throughput, BASE_URL, DURATION)
+	./k6/run.sh $(SCENARIO)
+
+.PHONY: bench-smoke
+bench-smoke: ## Quick smoke test (1min, for CI)
+	DURATION=1m ./k6/run.sh a-sustained-throughput --no-verify
+
+.PHONY: bench-verify
+bench-verify: ## Run k6 scenario with post-test observability verification (default)
+	./k6/run.sh $(SCENARIO) --verify
+
+.PHONY: bench-all
+bench-all: ## Run all k6 scenarios sequentially with verification (nightly)
+	@for s in load-sustained stress-bulk-payout ramp-to-peak fraud-throughput circuit-breaker reconciliation-integrity spike-surge cross-shard-throughput; do \
+	  echo "=== Running $$s ==="; \
+	  $(MAKE) bench-verify SCENARIO=$$s; \
+	done
+
+.PHONY: bench-soak
+bench-soak: ## Run 4-hour soak test with verification (pre-release)
+	$(MAKE) bench-verify SCENARIO=soak-endurance
+
+.PHONY: bench-full
+bench-full: bench-all bench-soak ## Full performance qualification suite (nightly + pre-release)
+
 

@@ -1,0 +1,80 @@
+name: Performance
+
+on:
+  schedule:
+    # Nightly at 02:00 UTC — full suite
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "k6 scenario to run (default: all)"
+        required: false
+        default: "all"
+      base_url:
+        description: "Target environment URL"
+        required: true
+        default: "https://staging.rrq.io"
+
+jobs:
+  smoke:
+    name: Smoke Test
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.scenario != 'all'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run k6 smoke test
+        uses: grafana/k6-action@v0.3.1
+        with:
+          filename: k6/scenarios/${{ github.event.inputs.scenario }}.js
+          flags: --env BASE_URL=${{ github.event.inputs.base_url }} --env DURATION=1m
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-summary
+          path: k6/reports/
+
+  nightly:
+    name: Nightly Performance
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        scenario:
+          - a-sustained-throughput
+          - b-bulk-payout-stress
+          - c-ramp-to-peak
+          - d-fraud-throughput
+          - e-circuit-breaker
+          - f-reconciliation-stress
+          - g-spike-surge
+          - i-cross-shard-stress
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ${{ matrix.scenario }}
+        uses: grafana/k6-action@v0.3.1
+        with:
+          filename: k6/scenarios/${{ matrix.scenario }}.js
+          flags: --env BASE_URL=https://staging.rrq.io
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-summary-${{ matrix.scenario }}
+          path: k6/reports/
+
+  soak:
+    name: 4-Hour Soak
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.scenario == 'all'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run 4-hour soak
+        uses: grafana/k6-action@v0.3.1
+        with:
+          filename: k6/scenarios/h-soak-endurance.js
+          flags: --env BASE_URL=${{ github.event.inputs.base_url }}
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-summary-soak
+          path: k6/reports/

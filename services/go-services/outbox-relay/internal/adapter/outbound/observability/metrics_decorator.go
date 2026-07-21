@@ -47,7 +47,7 @@ func (m *metricsPublisherDecorator) PublishEvents(ctx context.Context, events []
 	for topic, count := range topicCounts {
 		cleanTopic := topic
 		if len(topic) > len(platform.TopicXShardPrefix) && topic[:len(platform.TopicXShardPrefix)] == platform.TopicXShardPrefix {
-			cleanTopic = "xshard"
+			cleanTopic = platform.TopicLabelXShard
 		}
 		platform.RecordOutboxEventsPublished(ctx, m.shardID, cleanTopic, count)
 	}

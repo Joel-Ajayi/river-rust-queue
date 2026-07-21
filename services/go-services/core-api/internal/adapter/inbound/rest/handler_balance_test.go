@@ -1,3 +1,5 @@
+//go:build integration
+
 package rest_test
 
 import (
@@ -10,7 +12,7 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 )
 
-func TestGetBalance(t *testing.T) {
+func TestBalanceHandler_GetBalance_Success(t *testing.T) {
 	t.Parallel()
 	handler, _, mID := setupEnvironment(t)
 

@@ -60,6 +60,11 @@ func NewMerchantID() string {
 	return fmt.Sprintf("%s_%s", AggregateTypeMerchant, id.String())
 }
 
+// NewDeliveryID generates a prefixed ULID for Webhook Deliveries.
+func NewDeliveryID() string {
+	return fmt.Sprintf("%s_%s", AggregateTypeDelivery, generateULID())
+}
+
 // Validate merchant id
 func IsValidMerchantID(merchantID string) bool {
 	parts := strings.Split(merchantID, "_")

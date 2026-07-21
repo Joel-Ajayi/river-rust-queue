@@ -26,8 +26,8 @@ var (
 	ErrMissingAuthContext      = errors.New("missing authentication context")
 	ErrMissingConsumerIdentity = errors.New("missing or invalid consumer identity header")
 
-	ErrMsgBulkheadExhausted = errors.New("Service Unavailable - Connection Pool Exhausted")
-	ErrMsgPayloadTooLarge   = errors.New("Payload Too Large")
+	ErrMsgBulkheadExhausted = errors.New("service unavailable - connection pool exhausted")
+	ErrMsgPayloadTooLarge   = errors.New("payload too large")
 
 	ErrMsgQueryParamRequired      = errors.New("query parameter is required")
 	ErrMsgInValidJobID            = errors.New("job id is invalid")

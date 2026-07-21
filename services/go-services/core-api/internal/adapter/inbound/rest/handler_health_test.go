@@ -1,3 +1,5 @@
+//go:build integration
+
 package rest_test
 
 import (
@@ -9,7 +11,7 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 )
 
-func TestHealth(t *testing.T) {
+func TestHealthHandler_Health_Success(t *testing.T) {
 	t.Parallel()
 	handler, _, _ := setupEnvironment(t)
 
@@ -30,7 +32,7 @@ func TestHealth(t *testing.T) {
 	}
 }
 
-func TestReady(t *testing.T) {
+func TestHealthHandler_Ready_Success(t *testing.T) {
 	t.Parallel()
 	handler, _, _ := setupEnvironment(t)
 

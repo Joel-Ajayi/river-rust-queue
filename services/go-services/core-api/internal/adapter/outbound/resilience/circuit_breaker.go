@@ -2,11 +2,14 @@ package resilience
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/port"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 )
+
+const errUnexpectedResultTypeFormat = "unexpected result type: %T"
 
 // Layer 3 CB decorators are pure shields: cb.Execute(fn) only — no retry.
 // Retry lives at Layer 1 (rest.RetryBoundary).
@@ -35,17 +38,11 @@ func (c *merchantDirCB) ShardFor(ctx context.Context, merchantID string) (string
 	if err != nil {
 		return "", err
 	}
-	return res.(string), nil
-}
-
-func (c *merchantDirCB) AuthenticateAPIKey(ctx context.Context, apiKey string) (domain.Principal, error) {
-	res, err := c.cbs.Merchants().Execute(func() (interface{}, error) {
-		return c.next.AuthenticateAPIKey(ctx, apiKey)
-	})
-	if err != nil {
-		return domain.Principal{}, err
+	s, ok := res.(string)
+	if !ok {
+		return "", platform.ErrInternal(fmt.Errorf(errUnexpectedResultTypeFormat, res))
 	}
-	return res.(domain.Principal), nil
+	return s, nil
 }
 
 // -- Wallet Directory (per-shard for Check/GetBalance; merchants-global lookup) --
@@ -74,7 +71,10 @@ func (c *walletDirCB) GetBalance(ctx context.Context, shardID, walletID string) 
 	if err != nil {
 		return 0, "", err
 	}
-	w := res.(balanceResult)
+	w, ok := res.(balanceResult)
+	if !ok {
+		return 0, "", platform.ErrInternal(fmt.Errorf(errUnexpectedResultTypeFormat, res))
+	}
 	return w.bal, w.cur, nil
 }
 
@@ -96,7 +96,11 @@ func (c *jobStoreCB) GetJob(ctx context.Context, shardID, jobID string) (domain.
 	if err != nil {
 		return domain.Job{}, err
 	}
-	return res.(domain.Job), nil
+	j, ok := res.(domain.Job)
+	if !ok {
+		return domain.Job{}, platform.ErrInternal(fmt.Errorf(errUnexpectedResultTypeFormat, res))
+	}
+	return j, nil
 }
 
 func (c *jobStoreCB) ClaimAndRecord(ctx context.Context, shardID string, job domain.Job, t domain.Transfer, idempKey string) (domain.SubmitResult, error) {
@@ -106,5 +110,9 @@ func (c *jobStoreCB) ClaimAndRecord(ctx context.Context, shardID string, job dom
 	if err != nil {
 		return domain.SubmitResult{}, err
 	}
-	return res.(domain.SubmitResult), nil
+	sr, ok := res.(domain.SubmitResult)
+	if !ok {
+		return domain.SubmitResult{}, platform.ErrInternal(fmt.Errorf(errUnexpectedResultTypeFormat, res))
+	}
+	return sr, nil
 }

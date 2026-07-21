@@ -31,7 +31,7 @@ func (s *RelayService) Start(ctx context.Context, shardID string) {
 	purgeTicker := time.NewTicker(domain.OutboxPurgeInterval)
 	defer purgeTicker.Stop()
 
-	s.log.Info("Starting relay service", zap.String(platform.LogFieldShardID, shardID))
+	platform.LoggerWithTrace(ctx, s.log).Info(platform.LogEventRelayServiceStarted, zap.String(platform.LogFieldShardID, shardID))
 
 	attempt := 0
 	for {
@@ -46,7 +46,7 @@ func (s *RelayService) Start(ctx context.Context, shardID string) {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			s.log.Info("Shutting down relay service", zap.String(platform.LogFieldShardID, shardID))
+			platform.LoggerWithTrace(ctx, s.log).Info(platform.LogEventRelayServiceShutdown, zap.String(platform.LogFieldShardID, shardID))
 			return
 		case <-purgeTicker.C:
 			timer.Stop()
@@ -57,6 +57,7 @@ func (s *RelayService) Start(ctx context.Context, shardID string) {
 		case <-timer.C:
 			err := s.processBatch(ctx, shardID)
 			if err != nil {
+				platform.LoggerWithTrace(ctx, s.log).Error(platform.LogEventRelayBatchProcessFailed, zap.Error(err), zap.String(platform.LogFieldShardID, shardID))
 				attempt++
 			} else {
 				attempt = 0
@@ -79,61 +80,49 @@ func (s *RelayService) processBatch(ctx context.Context, shardID string) error {
 		// Panic Middleware for Poison Pills - per-event isolation
 		defer func() {
 			if r := recover(); r != nil {
-				s.log.Error("Panic recovered during event processing. Routing failed events to DLQ.", zap.Any(platform.LogFieldPanic, r))
-				// Note: We cannot identify which specific event caused the panic without per-event try-catch.
-				// Route all events in batch to DLQ as safety measure, but log for investigation.
+				platform.LoggerWithTrace(ctx, s.log).Error(platform.LogEventPanicRecoveredDLQ, zap.Any(platform.LogFieldPanic, r))
+				var lastDlqErr error
 				for _, e := range events {
-					_ = s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonPanic)
+					if dlqErr := s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonPanic); dlqErr != nil {
+						lastDlqErr = dlqErr
+					}
 				}
-				// Force the database to COMMIT and mark the batch as published to permanently break the poison loop
-				err = nil
+				// If DLQ write fails, propagate error to rollback the transaction; otherwise nil to commit
+				err = lastDlqErr
 			}
 		}()
 
 		var validEvents []domain.Event
 
+		// 1. Validate each event in the batch and route invalid ones to DLQ
+		// maintain order of events in the batch
 		for _, e := range events {
-			// Per-event panic isolation for precise DLQ routing
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						s.log.Error("Panic processing individual event, routing to DLQ", zap.Any(platform.LogFieldPanic, r), zap.String(platform.LogFieldEventID, e.ID))
-						_ = s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonPanic)
-					}
-				}()
-
-				//1. Corrupted payload check
-				if !json.Valid(e.Payload) {
-					if dlqErr := s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonCorruptedPayload); dlqErr != nil {
-						err = dlqErr // capture for outer return
-					}
-					return
+			// 1. Corrupted payload check
+			if !json.Valid(e.Payload) {
+				if dlqErr := s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonCorruptedPayload); dlqErr != nil {
+					err = dlqErr
 				}
-
-				//2. Message too large check
-				if len(e.Payload) > platform.KafkaMaxMessageBytes {
-					if dlqErr := s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonMessageTooLarge); dlqErr != nil {
-						err = dlqErr
-					}
-					return
-				}
-
-				//3. TopicNotify specific validation
-				if e.PublishTopic == platform.TopicNotify {
-					var envelope eventsv1.EventEnvelope
-					if unmarshalErr := protojson.Unmarshal(e.Payload, &envelope); unmarshalErr != nil {
-						if dlqErr := s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonInvalidSchema); dlqErr != nil {
-							err = dlqErr
-						}
-						return
-					}
-				}
-
-				validEvents = append(validEvents, e)
-			}()
-			if err != nil {
-				return err
+				continue
 			}
+
+			// 2. Message too large check
+			if len(e.Payload) > platform.KafkaMaxMessageBytes {
+				if dlqErr := s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonMessageTooLarge); dlqErr != nil {
+					err = dlqErr
+				}
+				continue
+			}
+
+			// 3. Schema validation
+			var envelope eventsv1.EventEnvelope
+			if unmarshalErr := protojson.Unmarshal(e.Payload, &envelope); unmarshalErr != nil {
+				if dlqErr := s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonInvalidSchema); dlqErr != nil {
+					err = dlqErr
+				}
+				continue
+			}
+
+			validEvents = append(validEvents, e)
 		}
 
 		// 4. Publish Valid Events
@@ -143,6 +132,15 @@ func (s *RelayService) processBatch(ctx context.Context, shardID string) error {
 			publishCancel()
 			if err != nil {
 				return err
+			}
+
+			// Canonical log: outbox events published (per event)
+			for _, e := range validEvents {
+				platform.LogCanonicalEvent(ctx, s.log, platform.ServiceNameOutboxRelay, platform.CanonicalLogLine{
+					Event:         platform.EventOutboxPublished,
+					Status:        platform.StatusSuccess,
+					TransferID:    e.AggregateID,
+				})
 			}
 		}
 

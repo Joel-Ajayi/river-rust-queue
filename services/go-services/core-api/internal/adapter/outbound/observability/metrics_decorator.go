@@ -29,16 +29,6 @@ func (m *merchantDirMetrics) ShardFor(ctx context.Context, merchantID string) (s
 	return shardID, err
 }
 
-func (m *merchantDirMetrics) AuthenticateAPIKey(ctx context.Context, apiKey string) (domain.Principal, error) {
-	principal, err := m.next.AuthenticateAPIKey(ctx, apiKey)
-	if err != nil {
-		if platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure || errors.Is(err, domain.ErrServiceUnavailable) {
-			platform.RecordInfrastructureError(ctx, platform.ComponentMerchantDirectory)
-		}
-	}
-	return principal, err
-}
-
 // -- Wallet Directory Decorator --
 
 type walletDirMetrics struct {

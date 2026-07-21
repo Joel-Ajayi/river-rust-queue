@@ -6,7 +6,6 @@ on:
     paths:
       - "services/go-services/**"
       - "services/rust-services/**"
-      - "services/admin-dashboard/**"
       - "api/proto/**"
       - "deploy/db/migrations/**"
   pull_request:
@@ -14,7 +13,6 @@ on:
     paths:
       - "services/go-services/**"
       - "services/rust-services/**"
-      - "services/admin-dashboard/**"
       - "api/proto/**"
       - "deploy/db/migrations/**"
 
@@ -136,7 +134,6 @@ jobs:
           repository: Joel-Ajayi/rrq-gitops
           token: ${{ secrets.GITOPS_PAT }}
           path: rrq-gitops
-
 
       - name: Install yq
         run: |

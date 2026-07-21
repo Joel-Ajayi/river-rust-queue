@@ -14,11 +14,68 @@ type WalletDirectory struct {
 	pools port.ShardPools
 }
 
-// compile time interface implementation check
-var _ port.WalletDirectory = (*WalletDirectory)(nil)
+// compile time interface implementation checks.
+var (
+	_ port.WalletDirectory = (*WalletDirectory)(nil)
+	_ port.WalletStore     = (*WalletDirectory)(nil)
+)
 
 func NewWalletDirectory(pools *platform.ShardPools) *WalletDirectory {
 	return &WalletDirectory{pools: pools}
+}
+
+// CreateWallet creates a new customer or system wallet and initializes its balance cache.
+func (d *WalletDirectory) CreateWallet(ctx context.Context, shardID, walletID, merchantID, currency, walletType string) error {
+	pool, err := d.pools.ShardPool(shardID)
+	if err != nil {
+		return err
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO wallets (id, merchant_id, currency, wallet_type, status)
+		VALUES ($1, $2, $3, $4, $5)
+	`, walletID, merchantID, currency, walletType, platform.WalletStatusActive)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO wallet_balance_cache (wallet_id, balance, last_entry_id, updated_at)
+		VALUES ($1, 0, 0, NOW())
+	`, walletID)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+// FindFiatVault finds the platform fiat vault wallet on the specified shard.
+func (d *WalletDirectory) FindFiatVault(ctx context.Context, shardID, currency string) (string, error) {
+	pool, err := d.pools.ShardPoolRO(shardID)
+	if err != nil {
+		return "", err
+	}
+
+	var vaultID string
+	err = pool.QueryRow(ctx, `
+		SELECT id FROM wallets
+		WHERE wallet_type = $1 AND currency = $2 AND status = $3
+		LIMIT 1
+	`, platform.WalletTypeFiatVault, currency, platform.WalletStatusActive).Scan(&vaultID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", domain.ErrWalletNotFound
+		}
+		return "", err
+	}
+
+	return vaultID, nil
 }
 
 func (d *WalletDirectory) CheckWalletOwnership(ctx context.Context, shardID, walletID, merchantID string) error {
