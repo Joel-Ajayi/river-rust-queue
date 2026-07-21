@@ -12,7 +12,7 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/core/port"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 type WebhookService struct {
@@ -35,7 +35,7 @@ func NewWebhookService(repo port.Repository, client port.HTTPClient, breakers *r
 func (s *WebhookService) HandleMessage(ctx context.Context, merchantID string, payload []byte) error {
 	// 1. Unmarshal to extract event ID.
 	var env eventsv1.EventEnvelope
-	if err := protojson.Unmarshal(payload, &env); err != nil {
+	if err := proto.Unmarshal(payload, &env); err != nil {
 		return err
 	}
 	eventID := env.EventId

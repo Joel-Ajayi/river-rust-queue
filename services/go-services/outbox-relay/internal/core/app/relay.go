@@ -10,7 +10,7 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/port"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 type RelayService struct {
@@ -115,7 +115,7 @@ func (s *RelayService) processBatch(ctx context.Context, shardID string) error {
 
 			// 3. Schema validation
 			var envelope eventsv1.EventEnvelope
-			if unmarshalErr := protojson.Unmarshal(e.Payload, &envelope); unmarshalErr != nil {
+			if unmarshalErr := proto.Unmarshal(e.Payload, &envelope); unmarshalErr != nil {
 				if dlqErr := s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonInvalidSchema); dlqErr != nil {
 					err = dlqErr
 				}
@@ -137,9 +137,9 @@ func (s *RelayService) processBatch(ctx context.Context, shardID string) error {
 			// Canonical log: outbox events published (per event)
 			for _, e := range validEvents {
 				platform.LogCanonicalEvent(ctx, s.log, platform.ServiceNameOutboxRelay, platform.CanonicalLogLine{
-					Event:         platform.EventOutboxPublished,
-					Status:        platform.StatusSuccess,
-					TransferID:    e.AggregateID,
+					Event:      platform.EventOutboxPublished,
+					Status:     platform.StatusSuccess,
+					TransferID: e.AggregateID,
 				})
 			}
 		}

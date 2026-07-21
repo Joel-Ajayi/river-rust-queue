@@ -5,12 +5,20 @@ import (
 	"errors"
 	"testing"
 
+	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/core/app"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/core/domain"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 )
+
+func makeTestPayload(eventID string) []byte {
+	env := &eventsv1.EventEnvelope{EventId: eventID}
+	bytes, _ := proto.Marshal(env)
+	return bytes
+}
 
 func TestWebhookService_HandleMessage_UnmarshalError(t *testing.T) {
 	svc := app.NewWebhookService(new(MockRepository), new(MockHTTPClient), newMockBreakerRegistry(), zap.NewNop())
@@ -25,7 +33,7 @@ func TestWebhookService_HandleMessage_MerchantNotFoundRoutesToDLQ(t *testing.T) 
 
 	svc := app.NewWebhookService(mockRepo, new(MockHTTPClient), newMockBreakerRegistry(), zap.NewNop())
 
-	payload := []byte(`{"event_id":"ev_1"}`)
+	payload := makeTestPayload("ev_1")
 
 	mockRepo.On("GetMerchantConfig", mock.Anything, "merch_1").Return((*domain.Merchant)(nil), nil)
 	mockRepo.On("GetAvailableShardIDs").Return([]string{"shard_a"})
@@ -43,7 +51,7 @@ func TestWebhookService_HandleMessage_SkipsInactiveMerchant(t *testing.T) {
 
 	svc := app.NewWebhookService(mockRepo, mockClient, newMockBreakerRegistry(), zap.NewNop())
 
-	payload := []byte(`{"event_id":"ev_1"}`)
+	payload := makeTestPayload("ev_1")
 
 	mockRepo.On("GetMerchantConfig", mock.Anything, "merch_1").Return(&domain.Merchant{
 		ID:     "merch_1",
@@ -64,7 +72,7 @@ func TestWebhookService_HandleMessage_DeliverySuccess(t *testing.T) {
 
 	svc := app.NewWebhookService(mockRepo, mockClient, newMockBreakerRegistry(), zap.NewNop())
 
-	payload := []byte(`{"event_id":"ev_1"}`)
+	payload := makeTestPayload("ev_1")
 
 	mockRepo.On("GetMerchantConfig", mock.Anything, "merch_1").Return(&domain.Merchant{
 		ID:            "merch_1",
@@ -90,7 +98,7 @@ func TestWebhookService_HandleMessage_DeliveryFailureSchedulesRetry(t *testing.T
 
 	svc := app.NewWebhookService(mockRepo, mockClient, newMockBreakerRegistry(), zap.NewNop())
 
-	payload := []byte(`{"event_id":"ev_1"}`)
+	payload := makeTestPayload("ev_1")
 
 	mockRepo.On("GetMerchantConfig", mock.Anything, "merch_1").Return(&domain.Merchant{
 		ID:            "merch_1",
@@ -117,7 +125,7 @@ func TestWebhookService_HandleMessage_Concurrent(t *testing.T) {
 
 	svc := app.NewWebhookService(mockRepo, mockClient, newMockBreakerRegistry(), zap.NewNop())
 
-	payload := []byte(`{"event_id":"ev_1"}`)
+	payload := makeTestPayload("ev_1")
 
 	mockRepo.On("GetMerchantConfig", mock.Anything, "merch_1").Return(&domain.Merchant{
 		ID:            "merch_1",

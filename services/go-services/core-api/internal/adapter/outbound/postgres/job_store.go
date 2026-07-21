@@ -6,7 +6,7 @@ import (
 	"time"
 
 	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
-	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
@@ -102,8 +102,7 @@ func (s *JobStore) ClaimAndRecord(ctx context.Context, shardId string, job domai
 		},
 	}
 
-	marshaler := protojson.MarshalOptions{EmitUnpopulated: true}
-	payload, err := marshaler.Marshal(envelope)
+	payload, err := proto.Marshal(envelope)
 	if err != nil {
 		return domain.SubmitResult{}, err
 	}

@@ -8,7 +8,7 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/port"
 	"github.com/segmentio/kafka-go"
-	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 type EventPublisher struct {
@@ -35,7 +35,7 @@ func (p *EventPublisher) PublishEvents(ctx context.Context, events []domain.Even
 
 		var traceparent string
 		var envelope eventsv1.EventEnvelope
-		if err := protojson.Unmarshal(e.Payload, &envelope); err == nil {
+		if err := proto.Unmarshal(e.Payload, &envelope); err == nil {
 			traceparent = envelope.Traceparent
 			// For webhook notifications, we must key by merchant_id to guarantee per-merchant ordering (I5).
 			if e.PublishTopic == platform.TopicNotify {

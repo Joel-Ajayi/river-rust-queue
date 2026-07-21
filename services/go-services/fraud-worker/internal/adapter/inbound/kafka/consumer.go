@@ -13,7 +13,7 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform/pii"
 	"github.com/segmentio/kafka-go"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 type ConsumerManager struct {
@@ -78,7 +78,7 @@ func (m *ConsumerManager) Start(ctx context.Context) {
 			}
 
 			var envelope eventsv1.EventEnvelope
-			if err := protojson.Unmarshal(msg.Value, &envelope); err != nil {
+			if err := proto.Unmarshal(msg.Value, &envelope); err != nil {
 				m.logger.Error(platform.LogEventPoisonPill, zap.Error(err))
 				if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrUnmarshal, err)); dlqErr != nil {
 					m.logger.Error(platform.LogEventDLQWriteFailed, zap.Error(dlqErr))
@@ -161,7 +161,7 @@ func (m *ConsumerManager) routeToDLQ(ctx context.Context, msg kafka.Message, rea
 
 	shardID := m.pools.GetAvailableShardIDs()[0]
 	var envelope eventsv1.EventEnvelope
-	if err := protojson.Unmarshal(msg.Value, &envelope); err == nil {
+	if err := proto.Unmarshal(msg.Value, &envelope); err == nil {
 		payload := envelope.GetJobRequested()
 		if payload != nil {
 			if s, err := m.merchantDir.ShardFor(ctx, payload.MerchantId); err == nil {

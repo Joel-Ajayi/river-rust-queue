@@ -13,7 +13,7 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/ledger-worker/internal/core/port"
 	"github.com/segmentio/kafka-go"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 type ConsumerManager struct {
@@ -110,7 +110,7 @@ func (m *ConsumerManager) consumeJobs(ctx context.Context) {
 		}
 
 		var envelope eventsv1.EventEnvelope
-		if err := protojson.Unmarshal(msg.Value, &envelope); err != nil {
+		if err := proto.Unmarshal(msg.Value, &envelope); err != nil {
 			if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrUnmarshal, err)); dlqErr != nil {
 				platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventPoisonDLQWriteFailed, zap.Error(dlqErr))
 			} else {
@@ -173,7 +173,7 @@ func (m *ConsumerManager) consumeXShardJob(ctx context.Context, r *kafka.Reader)
 		}
 
 		var envelope eventsv1.EventEnvelope
-		if err := protojson.Unmarshal(msg.Value, &envelope); err != nil {
+		if err := proto.Unmarshal(msg.Value, &envelope); err != nil {
 			if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrUnmarshal, err)); dlqErr != nil {
 			} else {
 				r.CommitMessages(ctx, msg)
@@ -236,23 +236,23 @@ func (m *ConsumerManager) processMessage(ctx context.Context, msg kafka.Message,
 	start := time.Now()
 
 	// Panic recovery to ensure that a panic in the handler does not crash the consumer.
-		defer func() {
-			duration := time.Since(start)
-			if r := recover(); r != nil {
-				var panicErr error
-				if e, ok := r.(error); ok {
-					panicErr = e
-				} else {
-					panicErr = fmt.Errorf("%w: %v", domain.ErrPanic, r)
-				}
-				platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventPanicRecoveredDLQ, zap.Any(platform.LogFieldPanic, r), zap.Duration(platform.LogFieldDuration, duration))
-				if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrPanic, panicErr)); dlqErr != nil {
-					platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventPanicDLQWriteFailed, zap.Error(dlqErr))
-				}
-				err = nil
-				_ = panicErr
+	defer func() {
+		duration := time.Since(start)
+		if r := recover(); r != nil {
+			var panicErr error
+			if e, ok := r.(error); ok {
+				panicErr = e
+			} else {
+				panicErr = fmt.Errorf("%w: %v", domain.ErrPanic, r)
 			}
-		}()
+			platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventPanicRecoveredDLQ, zap.Any(platform.LogFieldPanic, r), zap.Duration(platform.LogFieldDuration, duration))
+			if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrPanic, panicErr)); dlqErr != nil {
+				platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventPanicDLQWriteFailed, zap.Error(dlqErr))
+			}
+			err = nil
+			_ = panicErr
+		}
+	}()
 
 	if err := processFn(); err != nil {
 		if domain.IsTerminalError(err) {
@@ -294,7 +294,7 @@ func (m *ConsumerManager) routeToDLQ(ctx context.Context, msg kafka.Message, rea
 	// 3. Extract shard ID from message payload
 	shardID := m.pools.GetAvailableShardIDs()[0]
 	var envelope eventsv1.EventEnvelope
-	if err := protojson.Unmarshal(msg.Value, &envelope); err == nil {
+	if err := proto.Unmarshal(msg.Value, &envelope); err == nil {
 		switch {
 		case envelope.GetJobRequested() != nil:
 			merchantID := envelope.GetJobRequested().MerchantId
@@ -327,23 +327,23 @@ func (m *ConsumerManager) routeToDLQ(ctx context.Context, msg kafka.Message, rea
 	}
 
 	// Retry DLQ write with exponential backoff
-		var lastErr error
-		for i := 0; i < domain.ConsumerDLQMaxRetries; i++ {
-			if err := m.dlqStore.WriteDLQEntry(ctx, shardID, entry); err != nil {
-				lastErr = err
-				platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventDLQRetryFailed, zap.Error(err), zap.Int(platform.LogFieldAttempt, i+1), zap.String(platform.LogFieldTopic, msg.Topic))
-				delay := platform.CalculateJitterBackoff(i, domain.ConsumerDLQRetryBaseDelay, domain.ConsumerDLQMaxBackoff)
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(delay):
-				}
-				continue
+	var lastErr error
+	for i := 0; i < domain.ConsumerDLQMaxRetries; i++ {
+		if err := m.dlqStore.WriteDLQEntry(ctx, shardID, entry); err != nil {
+			lastErr = err
+			platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventDLQRetryFailed, zap.Error(err), zap.Int(platform.LogFieldAttempt, i+1), zap.String(platform.LogFieldTopic, msg.Topic))
+			delay := platform.CalculateJitterBackoff(i, domain.ConsumerDLQRetryBaseDelay, domain.ConsumerDLQMaxBackoff)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
 			}
-			platform.RecordDLQIngestion(ctx, platform.ServiceNameLedgerWorker)
-			return nil
+			continue
 		}
+		platform.RecordDLQIngestion(ctx, platform.ServiceNameLedgerWorker)
+		return nil
+	}
 
-		platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventDLQWriteExhausted, zap.Error(lastErr), zap.String(platform.LogFieldTopic, msg.Topic), zap.ByteString(platform.LogFieldKey, msg.Key))
+	platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventDLQWriteExhausted, zap.Error(lastErr), zap.String(platform.LogFieldTopic, msg.Topic), zap.ByteString(platform.LogFieldKey, msg.Key))
 	return lastErr
 }
