@@ -8,7 +8,7 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/port"
-	"github.com/sony/gobreaker"
+	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 )
 
 type metricsPublisherDecorator struct {
@@ -32,7 +32,7 @@ func (m *metricsPublisherDecorator) PublishEvents(ctx context.Context, events []
 	start := time.Now()
 	res, err := m.next.PublishEvents(ctx, events)
 	if err != nil {
-		if platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
+		if platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || errors.Is(err, circuitbreaker.ErrOpen) {
 			platform.RecordInfrastructureError(ctx, platform.ComponentKafkaPublisher)
 		}
 		return res, err
@@ -69,7 +69,7 @@ func NewMetricsStoreDecorator(next port.EventStore, shardID string) port.EventSt
 
 func (m *metricsStoreDecorator) ProcessUnpublishedEvents(ctx context.Context, shardID string, batchSize int, processor func(ctx context.Context, events []domain.Event) error) error {
 	err := m.next.ProcessUnpublishedEvents(ctx, shardID, batchSize, processor)
-	if err != nil && (platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || platform.ClassifyError(err, nil) == platform.ClassificationTransient || errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests)) {
+	if err != nil && (platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || platform.ClassifyError(err, nil) == platform.ClassificationTransient || errors.Is(err, circuitbreaker.ErrOpen)) {
 		platform.RecordInfrastructureError(ctx, platform.ComponentEventStore)
 	}
 	return err
@@ -77,7 +77,7 @@ func (m *metricsStoreDecorator) ProcessUnpublishedEvents(ctx context.Context, sh
 
 func (m *metricsStoreDecorator) GetOldestUnpublishedEventAge(ctx context.Context, shardID string) (time.Duration, error) {
 	dur, err := m.next.GetOldestUnpublishedEventAge(ctx, shardID)
-	if err != nil && (platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || platform.ClassifyError(err, nil) == platform.ClassificationTransient || errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests)) {
+	if err != nil && (platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || platform.ClassifyError(err, nil) == platform.ClassificationTransient || errors.Is(err, circuitbreaker.ErrOpen)) {
 		platform.RecordInfrastructureError(ctx, platform.ComponentEventStore)
 	}
 	return dur, err
@@ -85,7 +85,7 @@ func (m *metricsStoreDecorator) GetOldestUnpublishedEventAge(ctx context.Context
 
 func (m *metricsStoreDecorator) PurgePublishedEvents(ctx context.Context, shardID string, olderThan time.Duration) error {
 	err := m.next.PurgePublishedEvents(ctx, shardID, olderThan)
-	if err != nil && (platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || platform.ClassifyError(err, nil) == platform.ClassificationTransient || errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests)) {
+	if err != nil && (platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || platform.ClassifyError(err, nil) == platform.ClassificationTransient || errors.Is(err, circuitbreaker.ErrOpen)) {
 		platform.RecordInfrastructureError(ctx, platform.ComponentEventStore)
 	}
 	return err
@@ -93,7 +93,7 @@ func (m *metricsStoreDecorator) PurgePublishedEvents(ctx context.Context, shardI
 
 func (m *metricsStoreDecorator) RouteToDLQ(ctx context.Context, shardID string, event domain.Event, reason string) error {
 	err := m.next.RouteToDLQ(ctx, shardID, event, reason)
-	if err != nil && (platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || platform.ClassifyError(err, nil) == platform.ClassificationTransient || errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests)) {
+	if err != nil && (platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || platform.ClassifyError(err, nil) == platform.ClassificationTransient || errors.Is(err, circuitbreaker.ErrOpen)) {
 		platform.RecordInfrastructureError(ctx, platform.ComponentEventStore)
 	}
 	return err

@@ -16,7 +16,6 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/port"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
-	"github.com/sony/gobreaker"
 	"go.uber.org/zap"
 )
 
@@ -124,14 +123,14 @@ func readiness(ctx context.Context, pools *platform.ShardPools, cbs *platform.DB
 		return err
 	}
 	// Check circuit breaker state - if any CB is open, we're not ready
-	if cbs.Merchants().State() == gobreaker.StateOpen {
+	if cbs.Merchants().State() == platform.CBStateOpen {
 		return fmt.Errorf("%w", platform.ErrCBMerchantsOpen)
 	}
 	for _, shardID := range pools.GetAvailableShardIDs() {
-		if cbs.ShardRW(shardID).State() == gobreaker.StateOpen {
+		if cbs.ShardRW(shardID).State() == platform.CBStateOpen {
 			return fmt.Errorf("%w: %s", platform.ErrCBRWOpen, shardID)
 		}
-		if cbs.ShardRO(shardID).State() == gobreaker.StateOpen {
+		if cbs.ShardRO(shardID).State() == platform.CBStateOpen {
 			return fmt.Errorf("%w: %s", platform.ErrCBROpen, shardID)
 		}
 	}

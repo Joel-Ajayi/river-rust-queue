@@ -7,11 +7,33 @@ import (
 	"sync"
 	"time"
 
+	"github.com/failsafe-go/failsafe-go"
+	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/segmentio/kafka-go"
-	"github.com/sony/gobreaker"
 )
+
+// CircuitBreaker wraps a failsafe-go circuitbreaker.CircuitBreaker[any] with helper methods.
+type CircuitBreaker struct {
+	cb circuitbreaker.CircuitBreaker[any]
+}
+
+func (c *CircuitBreaker) Execute(fn func() (any, error)) (any, error) {
+	return failsafe.NewExecutor[any](c.cb).Get(fn)
+}
+
+func (c *CircuitBreaker) ExecuteVoid(fn func() error) error {
+	return failsafe.NewExecutor[any](c.cb).Run(fn)
+}
+
+func (c *CircuitBreaker) State() circuitbreaker.State {
+	return c.cb.State()
+}
+
+func (c *CircuitBreaker) IsOpen() bool {
+	return c.cb.IsOpen()
+}
 
 // IsTerminalFunc classifies business errors so the
 // DB breaker registry treats them as pool-health successes, not failures.
@@ -42,54 +64,47 @@ type CircuitBreakerConfig struct {
 	MinRequests   uint32
 	ErrorRate     float64
 	IsSuccessful  func(error) bool
-	OnStateChange func(name string, from gobreaker.State, to gobreaker.State)
+	OnStateChange func(name string, from circuitbreaker.State, to circuitbreaker.State)
 }
 
-// newCircuitBreaker creates a standardized gobreaker.CircuitBreaker for the platform.
-func newCircuitBreaker(cfg CircuitBreakerConfig) *gobreaker.CircuitBreaker {
-	return gobreaker.NewCircuitBreaker(gobreaker.Settings{
-		Name:        cfg.Name,
-		MaxRequests: cfg.MaxRequests, // Max requests in half-open state
-		Interval:    cfg.Interval,    // how often the failure counters are reset while the circuit is Closed
-		Timeout:     cfg.Timeout,     //
-		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			// Error rate is better for high-volume systems because it reflects overall service health.
-			if cfg.ErrorRate > 0 {
-				if counts.Requests >= cfg.MinRequests {
-					failureRate := float64(counts.TotalFailures) / float64(counts.Requests)
-					return failureRate >= cfg.ErrorRate
-				}
-				return false
-			}
-			// Consecutive failures is useful for low-traffic services.
-			return counts.ConsecutiveFailures >= cfg.MaxFails
-		},
-		IsSuccessful: func(err error) bool {
-			if err == nil {
-				return true
-			}
-			if cfg.IsSuccessful != nil {
-				return cfg.IsSuccessful(err)
-			}
-			return false
-		},
-		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
-			var stateVal int64
-			switch to {
-			case gobreaker.StateClosed:
-				stateVal = CBGaugeClosed
-			case gobreaker.StateHalfOpen:
-				stateVal = CBGaugeHalfOpen
-			case gobreaker.StateOpen:
-				stateVal = CBGaugeOpen
-			}
-			RecordCircuitBreakerState(context.Background(), name, stateVal)
+// newCircuitBreaker creates a standardized failsafe-go CircuitBreaker for the platform.
+func newCircuitBreaker(cfg CircuitBreakerConfig) *CircuitBreaker {
+	builder := circuitbreaker.Builder[any]()
 
-			if cfg.OnStateChange != nil {
-				cfg.OnStateChange(name, from, to)
-			}
-		},
+	if cfg.MaxFails > 0 {
+		builder.WithFailureThreshold(uint(cfg.MaxFails))
+	} else if cfg.MinRequests > 0 {
+		builder.WithFailureThresholdRatio(uint(cfg.MinRequests), 10)
+	}
+
+	if cfg.Timeout > 0 {
+		builder.WithDelay(cfg.Timeout)
+	}
+
+	if cfg.IsSuccessful != nil {
+		builder.HandleIf(func(result any, err error) bool {
+			return err != nil && !cfg.IsSuccessful(err)
+		})
+	}
+
+	builder.OnStateChanged(func(e circuitbreaker.StateChangedEvent) {
+		var stateVal int64
+		switch e.NewState {
+		case circuitbreaker.ClosedState:
+			stateVal = CBGaugeClosed
+		case circuitbreaker.HalfOpenState:
+			stateVal = CBGaugeHalfOpen
+		case circuitbreaker.OpenState:
+			stateVal = CBGaugeOpen
+		}
+		RecordCircuitBreakerState(context.Background(), cfg.Name, stateVal)
+
+		if cfg.OnStateChange != nil {
+			cfg.OnStateChange(cfg.Name, e.OldState, e.NewState)
+		}
 	})
+
+	return &CircuitBreaker{cb: builder.Build()}
 }
 
 // dbIsSuccessfulPolicy: terminal business errors + safe ACID transaction failures
@@ -163,9 +178,9 @@ func kafkaEgressIsSuccessful(err error) bool {
 // per physical connection pool (merchants-global + one-per-shard RW + one-per-shard RO).
 type DBCircuitBreakers struct {
 	mu         sync.RWMutex
-	merchants  *gobreaker.CircuitBreaker
-	shardsRW   map[string]*gobreaker.CircuitBreaker
-	shardsRO   map[string]*gobreaker.CircuitBreaker
+	merchants  *CircuitBreaker
+	shardsRW   map[string]*CircuitBreaker
+	shardsRO   map[string]*CircuitBreaker
 	isTerminal IsTerminalFunc
 	cbConfig   CircuitBreakerConfig // Base settings for these pools
 }
@@ -174,8 +189,8 @@ type DBCircuitBreakers struct {
 // All breakers are pre-created at startup for deterministic observability.
 func NewDBCircuitBreakers(merchantPoolName string, shardIDs []string, isTerminal IsTerminalFunc, cbConfig CircuitBreakerConfig) *DBCircuitBreakers {
 	reg := &DBCircuitBreakers{
-		shardsRW:   make(map[string]*gobreaker.CircuitBreaker, len(shardIDs)),
-		shardsRO:   make(map[string]*gobreaker.CircuitBreaker, len(shardIDs)),
+		shardsRW:   make(map[string]*CircuitBreaker, len(shardIDs)),
+		shardsRO:   make(map[string]*CircuitBreaker, len(shardIDs)),
 		isTerminal: isTerminal,
 		cbConfig:   cbConfig,
 	}
@@ -200,8 +215,8 @@ func NewDBCircuitBreakers(merchantPoolName string, shardIDs []string, isTerminal
 	return reg
 }
 
-// newDBBreaker builds a gobreaker with the shared DB success policy + metrics.
-func (r *DBCircuitBreakers) newDBBreaker(name string) *gobreaker.CircuitBreaker {
+// newDBBreaker builds a circuitbreaker with the shared DB success policy + metrics.
+func (r *DBCircuitBreakers) newDBBreaker(name string) *CircuitBreaker {
 	cfg := r.cbConfig
 	cfg.Name = name
 	cfg.IsSuccessful = dbIsSuccessfulPolicy(r.isTerminal)
@@ -210,32 +225,32 @@ func (r *DBCircuitBreakers) newDBBreaker(name string) *gobreaker.CircuitBreaker 
 }
 
 // recordBreakerStateChange records state gauge and open/half-open counters.
-func recordBreakerStateChange(name string, from gobreaker.State, to gobreaker.State) {
+func recordBreakerStateChange(name string, from circuitbreaker.State, to circuitbreaker.State) {
 	var stateVal int64
 	switch to {
-	case gobreaker.StateClosed:
+	case circuitbreaker.ClosedState:
 		stateVal = CBGaugeClosed
-	case gobreaker.StateHalfOpen:
+	case circuitbreaker.HalfOpenState:
 		stateVal = CBGaugeHalfOpen
-	case gobreaker.StateOpen:
+	case circuitbreaker.OpenState:
 		stateVal = CBGaugeOpen
 	}
 	RecordCircuitBreakerState(context.Background(), name, stateVal)
-	if to == gobreaker.StateOpen {
+	if to == circuitbreaker.OpenState {
 		RecordCircuitBreakerOpen(context.Background(), name)
-		if from == gobreaker.StateHalfOpen {
+		if from == circuitbreaker.HalfOpenState {
 			RecordCircuitBreakerHalfOpenFailure(context.Background(), name)
 		}
 	}
 }
 
 // Merchants returns the single breaker for the global merchants pool.
-func (r *DBCircuitBreakers) Merchants() *gobreaker.CircuitBreaker {
+func (r *DBCircuitBreakers) Merchants() *CircuitBreaker {
 	return r.merchants
 }
 
 // ShardRW returns the single breaker for the given shard's RW pool.
-func (r *DBCircuitBreakers) ShardRW(shardID string) *gobreaker.CircuitBreaker {
+func (r *DBCircuitBreakers) ShardRW(shardID string) *CircuitBreaker {
 	r.mu.RLock()
 	cb, ok := r.shardsRW[shardID]
 	r.mu.RUnlock()
@@ -254,7 +269,7 @@ func (r *DBCircuitBreakers) ShardRW(shardID string) *gobreaker.CircuitBreaker {
 }
 
 // ShardRO returns the single breaker for the given shard's RO pool.
-func (r *DBCircuitBreakers) ShardRO(shardID string) *gobreaker.CircuitBreaker {
+func (r *DBCircuitBreakers) ShardRO(shardID string) *CircuitBreaker {
 	r.mu.RLock()
 	cb, ok := r.shardsRO[shardID]
 	r.mu.RUnlock()
@@ -274,7 +289,7 @@ func (r *DBCircuitBreakers) ShardRO(shardID string) *gobreaker.CircuitBreaker {
 
 // KafkaCircuitBreaker wraps the single Kafka egress breaker for outbox-relay.
 type KafkaCircuitBreaker struct {
-	cb *gobreaker.CircuitBreaker
+	cb *CircuitBreaker
 }
 
 // NewKafkaCircuitBreaker returns the singleton Kafka egress breaker.
@@ -293,5 +308,5 @@ func NewKafkaCircuitBreaker(name string, cbConfig CircuitBreakerConfig) *KafkaCi
 	}
 }
 
-// Breaker returns the underlying gobreaker instance.
-func (k *KafkaCircuitBreaker) Breaker() *gobreaker.CircuitBreaker { return k.cb }
+// Breaker returns the underlying failsafe-go circuitbreaker instance.
+func (k *KafkaCircuitBreaker) Breaker() *CircuitBreaker { return k.cb }

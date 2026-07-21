@@ -7,7 +7,7 @@ import (
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
-	"github.com/sony/gobreaker"
+	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 )
 
 // retryBoundaryConfig is the single retry budget for Flow A handlers.
@@ -30,7 +30,7 @@ func mapHTTPError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
+	if errors.Is(err, circuitbreaker.ErrOpen) {
 		return domain.ErrServiceUnavailable
 	}
 	return err

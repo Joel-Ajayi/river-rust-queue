@@ -4,6 +4,9 @@ import (
 	"context"
 	"math/rand/v2"
 	"time"
+
+	"github.com/failsafe-go/failsafe-go"
+	"github.com/failsafe-go/failsafe-go/retrypolicy"
 )
 
 // --- Exponential Backoff with Full Jitter ---
@@ -15,47 +18,25 @@ type RetryConfig struct {
 	MaxDelay   time.Duration
 }
 
-// ExecuteWithJitter executes the given function with Exponential Backoff and Full Jitter (AWS Pattern).
-// isTransientError is a function that returns true ONLY if the error is a mathematically safe, temporary condition (e.g. Deadlock).
-func ExecuteWithJitter(ctx context.Context, cfg RetryConfig, fn func() error) error {
-	var lastErr error
+// NewRetryPolicy builds a failsafe-go RetryPolicy using exponential backoff and jitter.
+func NewRetryPolicy[T any](cfg RetryConfig, isTransient func(error) bool) retrypolicy.RetryPolicy[T] {
+	builder := retrypolicy.Builder[T]().
+		WithMaxRetries(cfg.MaxRetries).
+		WithBackoff(cfg.BaseDelay, cfg.MaxDelay).
+		WithJitterFactor(0.25)
 
-	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
-		// 1. Execute the payment/database operation
-		err := fn()
-		if err == nil {
-			return nil
-		}
-
-		// If we do not have an explicit transient error check, or if the error is NOT transient,
-		if !isTransientError(err) {
-			return err
-		}
-
-		lastErr = err
-		if attempt == cfg.MaxRetries {
-			break
-		}
-
-		// 2. Safely calculate exponential backoff without integer overflow risks
-		jitterDelay := CalculateJitterBackoff(attempt, cfg.BaseDelay, cfg.MaxDelay)
-
-		// 4. Memory-safe non-leaking timer allocation
-		if jitterDelay <= 0 {
-			jitterDelay = cfg.BaseDelay
-		}
-
-		timer := time.NewTimer(jitterDelay)
-		select {
-		case <-ctx.Done():
-			timer.Stop() // Clean up timer instantly to prevent memory leaks
-			return ctx.Err()
-		case <-timer.C:
-			// Timer fired cleanly, continue loop to next attempt
-		}
+	if isTransient != nil {
+		builder.HandleIf(func(result T, err error) bool {
+			return err != nil && isTransient(err)
+		})
 	}
+	return builder.Build()
+}
 
-	return lastErr
+// ExecuteWithJitter executes the given function with Exponential Backoff and Full Jitter using failsafe-go.
+func ExecuteWithJitter(ctx context.Context, cfg RetryConfig, fn func() error) error {
+	policy := NewRetryPolicy[any](cfg, isTransientError)
+	return failsafe.NewExecutor[any](policy).WithContext(ctx).Run(fn)
 }
 
 // CalculateJitterBackoff calculates the exponential backoff with full jitter for a given attempt.

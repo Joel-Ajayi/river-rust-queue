@@ -7,12 +7,11 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/port"
-	"github.com/sony/gobreaker"
 )
 
 type eventPublisherCB struct {
 	next port.EventPublisher
-	cb   *gobreaker.CircuitBreaker
+	cb   *platform.CircuitBreaker
 }
 
 func NewEventPublisherCB(next port.EventPublisher, kafkaCB *platform.KafkaCircuitBreaker) port.EventPublisher {

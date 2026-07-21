@@ -10,7 +10,6 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/port"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
-	"github.com/sony/gobreaker"
 )
 
 // mockJobStore implements port.JobStore.
@@ -88,7 +87,7 @@ func TestJobStoreCB_TerminalIsSuccess(t *testing.T) {
 			t.Fatalf("call %d: want ErrJobNotFound, got %v", i, err)
 		}
 	}
-	if got := cbs.ShardRW("shard-a").State(); got != gobreaker.StateClosed {
+	if got := cbs.ShardRW("shard-a").State(); got != platform.CBStateClosed {
 		t.Fatalf("terminal errors must not trip; want Closed, got %v", got)
 	}
 }
@@ -106,7 +105,7 @@ func TestJobStoreCB_TripsAfterMaxFails(t *testing.T) {
 	for i := 0; i < 3; i++ { // MaxFails=3
 		_, _ = cb.GetJob(context.Background(), "shard-a", "j1")
 	}
-	if got := cbs.ShardRO("shard-a").State(); got != gobreaker.StateOpen {
+	if got := cbs.ShardRO("shard-a").State(); got != platform.CBStateOpen {
 		t.Fatalf("want Open after MaxFails infra errors, got %v", got)
 	}
 }
@@ -127,10 +126,10 @@ func TestJobStoreCB_PerShardIsolation(t *testing.T) {
 	for i := 0; i < 3; i++ { // MaxFails=3
 		_, _ = cb.GetJob(context.Background(), "shard-a", "j1")
 	}
-	if cbs.ShardRO("shard-a").State() != gobreaker.StateOpen {
+	if cbs.ShardRO("shard-a").State() != platform.CBStateOpen {
 		t.Fatal("shard-a should be Open")
 	}
-	if cbs.ShardRO("shard-b").State() != gobreaker.StateClosed {
+	if cbs.ShardRO("shard-b").State() != platform.CBStateClosed {
 		t.Fatal("shard-b must remain Closed")
 	}
 	job, err := cb.GetJob(context.Background(), "shard-b", "j2")

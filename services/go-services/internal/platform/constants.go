@@ -3,7 +3,7 @@ package platform
 import (
 	"time"
 
-	"github.com/sony/gobreaker"
+	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 )
 
 type AggregateType string
@@ -63,9 +63,9 @@ const (
 	ComponentFormatGlobal = "%s_global"
 
 	// Circuit Breaker State Values
-	CBStateClosed   = gobreaker.StateClosed
-	CBStateHalfOpen = gobreaker.StateHalfOpen
-	CBStateOpen     = gobreaker.StateOpen
+	CBStateClosed   = circuitbreaker.ClosedState
+	CBStateHalfOpen = circuitbreaker.HalfOpenState
+	CBStateOpen     = circuitbreaker.OpenState
 
 	// Resiliency Defaults
 
