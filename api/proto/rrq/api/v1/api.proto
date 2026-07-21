@@ -7,6 +7,7 @@ package rrq.api.v1;
 message AuthTokenResponse {
   string token      = 1;
   int32  expires_in = 2;   // seconds until expiry
+  string tier       = 3;
 }
 
 // ---- Transfers ----
@@ -84,6 +85,57 @@ message GetBalanceResponse {
   string wallet_id = 1;
   int64  balance   = 2;
   string currency  = 3;
+}
+
+// ---- Merchants ----
+
+message CreateMerchantRequest {
+  string name           = 1;
+  string webhook_url    = 2;
+  string webhook_secret = 3;
+  string tier           = 4;
+}
+
+message CreateMerchantResponse {
+  string merchant_id = 1;
+  string api_key     = 2;
+  string shard_id    = 3;
+}
+
+// ---- Wallets ----
+
+message CreateWalletRequest {
+  string currency = 1;
+}
+
+message CreateWalletResponse {
+  string wallet_id = 1;
+  string currency  = 2;
+}
+
+// ---- Deposits ----
+
+message DepositRequest {
+  int64  amount   = 1;
+  string currency = 2;
+}
+
+message DepositResponse {
+  string job_id = 1;
+  string status = 2;
+}
+
+// ---- Admin ----
+
+message ReplayDLQRequest {
+  string shard_id = 1;
+  string source   = 2;
+  int32  limit    = 3;
+}
+
+message ReplayDLQResponse {
+  int32  replayed_count = 1;
+  string shard_id       = 2;
 }
 
 // ---- Errors ----

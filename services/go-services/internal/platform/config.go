@@ -1,7 +1,8 @@
 package platform
 
 import (
-	"crypto/rsa"
+	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -11,10 +12,27 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+const (
+	DefaultKeyID  = "default"
+	ShardIDPrefix = "shard-"
+)
+
+var (
+	ErrMissingMerchantsDBURI = errors.New("MERCHANTS_DB_URI is required")
+	ErrNoShardURIs           = errors.New("at least one SHARD_*_URI is required")
+	ErrNoJWTSigningKey       = errors.New("JWT_SIGNING_KEYS or JWT_SIGNING_KEY is required")
+	ErrActiveKeyIDNotFound   = errors.New("JWT_ACTIVE_KEY_ID not found in signing keys")
+	ErrUnknownShard          = errors.New("unknown shard")
+	ErrCBMerchantsOpen       = errors.New("merchants circuit breaker is open")
+	ErrCBRWOpen              = errors.New("shard RW circuit breaker is open")
+	ErrCBROpen               = errors.New("shard RO circuit breaker is open")
+	ErrReconciliationHeld    = errors.New("reconciliation lock is already held by another runner")
+)
+
 // Config holds environment-sourced configuration for an RRQ service.
 type Config struct {
 	MerchantsDBURI string
-	ShardURIs      map[string]string // e.g. {"shard-a": "postgres://..."}
+	ShardURIs      map[string]string
 
 	KafkaBrokers     []string
 	KafkaTopicJobs   string
@@ -23,7 +41,7 @@ type Config struct {
 	RedisDataHost string
 	RedisDataPort string
 
-	JWTSigningKeys map[string]*rsa.PrivateKey
+	JWTSigningKeys map[string]ed25519.PrivateKey
 	JWTActiveKeyID string
 
 	HTTPPort    int
@@ -31,24 +49,24 @@ type Config struct {
 
 	LogLevel        string
 	TraceSampleRate float64
-	
-	BcryptCost int
 
 	KubernetesNamespace string
 
-	KongConfigAPIVersion   string
-	KongAPIGroup           string
-	KongAPIVersion         string
-	KongResourceConsumers  string
-	KongResourcePlugins    string
+	KongConfigAPIVersion    string
+	KongAPIGroup            string
+	KongAPIVersion          string
+	KongResourceConsumers   string
+	KongResourcePlugins     string
 	KongResourceCredentials string
-	KongKindConsumer       string
-	KongKindPlugin         string
-	KongKindCredential     string
-	KongPluginRateLimiting string
-	KongPluginPolicy       string
-	KongCredentialTypeJWT  string
-	KongJWTAlgorithm       string
+	KongKindConsumer        string
+	KongKindPlugin          string
+	KongKindCredential      string
+	KongPluginRateLimiting  string
+	KongPluginPolicy        string
+	KongCredentialTypeJWT   string
+	KongJWTAlgorithm        string
+
+	PlatformAdminKey string
 }
 
 // LoadConfig reads configuration from env vars (injected by K8s ConfigMap + Secret).
@@ -58,21 +76,20 @@ func LoadConfig() (*Config, error) {
 		ShardURIs:      make(map[string]string),
 
 		KafkaBrokers:     strings.Split(envOrDefault("KAFKA_BROKERS", "localhost:9092"), ","),
-		KafkaTopicJobs:   envOrDefault("KAFKA_TOPIC_JOBS", "jobs"),
-		KafkaTopicNotify: envOrDefault("KAFKA_TOPIC_NOTIFY", "notify"),
+		KafkaTopicJobs:   envOrDefault("KAFKA_TOPIC_JOBS", TopicJobs),
+		KafkaTopicNotify: envOrDefault("KAFKA_TOPIC_NOTIFY", TopicNotify),
 
 		RedisDataHost: envOrDefault("REDIS_DATA_HOST", "localhost"),
 		RedisDataPort: envOrDefault("REDIS_DATA_PORT", "6379"),
 
-		JWTSigningKeys: parseJWTKeys(os.Getenv("JWT_SIGNING_KEYS"), os.Getenv("JWT_SIGNING_KEY")),
-		JWTActiveKeyID: envOrDefault("JWT_ACTIVE_KEY_ID", "default"),
+		JWTSigningKeys: parseJWTKeys(os.Getenv("JWT_SIGNING_KEYS")),
+		JWTActiveKeyID: envOrDefault("JWT_ACTIVE_KEY_ID", DefaultKeyID),
 
 		HTTPPort:    envOrDefaultInt("HTTP_PORT", 8080),
 		MetricsPort: envOrDefaultInt("METRICS_PORT", 9090),
 
 		LogLevel:        envOrDefault("LOG_LEVEL", "info"),
 		TraceSampleRate: envOrDefaultFloat("TRACE_SAMPLE_RATE", 1.0),
-		BcryptCost:      envOrDefaultInt("BCRYPT_COST", 12),
 
 		KubernetesNamespace: envOrDefault("KUBERNETES_NAMESPACE", "rrq"),
 
@@ -86,29 +103,31 @@ func LoadConfig() (*Config, error) {
 		KongKindPlugin:          envOrDefault("KONG_KIND_PLUGIN", "KongPlugin"),
 		KongKindCredential:      envOrDefault("KONG_KIND_CREDENTIAL", "KongCredential"),
 		KongPluginRateLimiting:  envOrDefault("KONG_PLUGIN_RATE_LIMITING", "rate-limiting"),
-		KongPluginPolicy:        envOrDefault("KONG_PLUGIN_POLICY", "local"),
+		KongPluginPolicy:        envOrDefault("KONG_PLUGIN_POLICY", "redis"),
 		KongCredentialTypeJWT:   envOrDefault("KONG_CREDENTIAL_TYPE_JWT", "jwt"),
 		KongJWTAlgorithm:        envOrDefault("KONG_JWT_ALGORITHM", "RS256"),
+
+		PlatformAdminKey: os.Getenv("RRQ_PLATFORM_KEY"),
 	}
 
-	if uri := os.Getenv("SHARD_A_URI"); uri != "" {
-		cfg.ShardURIs["shard-a"] = uri
-	}
-	if uri := os.Getenv("SHARD_B_URI"); uri != "" {
-		cfg.ShardURIs["shard-b"] = uri
+	// dynamically load shard URIs from env vars
+	for _, shard := range strings.Split(DefaultShardLetters, "") {
+		if uri := os.Getenv("SHARD_" + shard + "_URI"); uri != "" {
+			cfg.ShardURIs[ShardIDPrefix+strings.ToLower(shard)] = uri
+		}
 	}
 
 	if cfg.MerchantsDBURI == "" {
-		return nil, fmt.Errorf("MERCHANTS_DB_URI is required")
+		return nil, fmt.Errorf("%w", ErrMissingMerchantsDBURI)
 	}
 	if len(cfg.ShardURIs) == 0 {
-		return nil, fmt.Errorf("at least one SHARD_*_URI is required")
+		return nil, fmt.Errorf("%w", ErrNoShardURIs)
 	}
 	if len(cfg.JWTSigningKeys) == 0 {
-		return nil, fmt.Errorf("JWT_SIGNING_KEYS or JWT_SIGNING_KEY is required")
+		return nil, fmt.Errorf("%w", ErrNoJWTSigningKey)
 	}
 	if _, ok := cfg.JWTSigningKeys[cfg.JWTActiveKeyID]; !ok {
-		return nil, fmt.Errorf("JWT_ACTIVE_KEY_ID '%s' not found in signing keys", cfg.JWTActiveKeyID)
+		return nil, fmt.Errorf("%w: kid=%s", ErrActiveKeyIDNotFound, cfg.JWTActiveKeyID)
 	}
 
 	return cfg, nil
@@ -117,26 +136,23 @@ func LoadConfig() (*Config, error) {
 func (c *Config) RedisAddr() string             { return c.RedisDataHost + ":" + c.RedisDataPort }
 func (c *Config) DefaultTimeout() time.Duration { return 30 * time.Second }
 
-// parseJWTKeys parses a comma-separated list of kid:key pairs, falling back to a single key.
-func parseJWTKeys(keysEnv, singleKeyEnv string) map[string]*rsa.PrivateKey {
-	keys := make(map[string]*rsa.PrivateKey)
+// parseJWTKeys parses a comma-separated list of kid:key pairs.
+func parseJWTKeys(keysEnv string) map[string]ed25519.PrivateKey {
+	keys := make(map[string]ed25519.PrivateKey)
 	if keysEnv != "" {
 		for _, pair := range strings.Split(keysEnv, ",") {
 			parts := strings.SplitN(pair, ":", 2)
-			if len(parts) == 2 {
-				kid := strings.TrimSpace(parts[0])
-				keyData := strings.TrimSpace(parts[1])
-				keyData = strings.ReplaceAll(keyData, "\\n", "\n")
-				if key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(keyData)); err == nil {
-					keys[kid] = key
-				}
+			if len(parts) != 2 {
+				continue
 			}
-		}
-	}
-	if len(keys) == 0 && singleKeyEnv != "" {
-		singleKeyEnv = strings.ReplaceAll(singleKeyEnv, "\\n", "\n")
-		if key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(singleKeyEnv)); err == nil {
-			keys["default"] = key
+			kid := strings.TrimSpace(parts[0])
+			keyData := strings.TrimSpace(parts[1])
+			keyData = strings.ReplaceAll(keyData, "\\n", "\n")
+			if key, err := jwt.ParseEdPrivateKeyFromPEM([]byte(keyData)); err != nil {
+				fmt.Fprintf(os.Stderr, "WARN: failed to parse JWT signing key %q: %v\n", kid, err)
+			} else if edKey, ok := key.(ed25519.PrivateKey); ok {
+				keys[kid] = edKey
+			}
 		}
 	}
 	return keys
