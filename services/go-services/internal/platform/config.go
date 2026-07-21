@@ -38,8 +38,9 @@ type Config struct {
 	KafkaTopicJobs   string
 	KafkaTopicNotify string
 
-	RedisDataHost string
-	RedisDataPort string
+	RedisDataHost     string
+	RedisDataPort     string
+	RedisDataPassword string
 
 	JWTSigningKeys map[string]ed25519.PrivateKey
 	JWTActiveKeyID string
@@ -79,8 +80,9 @@ func LoadConfig() (*Config, error) {
 		KafkaTopicJobs:   envOrDefault("KAFKA_TOPIC_JOBS", TopicJobs),
 		KafkaTopicNotify: envOrDefault("KAFKA_TOPIC_NOTIFY", TopicNotify),
 
-		RedisDataHost: envOrDefault("REDIS_DATA_HOST", "localhost"),
-		RedisDataPort: envOrDefault("REDIS_DATA_PORT", "6379"),
+		RedisDataHost:     envOrDefault("REDIS_DATA_HOST", "localhost"),
+		RedisDataPort:     envOrDefault("REDIS_DATA_PORT", "6379"),
+		RedisDataPassword: os.Getenv("REDIS_DATA_PASSWORD"),
 
 		JWTSigningKeys: parseJWTKeys(os.Getenv("JWT_SIGNING_KEYS")),
 		JWTActiveKeyID: envOrDefault("JWT_ACTIVE_KEY_ID", DefaultKeyID),

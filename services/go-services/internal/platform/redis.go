@@ -7,9 +7,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// NewRedisClient connects to the data Redis instance.
-func NewRedisClient(ctx context.Context, addr string, log *zap.Logger) (*redis.Client, error) {
-	client := redis.NewClient(&redis.Options{Addr: addr})
+// NewRedisClient connects to the data Redis instance with optional password authentication.
+func NewRedisClient(ctx context.Context, addr string, password string, log *zap.Logger) (*redis.Client, error) {
+	client := redis.NewClient(&redis.Options{
+		Addr:     addr,
+		Password: password,
+	})
 	if err := client.Ping(ctx).Err(); err != nil {
 		return nil, err
 	}
