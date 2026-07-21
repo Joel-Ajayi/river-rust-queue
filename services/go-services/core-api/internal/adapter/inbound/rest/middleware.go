@@ -8,20 +8,23 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
 )
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// a. Extract merchantID from Kong's injected header
-		merchantID := r.Header.Get(HeaderKongConsumerCustomID)
+		// Extract merchantID and tier from Envoy Gateway's injected headers (claimsToHeaders)
+		merchantID := r.Header.Get(HeaderMerchantID)
 		if merchantID == "" {
 			writeError(w, platform.ErrUnauthorized(domain.ErrMissingConsumerIdentity))
 			return
 		}
+		tier := r.Header.Get(HeaderMerchantTier)
 
-		// d. Trust Kong's authentication and bypass DB lookup
+		// Trust Envoy Gateway's edge JWT authentication
 		principal := domain.Principal{
 			MerchantID: merchantID,
+			Tier:       tier,
 			Status:     platform.MerchantStatusActive,
 		}
 
@@ -59,3 +62,23 @@ func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
 }
+
+func (s *Server) withLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+
+		logger := platform.LoggerWithTrace(r.Context(), s.log)
+		route := r.Pattern
+		if route == "" {
+			route = r.URL.Path
+		}
+		logger.Info(platform.LogEventHTTPRequestHandled,
+			zap.String(platform.LogFieldMethod, r.Method),
+			zap.String(platform.LogFieldPath, route),
+			zap.Int(platform.LogFieldStatus, rec.status),
+		)
+	})
+}
+
+

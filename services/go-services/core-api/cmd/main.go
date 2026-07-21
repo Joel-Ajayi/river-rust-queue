@@ -33,8 +33,8 @@ func main() {
 	}
 	defer log.Sync()
 
-	if err := platform.InitTelemetry(platform.ServiceNameAPIGateway); err != nil {
-		log.Panic("Failed to initialize telemetry", zap.Error(err))
+	if err := platform.InitTelemetry(platform.ServiceNameCoreAPI); err != nil {
+		log.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -43,7 +43,7 @@ func main() {
 	// Infrastructure
 	pools, err := platform.NewShardPools(ctx, cfg, log)
 	if err != nil {
-		log.Panic("Failed to initialize PostgreSQL pools", zap.String(platform.LogFieldEvent, platform.LogEventStartupFailed), zap.Error(err))
+		log.Panic(platform.LogEventPostgresInitFailed, zap.Error(err))
 	}
 	defer pools.Close()
 
@@ -61,32 +61,43 @@ func main() {
 	)
 
 	// Driven adapters (outbound)
-	var merchantDir port.MerchantDirectory = postgres.NewMerchantDirectory(pools)
+	mDirImpl := postgres.NewMerchantDirectory(pools)
+	var merchantDir port.MerchantDirectory = mDirImpl
+	var merchantStore port.MerchantStore = mDirImpl
 	merchantDir = resilience.NewMerchantDirectoryCB(merchantDir, cbs)
 	merchantDir = observability.NewMerchantDirectoryMetrics(merchantDir)
+	merchantDir = observability.NewMerchantDirectoryTraces(merchantDir) // trace decorator
 
-	var walletDir port.WalletDirectory = postgres.NewWalletDirectory(pools)
+	wDirImpl := postgres.NewWalletDirectory(pools)
+	var walletDir port.WalletDirectory = wDirImpl
+	var walletStore port.WalletStore = wDirImpl
 	walletDir = resilience.NewWalletDirectoryCB(walletDir, cbs)
 	walletDir = observability.NewWalletDirectoryMetrics(walletDir)
+	walletDir = observability.NewWalletDirectoryTraces(walletDir) // trace decorator
 
 	var jobStore port.JobStore = postgres.NewJobStore(pools)
 	jobStore = resilience.NewJobStoreCB(jobStore, cbs)
 	jobStore = observability.NewJobStoreMetrics(jobStore)
+	jobStore = observability.NewJobStoreTraces(jobStore) // trace decorator
 
 	// Core use-cases
-	authSvc := app.NewAuthService(merchantDir)
+	dlqReplayer := postgres.NewDLQReplayer(pools, nil, log)
+	adminSvc := app.NewAdminService(dlqReplayer)
 	jobSvc := app.NewJobService(merchantDir, jobStore)
+	merchantSvc := app.NewMerchantService(merchantStore, pools.HashRing())
+	walletSvc := app.NewWalletService(merchantDir, walletDir, walletStore, jobStore, platform.NewJobID)
 	transferSvc := app.NewTransferService(merchantDir, walletDir, jobStore, platform.NewJobID)
 	var transferSubmitter port.TransferSubmitter = transferSvc
 	transferSubmitter = observability.NewTransferServiceMetrics(transferSubmitter)
+	transferSubmitter = observability.NewTransferSubmitterTraces(transferSubmitter) // trace decorator
 
 	// Driving adapter (inbound)
 	ready := func(ctx context.Context) error { return readiness(ctx, pools, cbs) }
-	srv := rest.NewServer(cfg.HTTPPort, cfg.JWTSigningKeys, cfg.JWTActiveKeyID, authSvc, transferSubmitter, jobSvc, ready, log)
+	srv := rest.NewServer(cfg.HTTPPort, cfg.JWTSigningKeys, cfg.JWTActiveKeyID, transferSubmitter, jobSvc, merchantSvc, walletSvc, adminSvc, ready, log)
 
 	go func() {
 		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
-			log.Panic("Server encountered fatal error", zap.String(platform.LogFieldEvent, platform.LogEventServerFailed), zap.Error(err))
+			log.Panic(platform.LogEventServerFatalError, zap.Error(err))
 		}
 	}()
 
@@ -96,11 +107,11 @@ func main() {
 	<-sigCh  // Blocker until signal is received
 	cancel() // Trigger global context cancellation
 
-	log.Info("Received shutdown signal", zap.String(platform.LogFieldEvent, platform.LogEventShutdownSignalReceived))
+	log.Info(platform.LogEventShutdownSignalReceived)
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), domain.ServerShutdownTimeout)
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error("Failed to shutdown gracefully", zap.String(platform.LogFieldEvent, platform.LogEventShutdownFailed), zap.Error(err))
+		log.Error(platform.LogEventShutdownFailed, zap.Error(err))
 	}
 	_ = platform.ShutdownTelemetry(shutdownCtx)
 
@@ -114,14 +125,14 @@ func readiness(ctx context.Context, pools *platform.ShardPools, cbs *platform.DB
 	}
 	// Check circuit breaker state - if any CB is open, we're not ready
 	if cbs.Merchants().State() == gobreaker.StateOpen {
-		return fmt.Errorf("merchants circuit breaker is open")
+		return fmt.Errorf("%w", platform.ErrCBMerchantsOpen)
 	}
 	for _, shardID := range pools.GetAvailableShardIDs() {
 		if cbs.ShardRW(shardID).State() == gobreaker.StateOpen {
-			return fmt.Errorf("shard %s RW circuit breaker is open", shardID)
+			return fmt.Errorf("%w: %s", platform.ErrCBRWOpen, shardID)
 		}
 		if cbs.ShardRO(shardID).State() == gobreaker.StateOpen {
-			return fmt.Errorf("shard %s RO circuit breaker is open", shardID)
+			return fmt.Errorf("%w: %s", platform.ErrCBROpen, shardID)
 		}
 	}
 	return nil

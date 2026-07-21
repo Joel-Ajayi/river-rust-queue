@@ -2,7 +2,7 @@ package rest
 
 import (
 	"context"
-	"crypto/rsa"
+	"crypto/ed25519"
 	"net/http"
 	"strconv"
 
@@ -17,30 +17,36 @@ import (
 type ReadinessFunc func(ctx context.Context) error
 type Server struct {
 	httpSrv        *http.Server
-	auth           port.Authenticator
 	transfers      port.TransferSubmitter
 	jobs           port.JobReader
-	jwtKeys        map[string]*rsa.PrivateKey
+	merchants      port.MerchantUseCase
+	wallets        port.WalletUseCase
+	admin          port.AdminUseCase
+	jwtKeys        map[string]ed25519.PrivateKey
 	jwtActiveKeyID string
 	ready          ReadinessFunc
 	log            *zap.Logger
-	bulkhead       *semaphore.Weighted // Bulkhead isolation (Netflix Pattern)
+	bulkhead       *semaphore.Weighted // Bulkhead isolation (Netflix Pattern).
 }
 
 func NewServer(
 	httpPort int,
-	jwtKeys map[string]*rsa.PrivateKey,
+	jwtKeys map[string]ed25519.PrivateKey,
 	jwtActiveKeyID string,
-	auth port.Authenticator,
 	transfers port.TransferSubmitter,
 	jobs port.JobReader,
+	merchants port.MerchantUseCase,
+	wallets port.WalletUseCase,
+	admin port.AdminUseCase,
 	ready ReadinessFunc,
 	log *zap.Logger,
 ) *Server {
 	s := &Server{
-		auth:           auth,
 		transfers:      transfers,
 		jobs:           jobs,
+		merchants:      merchants,
+		wallets:        wallets,
+		admin:          admin,
 		jwtKeys:        jwtKeys,
 		jwtActiveKeyID: jwtActiveKeyID,
 		ready:          ready,
@@ -70,13 +76,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Start begins serving and blocks until the server stops.
 func (s *Server) Start() error {
-	s.log.Info("Starting API Gateway server", zap.String(platform.LogFieldEvent, platform.LogEventServerStarted), zap.String(platform.LogFieldAddr, s.httpSrv.Addr))
+	s.log.Info(platform.LogEventServerStarted, zap.String(platform.LogFieldAddr, s.httpSrv.Addr))
 	return s.httpSrv.ListenAndServe()
 }
 
 // Shutdown gracefully drains in-flight requests.
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.log.Info("Shutting down API Gateway server", zap.String(platform.LogFieldEvent, platform.LogEventServerShutdown))
+	s.log.Info(platform.LogEventServerShutdown)
 	return s.httpSrv.Shutdown(ctx)
 }
 
@@ -84,10 +90,16 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// Health (no auth).
 	mux.HandleFunc("GET "+platform.APIHealthPath, s.handleHealth)
 	mux.HandleFunc("GET "+platform.APIReadyPath, s.handleReady)
+	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 
-	mux.Handle("POST "+platform.APIAuthTokenPath, s.withBulkhead(http.HandlerFunc(s.handleAuthToken)))
+	mux.Handle("POST "+platform.APIAuthTokenPath, s.withLogging(s.withBulkhead(http.HandlerFunc(s.handleAuthToken))))
 
-	mux.Handle("POST "+platform.APITransfersPath, s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleCreateTransfer))))
-	mux.Handle("GET "+platform.APIJobPathPrefix+"{id}", s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleGetJob))))
-	mux.Handle("GET "+platform.APIBalancesPath, s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleGetBalance))))
+	mux.Handle("POST "+platform.APITransfersPath, s.withLogging(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleCreateTransfer)))))
+	mux.Handle("GET "+platform.APIJobPathPrefix+"{id}", s.withLogging(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleGetJob)))))
+	mux.Handle("GET "+platform.APIBalancesPath, s.withLogging(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleGetBalance)))))
+
+	mux.Handle("POST "+platform.APIMerchantsPath, s.withLogging(s.withBulkhead(http.HandlerFunc(s.handleCreateMerchant))))
+	mux.Handle("POST "+platform.APIAdminDLQReplayPath, s.withLogging(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleAdminDLQReplay)))))
+	mux.Handle("POST "+platform.APIWalletsPath, s.withLogging(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleCreateWallet)))))
+	mux.Handle("POST "+platform.APIWalletsPath+"/{wallet_id}/deposit", s.withLogging(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleDeposit)))))
 }

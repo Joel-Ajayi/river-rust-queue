@@ -13,8 +13,6 @@ import (
 )
 
 // handleAuthToken exchanges an API key for a short-lived JWT. Authentication
-// (the API-key lookup) is delegated to the inbound port; minting the JWT is a
-// transport detail and stays here.
 func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get(HeaderAuthorization)
 	if !strings.HasPrefix(authHeader, HeaderValBearer) {
@@ -23,7 +21,7 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	}
 	apiKey := strings.TrimPrefix(authHeader, HeaderValBearer)
 	apiKey = strings.TrimSpace(apiKey)
-	principal, err := s.auth.Authenticate(r.Context(), apiKey)
+	principal, err := s.merchants.Authenticate(r.Context(), apiKey)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -32,24 +30,24 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	claims := jwt.MapClaims{
 		domain.ClaimSub:  principal.MerchantID,
-		domain.ClaimIss:  principal.MerchantID,
+		domain.ClaimIss:  platform.ServiceNameCoreAPI,
 		domain.ClaimIat:  now.Unix(),
 		domain.ClaimExp:  now.Add(domain.JWTExpiration).Unix(),
 		domain.ClaimTier: principal.Tier,
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-	token.Header["kid"] = s.jwtActiveKeyID
-	
+	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
+	token.Header[platform.JWTHeaderKeyID] = s.jwtActiveKeyID
+
 	activeKey, ok := s.jwtKeys[s.jwtActiveKeyID]
 	if !ok {
-		s.log.Error("Active JWT signing key not found in config", zap.String("kid", s.jwtActiveKeyID))
+		s.log.Error(platform.LogEventJWTKeyNotFound, zap.String("kid", s.jwtActiveKeyID))
 		writeError(w, platform.ErrInternal(nil))
 		return
 	}
-	
+
 	signed, err := token.SignedString(activeKey)
 	if err != nil {
-		s.log.Error("Failed to sign JWT token", zap.String(platform.LogFieldEvent, platform.LogEventJWTSigningFailed), zap.Error(err))
+		s.log.Error(platform.LogEventJWTSigningFailed, zap.Error(err))
 		writeError(w, platform.ErrInternal(err))
 		return
 	}
@@ -57,6 +55,35 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	resp := &apiv1.AuthTokenResponse{
 		Token:     signed,
 		ExpiresIn: int32(domain.JWTExpiration.Seconds()),
+		Tier:      principal.Tier,
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleCreateMerchant creates a new merchant and registers them on a shard.
+func (s *Server) handleCreateMerchant(w http.ResponseWriter, r *http.Request) {
+	var req apiv1.CreateMerchantRequest
+	if !decodeProtoBody(w, r, &req) {
+		return
+	}
+
+	merchantID, apiKeyPlain, shardID, err := s.merchants.CreateMerchant(
+		r.Context(),
+		req.Name,
+		req.WebhookUrl,
+		req.WebhookSecret,
+		req.Tier,
+	)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	resp := apiv1.CreateMerchantResponse{
+		MerchantId: merchantID,
+		ApiKey:     apiKeyPlain,
+		ShardId:    shardID,
+	}
+
+	writeJSON(w, http.StatusCreated, &resp)
 }

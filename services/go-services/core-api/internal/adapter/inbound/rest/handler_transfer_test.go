@@ -1,10 +1,12 @@
+//go:build integration
+
 package rest_test
 
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -42,26 +44,31 @@ func setupEnvironment(t *testing.T) (http.Handler, testutil.TestDB, string) {
 	// Use the shared testutil component to provision a merchant and wallets
 	merchantID := testutil.SeedMerchantAndWallets(t, merchantsDB, shardA)
 
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatalf("failed to generate RSA key: %v", err)
+		t.Fatalf("failed to generate Ed25519 key: %v", err)
 	}
 
 	mDir := postgres.NewMerchantDirectory(pools)
 	wDir := postgres.NewWalletDirectory(pools)
 	jobsStore := postgres.NewJobStore(pools)
 	transferSvc := app.NewTransferService(mDir, wDir, jobsStore, platform.NewJobID)
-	authSvc := app.NewAuthService(mDir)
+	merchantSvc := app.NewMerchantService(mDir, pools.HashRing())
+	walletSvc := app.NewWalletService(mDir, wDir, wDir, jobsStore, platform.NewJobID)
+	adminSvc := app.NewAdminService(postgres.NewDLQReplayer(pools, nil, log))
 	jobSvc := app.NewJobService(mDir, jobsStore)
 
 	// Set up the Server with our mocked/ephemeral dependencies
 	server := rest.NewServer(
 		8080,
-		map[string]*rsa.PrivateKey{"default": privateKey},
+		map[string]ed25519.PrivateKey{"default": privateKey},
 		"default",
-		authSvc,
 		transferSvc,
 		jobSvc,
+		merchantSvc,
+		walletSvc,
+		adminSvc,
+		"admin_secret",
 		func(ctx context.Context) error { return nil },
 		zap.NewNop(),
 	)
@@ -69,7 +76,7 @@ func setupEnvironment(t *testing.T) (http.Handler, testutil.TestDB, string) {
 	return server, shardA, merchantID
 }
 
-func TestIdempotency_ConcurrentDuplicates(t *testing.T) {
+func TestTransferHandler_Submit_IdempotencyConcurrentDuplicates(t *testing.T) {
 	t.Parallel()
 	handler, shardA, mID := setupEnvironment(t)
 
@@ -95,7 +102,7 @@ func TestIdempotency_ConcurrentDuplicates(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			req := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(body))
-			req.Header.Set(rest.HeaderKongConsumerCustomID, mID)
+			req.Header.Set(rest.HeaderMerchantID, mID)
 			req.Header.Set(string(rest.HeaderIdempotencyKey), idempKey)
 			req.Header.Set(string(rest.ContentType), string(rest.ApplicationJSON))
 
@@ -148,7 +155,7 @@ func TestIdempotency_ConcurrentDuplicates(t *testing.T) {
 	}
 }
 
-func TestIdempotency_DifferentBody(t *testing.T) {
+func TestTransferHandler_Submit_IdempotencyDifferentBody(t *testing.T) {
 	t.Parallel()
 	handler, _, mID := setupEnvironment(t)
 
@@ -163,7 +170,7 @@ func TestIdempotency_DifferentBody(t *testing.T) {
 
 	// First Request
 	req1 := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(body1))
-	req1.Header.Set(rest.HeaderKongConsumerCustomID, mID)
+	req1.Header.Set(rest.HeaderMerchantID, mID)
 	req1.Header.Set(string(rest.HeaderIdempotencyKey), idempKey)
 	w1 := httptest.NewRecorder()
 	handler.ServeHTTP(w1, req1)
@@ -174,7 +181,7 @@ func TestIdempotency_DifferentBody(t *testing.T) {
 
 	// Second Request with SAME key but DIFFERENT body
 	req2 := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(body2))
-	req2.Header.Set(rest.HeaderKongConsumerCustomID, mID)
+	req2.Header.Set(rest.HeaderMerchantID, mID)
 	req2.Header.Set(string(rest.HeaderIdempotencyKey), idempKey)
 	w2 := httptest.NewRecorder()
 	handler.ServeHTTP(w2, req2)
@@ -184,7 +191,7 @@ func TestIdempotency_DifferentBody(t *testing.T) {
 	}
 }
 
-func TestAuth_InvalidTokens(t *testing.T) {
+func TestTransferHandler_Submit_AuthInvalidTokens(t *testing.T) {
 	t.Parallel()
 	handler, _, mID := setupEnvironment(t)
 	walA := ".01905335-9781-7000-8000-000000000001"
@@ -216,7 +223,7 @@ func TestAuth_InvalidTokens(t *testing.T) {
 	}
 }
 
-func TestValidation_InvalidFields(t *testing.T) {
+func TestTransferHandler_Submit_ValidationInvalidFields(t *testing.T) {
 	t.Parallel()
 	handler, _, mID := setupEnvironment(t)
 
@@ -237,7 +244,7 @@ func TestValidation_InvalidFields(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			body, _ := protojson.Marshal(tt.req)
 			req := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(body))
-			req.Header.Set(rest.HeaderKongConsumerCustomID, mID)
+			req.Header.Set(rest.HeaderMerchantID, mID)
 			req.Header.Set(string(rest.HeaderIdempotencyKey), "idem_val_"+tt.name)
 
 			w := httptest.NewRecorder()
@@ -250,7 +257,7 @@ func TestValidation_InvalidFields(t *testing.T) {
 	}
 }
 
-func TestAuthz_ForeignWalletRejected(t *testing.T) {
+func TestTransferHandler_Submit_AuthzForeignWalletRejected(t *testing.T) {
 	t.Parallel()
 	server, _, mID := setupEnvironment(t)
 	handler := server
@@ -271,7 +278,7 @@ func TestAuthz_ForeignWalletRejected(t *testing.T) {
 	idempKey := "idem_authz_" + mID
 
 	req := httptest.NewRequest(http.MethodPost, platform.APITransfersPath, bytes.NewReader(body))
-	req.Header.Set(rest.HeaderKongConsumerCustomID, mID)
+	req.Header.Set(rest.HeaderMerchantID, mID)
 	req.Header.Set(string(rest.HeaderIdempotencyKey), idempKey)
 	req.Header.Set(string(rest.ContentType), string(rest.ApplicationJSON))
 
@@ -279,13 +286,13 @@ func TestAuthz_ForeignWalletRejected(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	// Since we mock the DB, 'm_999.wal_foreign' does not exist in the merchant's shard (or doesn't belong to them)
-	// Our wallet directory will return ErrWalletNotOwned, mapping to 403.
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 Unprocessable Entity for foreign wallet, got %d: %s", w.Code, w.Body.String())
+	// Our wallet directory will return ErrWalletNotOwned, mapping to 403 Forbidden.
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for foreign wallet, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
-func TestValidation_OversizedPayload(t *testing.T) {
+func TestTransferHandler_Submit_ValidationOversizedPayload(t *testing.T) {
 	t.Parallel()
 	handler, _, mID := setupEnvironment(t)
 
