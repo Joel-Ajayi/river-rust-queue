@@ -24,8 +24,9 @@ const (
 	HeaderValEventStream = "text/event-stream"
 	HeaderConnection     = "Connection"
 	HeaderValKeepAlive   = "keep-alive"
-	HeaderIdempotencyKey       = "Idempotency-Key"
-	HeaderKongConsumerCustomID = "X-Consumer-Custom-Id"
+	HeaderIdempotencyKey = "Idempotency-Key"
+	HeaderMerchantID     = "X-Merchant-Id"
+	HeaderMerchantTier   = "X-Merchant-Tier"
 
 	// Query Params & Path Vars
 	ParamWalletID = "wallet_id"
