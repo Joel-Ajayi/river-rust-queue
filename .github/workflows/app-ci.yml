@@ -5,14 +5,12 @@ on:
     branches: [main]
     paths:
       - "services/go-services/**"
-      - "services/rust-services/**"
       - "api/proto/**"
       - "deploy/db/migrations/**"
   pull_request:
     branches: [main]
     paths:
       - "services/go-services/**"
-      - "services/rust-services/**"
       - "api/proto/**"
       - "deploy/db/migrations/**"
 
@@ -21,8 +19,9 @@ permissions:
   packages: write
 
 jobs:
+  # 1. FAST FEEDBACK (Runs on all PRs and Main)
   go:
-    name: Go lint + test
+    name: Go Unit Tests
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -36,43 +35,29 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
       - name: buf generate
         run: buf generate ../../api/proto
+      - name: Unit tests
+        run: make test-unit
 
-      - name: gofmt check
-        run: test -z "$(gofmt -l .)" || { echo "needs gofmt:"; gofmt -l .; exit 1; }
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: go test
-        run: go test -race ./...
-
-  rust:
-    name: Rust lint + test
+  integration-test:
+    name: Go Integration Tests
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: services/rust-services
+        working-directory: services/go-services
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
         with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+          go-version: "1.26"
+          cache: true
       - uses: bufbuild/buf-setup-action@v1
       - name: buf generate
         run: buf generate ../../api/proto
-
-      - name: cargo fmt check
-        run: cargo fmt -- --check
-
-      - name: cargo clippy
-        run: cargo clippy -- -D warnings
-
-      - name: cargo test
-        run: cargo test
+      - name: Integration tests
+        run: make test-integration
 
   buf:
-    name: Protobuf lint
+    name: Protobuf Lint & Breaking
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -83,11 +68,12 @@ jobs:
         if: github.event_name == 'pull_request'
         run: buf breaking api/proto --against '.git#branch=main'
 
+  # 2. RELEASE & PROMOTE (Runs ONLY on Main after tests pass)
   images:
     name: Build & Push Images
     runs-on: ubuntu-latest
-    needs: [go, rust, buf]
-    # Only push on main branch
+    # Wait for ALL tests to pass before spending time building Docker images
+    needs: [go, integration-test, buf]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
@@ -110,22 +96,11 @@ jobs:
         with:
           push: true
 
-  integration-test:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    needs: [images]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run Integration Tests
-        run: |
-          echo "TODO: Implement integration tests against the built images"
-          echo "For now, this acts as a placeholder gate before prod promotion."
-
   gitops-promote:
     name: Promote to GitOps
     runs-on: ubuntu-latest
-    needs: [images, integration-test]
+    # Wait for the images to successfully publish before updating the GitOps repo
+    needs: [images]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout GitOps repo

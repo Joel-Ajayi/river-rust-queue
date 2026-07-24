@@ -8,7 +8,8 @@ variable "REGISTRY" {
 
 group "default" {
   targets = [
-    "api-gateway-go",
+    "core-api-go",
+    "webhook-echo-go",
     "outbox-relay-go",
     "ledger-worker-go",
     "webhook-worker-go",
@@ -23,10 +24,18 @@ target "base-go" {
   dockerfile = "Dockerfile"
 }
 
-target "api-gateway-go" {
+
+
+target "core-api-go" {
   inherits = ["base-go"]
-  args = { SERVICE = "api-gateway" }
-  tags = ["${REGISTRY}/api-gateway-go:${TAG}"]
+  args = { SERVICE = "core-api" }
+  tags = ["${REGISTRY}/core-api-go:${TAG}"]
+}
+
+target "webhook-echo-go" {
+  inherits = ["base-go"]
+  args = { SERVICE = "webhook-echo" }
+  tags = ["${REGISTRY}/webhook-echo-go:${TAG}"]
 }
 
 target "migrate" {
