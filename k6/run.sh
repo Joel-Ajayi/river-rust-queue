@@ -2,9 +2,10 @@
 # k6/run.sh — Run a k6 scenario with post-test observability verification
 #
 # Usage: ./k6/run.sh <scenario> [--verify] [--no-verify]
+#        ./k6/run.sh seed              # Seed test data (create merchants, wallets, fund)
 #
 # Environment:
-#   BASE_URL   - Target URL (default: http://localhost:8080)
+#   BASE_URL   - Target URL (default: https://api.127.0.0.1.nip.io)
 #   DURATION   - Test duration override (default: per-scenario)
 #   VERIFY     - Run post-test verification (default: true)
 #   PROMETHEUS_URL, JAEGER_URL, ALERTMANAGER_URL - Observability endpoints
@@ -12,8 +13,27 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SCENARIO="${1:-a-sustained-throughput}"
-BASE_URL="${BASE_URL:-http://localhost:8080}"
+
+# ── Check for k6 ──
+if [ "$1" != "seed" ]; then
+  if ! command -v k6 >/dev/null 2>&1; then
+    echo "ERROR: k6 is not installed. Run: make tools-k6"
+    exit 1
+  fi
+fi
+
+# ── Seed command: create merchants, wallets, and pre-fund ──
+if [ "$1" = "seed" ]; then
+  echo "══════════════════════════════════════════════════════════════"
+  echo "  SEED: Creating merchants, wallets, and pre-funding"
+  echo "  Target: ${BASE_URL:-https://api.127.0.0.1.nip.io}"
+  echo "══════════════════════════════════════════════════════════════"
+  node "${ROOT}/k6/seed-test-data.mjs"
+  exit 0
+fi
+
+SCENARIO="${1:-performance/load-sustained}"
+BASE_URL="${BASE_URL:-https://api.127.0.0.1.nip.io}"
 DURATION="${DURATION:-}"
 VERIFY="${VERIFY:-true}"
 
@@ -25,15 +45,15 @@ for arg in "$@"; do
   esac
 done
 
-SCRIPT=$(find "${ROOT}/k6/scenarios" -name "${SCENARIO}.js" | head -n 1)
-if [ -z "$SCRIPT" ] || [ ! -f "$SCRIPT" ]; then
+SCRIPT="${ROOT}/k6/scenarios/${SCENARIO}.js"
+if [ ! -f "$SCRIPT" ]; then
   echo "Scenario not found: $SCENARIO"
   echo "Available scenarios:"
   find "${ROOT}/k6/scenarios" -name "*.js" | sed "s|${ROOT}/k6/scenarios/||" | sed 's/\.js$//' | sed 's/^/  /'
   exit 1
 fi
 
-SCENARIO_BASE=$(basename "$SCENARIO")
+SCENARIO_BASE=$(echo "$SCENARIO" | tr '/' '-')
 mkdir -p "${ROOT}/k6/reports"
 
 # Capture start timestamp (seconds since epoch) for verification window

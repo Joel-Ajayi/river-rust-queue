@@ -1,36 +1,12 @@
 import { BASE_URL, MERCHANT_COUNT } from "./config.js";
 
-function toHex(n, pad) {
-  return n.toString(16).padStart(pad, "0");
-}
-
-export function merchantID(index) {
-  const n = (index % MERCHANT_COUNT) + 1;
-  return `merchant_00000000-0000-0000-0000-${toHex(n, 12)}`;
-}
-
-export function walletID(index) {
-  const i = index % 100000;
-  const merchantNum = Math.floor(i / 1000) + 1;
-  const walletNum = (i % 1000) + 1;
-  return `merchant_00000000-0000-0000-0000-${toHex(merchantNum, 12)}.00000000-0000-0000-0000-${toHex(walletNum, 12)}`;
-}
-
-export function ownedWallet(merchantIdx, index) {
-  const walletNum = (index % 1000) + 1;
-  const id = merchantID(merchantIdx);
-  return `${id}.00000000-0000-0000-0000-${toHex(walletNum, 12)}`;
-}
-
-export function getAuthToken(merchantIdx) {
-  const id = merchantID(merchantIdx);
-  return {
-    method: "POST",
-    url: `${BASE_URL}/v1/auth/token`,
-    headers: {
-      Authorization: `Bearer ${id}:test-api-key-perf`,
-    },
-  };
+// Generate a UUIDv4 for Idempotency-Key headers (required by the API).
+function uuidv4() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
 export function transferRequest(fromWallet, toWallet, amount, jwt) {
@@ -40,29 +16,13 @@ export function transferRequest(fromWallet, toWallet, amount, jwt) {
     headers: {
       Authorization: `Bearer ${jwt}`,
       "Content-Type": "application/json",
-      "Idempotency-Key": `${__VU}-${__ITER}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      "Idempotency-Key": uuidv4(),
     },
     body: JSON.stringify({
-      from_wallet: fromWallet,
-      to_wallet: toWallet,
+      fromWallet: fromWallet,
+      toWallet: toWallet,
       amount: amount,
       currency: "NGN",
-    }),
-  };
-}
-
-export function payoutRequest(fromWallet, recipients, jwt) {
-  return {
-    method: "POST",
-    url: `${BASE_URL}/v1/payouts`,
-    headers: {
-      Authorization: `Bearer ${jwt}`,
-      "Content-Type": "application/json",
-      "Idempotency-Key": `${__VU}-${__ITER}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-    },
-    body: JSON.stringify({
-      from_wallet: fromWallet,
-      recipients: recipients,
     }),
   };
 }
@@ -83,7 +43,6 @@ export function walletBalanceRequest(walletId, jwt) {
   };
 }
 
-// depositRequest initiates a wallet deposit transaction.
 export function depositRequest(walletId, amount, jwt) {
   return {
     method: "POST",
@@ -91,11 +50,24 @@ export function depositRequest(walletId, amount, jwt) {
     headers: {
       Authorization: `Bearer ${jwt}`,
       "Content-Type": "application/json",
-      "Idempotency-Key": `dep-${walletId}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      "Idempotency-Key": uuidv4(),
     },
     body: JSON.stringify({
       amount: amount,
       currency: "NGN",
     }),
   };
+}
+
+// selectWalletPair returns a from-wallet, to-wallet, and JWT for a given VU/iteration.
+// Uses __VU % MERCHANT_COUNT for merchant selection to avoid hotspotting with VU > 1000.
+// Wallet index uses (iter + vu * 37) % 1000 for better distribution across VUs.
+export function selectWalletPair(data, vu, iter) {
+  const merchantIdx = vu % MERCHANT_COUNT;
+  const walletIdx = (iter + vu * 37) % 1000;
+  const from = data.wallets[merchantIdx][walletIdx];
+  const toMerchant = (merchantIdx + 1) % MERCHANT_COUNT;
+  const toWalletIdx = (walletIdx + 1) % 1000;
+  const to = data.wallets[toMerchant][toWalletIdx];
+  return { from, to, jwt: data.jwts[merchantIdx], merchantIdx };
 }
