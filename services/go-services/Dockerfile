@@ -10,7 +10,8 @@ ARG SERVICE=api-gateway
 COPY . .
 # CGO_ENABLED=0 disables CGO, GOOS=linux sets the target OS to Linux
 # CGO means that the Go compiler will not use C code. Useful for building static binaries that can run in minimal environments like Alpine Linux.
-RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/service ./${SERVICE}/cmd
+RUN --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux go build -o /bin/service ./${SERVICE}/cmd
 
 FROM alpine:3.24
 # Install CA certificates and create a non-root user for running the service

@@ -1,10 +1,4 @@
-# =========================================================================
-# IMPORTANT: This skaffold configuration requires the `rrq-gitops` repository
-# to be cloned as a sibling directory to this repository (`../rrq-gitops`).
-# Run `git clone https://github.com/Joel-Ajayi/rrq-gitops ../rrq-gitops` if missing.
-# =========================================================================
-
-apiVersion: skaffold/v4beta11
+apiVersion: skaffold/v4beta14
 kind: Config
 metadata:
   name: river-rust-queue
@@ -64,9 +58,3 @@ build:
       context: deploy/db/seed
       docker:
         dockerfile: Dockerfile
-manifests:
-  kustomize:
-    paths:
-      - ../rrq-gitops/rrq/overlays/dev
-deploy:
-  kubectl: {}

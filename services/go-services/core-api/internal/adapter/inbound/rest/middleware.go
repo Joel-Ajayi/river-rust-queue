@@ -11,7 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func (s *Server) requireAuth(next http.Handler) http.Handler {
+func (s *Server) extractMerchant(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Extract merchantID and tier from Envoy Gateway's injected headers (claimsToHeaders)
 		merchantID := r.Header.Get(HeaderMerchantID)
@@ -80,5 +80,3 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 		)
 	})
 }
-
-

@@ -12,6 +12,7 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/core/port"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -57,9 +58,14 @@ func (s *WebhookService) HandleMessage(ctx context.Context, merchantID string, p
 
 	breaker := s.breakers.For(merchantID)
 
-	// Create canonical JSON bytes. Using standard json.Marshal as canonical equivalent since struct maps aren't used here.
-	// Actually we can just use the provided JSON payload bytes.
-	canonicalPayload := payload
+	// Create canonical JSON bytes using protojson to send valid application/json.
+	canonicalPayload, marshalErr := protojson.MarshalOptions{
+		UseProtoNames:   true,
+		EmitUnpopulated: true,
+	}.Marshal(&env)
+	if marshalErr != nil {
+		return marshalErr
+	}
 
 	deliveryID := platform.NewDeliveryID()
 

@@ -473,16 +473,16 @@ func (s *CrossShardStore) CreditFromClearingAccount(ctx context.Context, intent 
 	return tx.Commit(ctx)
 }
 
-func (s *CrossShardStore) SettleCrossShardTransfer(ctx context.Context, srcShard string, transferID string) error {
+func (s *CrossShardStore) SettleCrossShardTransfer(ctx context.Context, srcShard string, transferID string) (int64, string, error) {
 	pool, err := s.pools.ShardPool(srcShard)
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 
 	// Removed hardcoded timeout
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 	defer tx.Rollback(ctx)
 
@@ -491,22 +491,22 @@ func (s *CrossShardStore) SettleCrossShardTransfer(ctx context.Context, srcShard
 	var jobID string
 	err = tx.QueryRow(ctx, `SELECT state, job_id FROM cross_shard_transfer WHERE transfer_id=$1 FOR UPDATE`, transferID).Scan(&state, &jobID)
 	if err != nil {
-		return err // If pgx.ErrNoRows, it's a fatal error because the saga must exist on the source shard
+		return 0, "", err // If pgx.ErrNoRows, it's a fatal error because the saga must exist on the source shard
 	}
 	if state == platform.XShardTransferStatusCompleted {
-		return nil // Already settled
+		return 0, "", nil // Already settled
 	}
 
 	// 2. Update Saga State
 	_, err = tx.Exec(ctx, `UPDATE cross_shard_transfer SET state=$1, settled_at=NOW() WHERE transfer_id=$2`, platform.XShardTransferStatusCompleted, transferID)
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 
 	// 3. Update Job State
 	_, err = tx.Exec(ctx, `UPDATE jobs SET status=$1, completed_at=NOW() WHERE id=$2`, platform.JobStatusCompleted, jobID)
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 
 	// 4. Retrieve Source Merchant ID to build the TransferEventPayload
@@ -514,13 +514,13 @@ func (s *CrossShardStore) SettleCrossShardTransfer(ctx context.Context, srcShard
 	var amount int64
 	err = tx.QueryRow(ctx, `SELECT from_wallet, to_wallet, amount, currency FROM cross_shard_transfer WHERE transfer_id=$1`, transferID).Scan(&fromWallet, &toWallet, &amount, &currency)
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 
 	var merchantID string
 	err = tx.QueryRow(ctx, "SELECT merchant_id FROM wallets WHERE id=$1", fromWallet).Scan(&merchantID)
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 
 	// 5. Emit Final Transfer Completed Event (Unified TransferEventPayload, platform.TopicNotify)
@@ -550,7 +550,7 @@ func (s *CrossShardStore) SettleCrossShardTransfer(ctx context.Context, srcShard
 	marshaler := protojson.MarshalOptions{EmitUnpopulated: true}
 	payloadBytes, err := marshaler.Marshal(envelope)
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 
 	_, err = tx.Exec(ctx, `
@@ -558,10 +558,10 @@ func (s *CrossShardStore) SettleCrossShardTransfer(ctx context.Context, srcShard
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`, eventID, string(platform.EventTypeTransferCompleted), string(platform.AggregateTypeTransfer), transferID, jobID, payloadBytes, now, platform.TopicNotify)
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 
-	return tx.Commit(ctx)
+	return amount, currency, tx.Commit(ctx)
 }
 
 func (s *CrossShardStore) ReverseCrossShardTransfer(ctx context.Context, srcShard, transferID, reason string) error {

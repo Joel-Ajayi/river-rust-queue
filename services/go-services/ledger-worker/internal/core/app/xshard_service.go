@@ -26,12 +26,13 @@ func (s *XShardService) HandleXShardRequested(ctx context.Context, payload *even
 }
 
 func (s *XShardService) HandleXShardSettled(ctx context.Context, payload *eventsv1.XShardTransferSettledPayload) error {
-	err := s.xshardStore.SettleCrossShardTransfer(ctx, payload.SrcShard, payload.TransferId)
+	amount, currency, err := s.xshardStore.SettleCrossShardTransfer(ctx, payload.SrcShard, payload.TransferId)
 	if err != nil {
 		return err
 	}
 
 	// Business metrics: saga completed + successful cross-shard transfer
+	platform.RecordBusinessGTV(ctx, amount, currency)
 	platform.RecordBusinessSagaCompleted(ctx)
 	platform.RecordBusinessTransfer(ctx, platform.TransferMetricSuccess, platform.ShardTypeCross)
 

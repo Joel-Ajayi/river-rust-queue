@@ -13,16 +13,16 @@ RRQ runs the same Kustomize manifests in two environments:
 
 ### Stateless services
 
-| Service | Kubernetes resource | Replicas |
-|---------|-------------------|----------|
-| Kong (edge gateway) | Deployment | 2 |
-| API Gateway | Deployment, HPA | 3+ on Kafka lag |
-| Outbox Relay | Deployment | 2, leader-elected |
-| Ledger Worker | Deployment, HPA | 2+ on Kafka lag |
-| Webhook Worker | Deployment, HPA | 2+ on Kafka lag |
-| Fraud Worker | Deployment | 2+ |
-| Reconciliation | CronJob | leader-elected |
-| Admin Dashboard | Deployment | 2 |
+| Service             | Kubernetes resource | Replicas          |
+| ------------------- | ------------------- | ----------------- |
+| Kong (edge gateway) | Deployment          | 2                 |
+| API Gateway         | Deployment, HPA     | 3+ on Kafka lag   |
+| Outbox Relay        | Deployment          | 2, leader-elected |
+| Ledger Worker       | Deployment, HPA     | 2+ on Kafka lag   |
+| Webhook Worker      | Deployment, HPA     | 2+ on Kafka lag   |
+| Fraud Worker        | Deployment          | 2+                |
+| Reconciliation      | CronJob             | leader-elected    |
+| Admin Dashboard     | Deployment          | 2                 |
 
 ### Stateful backends
 
@@ -72,20 +72,6 @@ Workers scale on Kafka consumer-group lag via the Horizontal Pod Autoscaler. Min
 
 Secrets are committed as SealedSecrets: encrypt a plain Kubernetes `Secret` with the cluster's public key via `kubeseal`, commit the encrypted `SealedSecret`, and the in-cluster controller decrypts it at apply time. Argo CD only ever sees encrypted objects. Each environment seals against its own cluster key.
 
----
-
-## Sync between Postgres and Kong
-
-When a merchant is created or updated, the Admin Dashboard (or a background operator) creates Kubernetes Custom Resources that the Kong Ingress Controller watches:
-
-- **`KongConsumer`** — represents the merchant.
-- **`KongPlugin`** — per-merchant rate-limiting configuration.
-- **`KongCredential`** — the JWT public key for RS256 signature validation.
-
-The Kong Ingress Controller syncs these into Kong's data plane automatically, keeping the edge gateway in sync with the Postgres source of truth without manual Admin API calls.
-
----
-
 ## Reconciliation
 
 The nightly reconciliation job (CronJob) re-derives every wallet's balance from the `ledger_entries` table and cross-checks against the `wallet_balance_cache`. Any discrepancy produces an alert and a `reconciliation.discrepancy` event. The job is leader-elected (advisory lock), idempotent, and re-runnable.
@@ -94,13 +80,13 @@ The nightly reconciliation job (CronJob) re-derives every wallet's balance from 
 
 ## Key implementation locations
 
-| Area | File/Directory |
-|------|---------------|
-| Kustomize base manifests | `k8s/base/` |
-| Dev overlay | `k8s/overlays/dev/` |
-| Prod overlay | `k8s/overlays/prod/` |
-| CI/CD workflows | `.github/workflows/` |
-| Database migration Jobs | `services/go-services/internal/platform/migrations/` |
-| Dashboard ConfigMaps | `rrq-gitops/rrq/base/observability/dashboards/` |
-| Alert rules | `rrq-gitops/rrq/base/observability/prometheusrule.yaml` |
-| Edge configuration (Kong) | `rrq-gitops/rrq/base/edge/kong/` |
+| Area                      | File/Directory                                          |
+| ------------------------- | ------------------------------------------------------- |
+| Kustomize base manifests  | `k8s/base/`                                             |
+| Dev overlay               | `k8s/overlays/dev/`                                     |
+| Prod overlay              | `k8s/overlays/prod/`                                    |
+| CI/CD workflows           | `.github/workflows/`                                    |
+| Database migration Jobs   | `services/go-services/internal/platform/migrations/`    |
+| Dashboard ConfigMaps      | `rrq-gitops/rrq/base/observability/dashboards/`         |
+| Alert rules               | `rrq-gitops/rrq/base/observability/prometheusrule.yaml` |
+| Edge configuration (Kong) | `rrq-gitops/rrq/base/edge/kong/`                        |

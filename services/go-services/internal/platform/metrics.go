@@ -32,6 +32,7 @@ const (
 	MetricLedgerImbalanceTotal       = "rrq_ledger_imbalance_total"
 	MetricSagaUnresolvedCount        = "rrq_saga_unresolved_count"
 	MetricVelocityLimitExceededTotal = "rrq_velocity_limit_exceeded_total"
+	MetricAdminDLQReplayedTotal      = "rrq_admin_dlq_replayed_total"
 
 	// label
 	MetricLabelCircuitBreaker = "circuit_breaker"
@@ -68,6 +69,7 @@ var (
 	ledgerImbalanceTotal          metric.Int64Gauge
 	sagaUnresolvedCount           metric.Int64Gauge
 	velocityLimitExceededTotal    metric.Int64Counter
+	adminDLQReplayedTotal         metric.Int64Counter
 
 	metricsOnce sync.Once
 )
@@ -215,7 +217,13 @@ func init() {
 			panic("failed to initialize velocity limit exceeded metric: " + err.Error())
 		}
 
-
+		adminDLQReplayedTotal, err = meter.Int64Counter(
+			MetricAdminDLQReplayedTotal,
+			metric.WithDescription("Total number of DLQ messages successfully replayed"),
+		)
+		if err != nil {
+			panic("failed to initialize admin dlq replayed metric: " + err.Error())
+		}
 	})
 }
 
@@ -342,6 +350,13 @@ func RecordVelocityLimitExceeded(ctx context.Context, walletID, limitType string
 	velocityLimitExceededTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(MetricLabelWalletID, walletID),
 		attribute.String(MetricLabelLimitType, limitType),
+	))
+}
+
+// RecordAdminDLQReplayed increments the counter of successfully replayed DLQ messages.
+func RecordAdminDLQReplayed(ctx context.Context, shardID string, count int64) {
+	adminDLQReplayedTotal.Add(ctx, count, metric.WithAttributes(
+		attribute.String(MetricLabelShard, shardID),
 	))
 }
 

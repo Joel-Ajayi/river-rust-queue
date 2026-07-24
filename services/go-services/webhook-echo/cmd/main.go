@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	DefaultPort     = "8080"
 	DefaultLogLevel = "info"
 	EnvVarPort      = "HTTP_PORT"
 	EnvVarLogLevel  = "LOG_LEVEL"
@@ -39,7 +38,7 @@ func main() {
 	}
 	defer logger.Sync()
 
-	if err := platform.InitTelemetry("webhook-echo"); err != nil {
+	if err := platform.InitTelemetry(platform.ServiceNameWebhookWorker, "http://agent-collector.observability.svc.cluster.local:4317"); err != nil {
 		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 

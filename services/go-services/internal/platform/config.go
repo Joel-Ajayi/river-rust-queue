@@ -2,7 +2,6 @@ package platform
 
 import (
 	"crypto/ed25519"
-	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -15,18 +14,6 @@ import (
 const (
 	DefaultKeyID  = "default"
 	ShardIDPrefix = "shard-"
-)
-
-var (
-	ErrMissingMerchantsDBURI = errors.New("MERCHANTS_DB_URI is required")
-	ErrNoShardURIs           = errors.New("at least one SHARD_*_URI is required")
-	ErrNoJWTSigningKey       = errors.New("JWT_SIGNING_KEYS or JWT_SIGNING_KEY is required")
-	ErrActiveKeyIDNotFound   = errors.New("JWT_ACTIVE_KEY_ID not found in signing keys")
-	ErrUnknownShard          = errors.New("unknown shard")
-	ErrCBMerchantsOpen       = errors.New("merchants circuit breaker is open")
-	ErrCBRWOpen              = errors.New("shard RW circuit breaker is open")
-	ErrCBROpen               = errors.New("shard RO circuit breaker is open")
-	ErrReconciliationHeld    = errors.New("reconciliation lock is already held by another runner")
 )
 
 // Config holds environment-sourced configuration for an RRQ service.
@@ -53,19 +40,7 @@ type Config struct {
 
 	KubernetesNamespace string
 
-	KongConfigAPIVersion    string
-	KongAPIGroup            string
-	KongAPIVersion          string
-	KongResourceConsumers   string
-	KongResourcePlugins     string
-	KongResourceCredentials string
-	KongKindConsumer        string
-	KongKindPlugin          string
-	KongKindCredential      string
-	KongPluginRateLimiting  string
-	KongPluginPolicy        string
-	KongCredentialTypeJWT   string
-	KongJWTAlgorithm        string
+	OtelExporterEndpoint string
 
 	PlatformAdminKey string
 }
@@ -76,40 +51,26 @@ func LoadConfig() (*Config, error) {
 		MerchantsDBURI: os.Getenv("MERCHANTS_DB_URI"),
 		ShardURIs:      make(map[string]string),
 
-		KafkaBrokers:     strings.Split(envOrDefault("KAFKA_BROKERS", "localhost:9092"), ","),
-		KafkaTopicJobs:   envOrDefault("KAFKA_TOPIC_JOBS", TopicJobs),
-		KafkaTopicNotify: envOrDefault("KAFKA_TOPIC_NOTIFY", TopicNotify),
+		KafkaBrokers:     strings.Split(env("KAFKA_BROKERS", "localhost:9092"), ","),
+		KafkaTopicJobs:   env("KAFKA_TOPIC_JOBS", TopicJobs),
+		KafkaTopicNotify: env("KAFKA_TOPIC_NOTIFY", TopicNotify),
 
-		RedisDataHost:     envOrDefault("REDIS_DATA_HOST", "localhost"),
-		RedisDataPort:     envOrDefault("REDIS_DATA_PORT", "6379"),
+		RedisDataHost:     env("REDIS_DATA_HOST", "localhost"),
+		RedisDataPort:     env("REDIS_DATA_PORT", "6379"),
 		RedisDataPassword: os.Getenv("REDIS_DATA_PASSWORD"),
 
 		JWTSigningKeys: parseJWTKeys(os.Getenv("JWT_SIGNING_KEYS")),
-		JWTActiveKeyID: envOrDefault("JWT_ACTIVE_KEY_ID", DefaultKeyID),
+		JWTActiveKeyID: env("JWT_ACTIVE_KEY_ID", DefaultKeyID),
 
 		HTTPPort:    envOrDefaultInt("HTTP_PORT", 8080),
 		MetricsPort: envOrDefaultInt("METRICS_PORT", 9090),
 
-		LogLevel:        envOrDefault("LOG_LEVEL", "info"),
+		LogLevel:        env("LOG_LEVEL", "info"),
 		TraceSampleRate: envOrDefaultFloat("TRACE_SAMPLE_RATE", 1.0),
 
-		KubernetesNamespace: envOrDefault("KUBERNETES_NAMESPACE", "rrq"),
+		KubernetesNamespace: env("KUBERNETES_NAMESPACE", "rrq"),
 
-		KongConfigAPIVersion:    envOrDefault("KONG_CONFIG_API_VERSION", "configuration.konghq.com/v1"),
-		KongAPIGroup:            envOrDefault("KONG_API_GROUP", "configuration.konghq.com"),
-		KongAPIVersion:          envOrDefault("KONG_API_VERSION", "v1"),
-		KongResourceConsumers:   envOrDefault("KONG_RESOURCE_CONSUMERS", "kongconsumers"),
-		KongResourcePlugins:     envOrDefault("KONG_RESOURCE_PLUGINS", "kongplugins"),
-		KongResourceCredentials: envOrDefault("KONG_RESOURCE_CREDENTIALS", "kongcredentials"),
-		KongKindConsumer:        envOrDefault("KONG_KIND_CONSUMER", "KongConsumer"),
-		KongKindPlugin:          envOrDefault("KONG_KIND_PLUGIN", "KongPlugin"),
-		KongKindCredential:      envOrDefault("KONG_KIND_CREDENTIAL", "KongCredential"),
-		KongPluginRateLimiting:  envOrDefault("KONG_PLUGIN_RATE_LIMITING", "rate-limiting"),
-		KongPluginPolicy:        envOrDefault("KONG_PLUGIN_POLICY", "redis"),
-		KongCredentialTypeJWT:   envOrDefault("KONG_CREDENTIAL_TYPE_JWT", "jwt"),
-		KongJWTAlgorithm:        envOrDefault("KONG_JWT_ALGORITHM", "RS256"),
-
-		PlatformAdminKey: os.Getenv("RRQ_PLATFORM_KEY"),
+		OtelExporterEndpoint: env("OTEL_EXPORTER_OTLP_ENDPOINT", "agent-exporter.observability.svc.cluster.local:4317"),
 	}
 
 	// dynamically load shard URIs from env vars
@@ -117,19 +78,6 @@ func LoadConfig() (*Config, error) {
 		if uri := os.Getenv("SHARD_" + shard + "_URI"); uri != "" {
 			cfg.ShardURIs[ShardIDPrefix+strings.ToLower(shard)] = uri
 		}
-	}
-
-	if cfg.MerchantsDBURI == "" {
-		return nil, fmt.Errorf("%w", ErrMissingMerchantsDBURI)
-	}
-	if len(cfg.ShardURIs) == 0 {
-		return nil, fmt.Errorf("%w", ErrNoShardURIs)
-	}
-	if len(cfg.JWTSigningKeys) == 0 {
-		return nil, fmt.Errorf("%w", ErrNoJWTSigningKey)
-	}
-	if _, ok := cfg.JWTSigningKeys[cfg.JWTActiveKeyID]; !ok {
-		return nil, fmt.Errorf("%w: kid=%s", ErrActiveKeyIDNotFound, cfg.JWTActiveKeyID)
 	}
 
 	return cfg, nil
@@ -160,7 +108,7 @@ func parseJWTKeys(keysEnv string) map[string]ed25519.PrivateKey {
 	return keys
 }
 
-func envOrDefault(key, fallback string) string {
+func env(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}

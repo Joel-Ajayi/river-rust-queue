@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	apiv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/api/v1"
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 )
 
 // handleAdminDLQReplay processes operator requests to batch replay DLQ entries.
@@ -23,6 +24,9 @@ func (s *Server) handleAdminDLQReplay(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+
+	// Record metrics for replayed messages
+	platform.RecordAdminDLQReplayed(r.Context(), res.ShardID, int64(res.ReplayedCount))
 
 	resp := &apiv1.ReplayDLQResponse{
 		ReplayedCount: int32(res.ReplayedCount),

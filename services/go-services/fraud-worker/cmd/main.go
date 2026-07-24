@@ -38,7 +38,7 @@ func main() {
 	defer logger.Sync()
 
 	// Initialize Telemetry
-	if err := platform.InitTelemetry(platform.ServiceNameFraudWorker); err != nil {
+	if err := platform.InitTelemetry(platform.ServiceNameFraudWorker, cfg.OtelExporterEndpoint); err != nil {
 		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 

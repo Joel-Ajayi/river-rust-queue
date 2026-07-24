@@ -19,7 +19,7 @@ func TestXShardSettled_Success(t *testing.T) {
 
 	svc := app.NewXShardService(logger, mockXshard)
 
-	mockXshard.On("SettleCrossShardTransfer", mock.Anything, "shard_a", "tf_123").Return(nil)
+	mockXshard.On("SettleCrossShardTransfer", mock.Anything, "shard_a", "tf_123").Return(int64(100), "USD", nil)
 
 	err := svc.HandleXShardSettled(context.Background(), &eventsv1.XShardTransferSettledPayload{
 		SrcShard:   "shard_a",
@@ -36,7 +36,7 @@ func TestXShardSettled_StoreError(t *testing.T) {
 
 	svc := app.NewXShardService(logger, mockXshard)
 
-	mockXshard.On("SettleCrossShardTransfer", mock.Anything, "shard_a", "tf_123").Return(errors.New("db error"))
+	mockXshard.On("SettleCrossShardTransfer", mock.Anything, "shard_a", "tf_123").Return(int64(0), "", errors.New("db error"))
 
 	err := svc.HandleXShardSettled(context.Background(), &eventsv1.XShardTransferSettledPayload{
 		SrcShard:   "shard_a",

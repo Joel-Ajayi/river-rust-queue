@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // SeedMerchantAndWallets inserts a fresh Merchant into the global merchants DB
@@ -13,18 +12,18 @@ import (
 // It returns the dynamically generated merchant ID for true hermetic isolation.
 func SeedMerchantAndWallets(t *testing.T, merchantsDB, shardDB TestDB) string {
 	t.Helper()
-	
+
 	// Seed a test merchant with a unique random ID for true hermetic isolation
 	merchantID := platform.NewMerchantID()
-	
-	// Create a real bcrypt hash for "secret-123" so we can test AuthToken exchange
-	hashBytes, err := bcrypt.GenerateFromPassword([]byte("secret-123"), bcrypt.MinCost)
+
+	// Create a real Argon2id hash for "secret-123" so we can test AuthToken exchange
+	hashStr, err := platform.HashAPIKeySecret("secret-123")
 	if err != nil {
 		t.Fatalf("failed to hash password: %v", err)
 	}
 
 	_, err = merchantsDB.Pool.Exec(context.Background(),
-		`INSERT INTO merchants (id, name, tier, status, shard_id, api_key_hash) VALUES ($1, 'Test', 'starter', $2, 'shard-a', $3)`, merchantID, platform.MerchantStatusActive, string(hashBytes))
+		`INSERT INTO merchants (id, name, tier, status, shard_id, api_key_hash) VALUES ($1, 'Test', 'starter', $2, 'shard-a', $3)`, merchantID, platform.MerchantStatusActive, hashStr)
 	if err != nil {
 		t.Fatalf("failed to seed merchant: %v", err)
 	}

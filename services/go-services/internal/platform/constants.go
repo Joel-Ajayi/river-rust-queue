@@ -25,13 +25,12 @@ const (
 	APIReadyPath          = "/ready"
 
 	// Service Names
-	ServiceNameCoreAPI        = "core-api"
-	ServiceNameLedgerWorker   = "ledger-worker"
-	ServiceNameOutboxRelay    = "outbox-relay"
-	ServiceNameWebhookWorker  = "webhook-worker"
-	ServiceNameKongSyncWorker = "kong-sync-worker"
-	ServiceNameFraudWorker    = "fraud-worker"
-	ServiceNameReconWorker    = "recon-worker"
+	ServiceNameCoreAPI       = "core-api"
+	ServiceNameLedgerWorker  = "ledger-worker"
+	ServiceNameOutboxRelay   = "outbox-relay"
+	ServiceNameWebhookWorker = "webhook-worker"
+	ServiceNameFraudWorker   = "fraud-worker"
+	ServiceNameReconWorker   = "recon-worker"
 
 	// Circuit Breaker Names (legacy Kafka publisher names kept for back-compat)
 	CBNameAPIGatewayKafkaPublisher = "KafkaPublisher"
@@ -55,7 +54,6 @@ const (
 	ComponentJobHandler         = "job_handler"
 	ComponentSagaHandler        = "saga_handler"
 	ComponentTransferService    = "transfer_service"
-	ComponentKongGateway        = "kong_gateway"
 	ComponentWebhookStore       = "webhook_store"
 	ComponentWebhookHandler     = "webhook_handler"
 

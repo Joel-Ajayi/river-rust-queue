@@ -32,7 +32,7 @@ func main() {
 	}
 	defer log.Sync()
 
-	if err := platform.InitTelemetry(platform.ServiceNameCoreAPI); err != nil {
+	if err := platform.InitTelemetry(platform.ServiceNameCoreAPI, cfg.OtelExporterEndpoint); err != nil {
 		log.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 

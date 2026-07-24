@@ -125,8 +125,8 @@ tools-check: ## Report which tools are installed
 # Development
 # ===========================================================================
 .PHONY: dev
-dev: ## Run local development with hot-reloading (Skaffold)
-	skaffold fix && skaffold dev --port-forward
+dev: ## Run local development with hot-reloading (Skaffold, no cleanup on exit)
+	skaffold fix && skaffold run
 
 .PHONY: psql
 psql: ## Open psql against a shard (SHARD=shard-a|shard-b|merchants-db)
@@ -178,12 +178,16 @@ proto: ## Generate Go and Rust code from proto definitions
 # Benchmarks (k6)
 # ===========================================================================
 .PHONY: bench
-bench: ## Run k6 scenario (SCENARIO=a-sustained-throughput, BASE_URL, DURATION)
+bench: ## Run k6 scenario (SCENARIO=performance/load-sustained, BASE_URL, DURATION)
 	./k6/run.sh $(SCENARIO)
 
+.PHONY: bench-seed
+bench-seed: ## Seed test data (create merchants, wallets, pre-fund)
+	./k6/run.sh seed
+
 .PHONY: bench-smoke
-bench-smoke: ## Quick smoke test (1min, for CI)
-	DURATION=1m ./k6/run.sh a-sustained-throughput --no-verify
+bench-smoke: ## Quick smoke test (1min, low VUs, for CI)
+	DURATION=1m ./k6/run.sh performance/load-sustained --no-verify
 
 .PHONY: bench-verify
 bench-verify: ## Run k6 scenario with post-test observability verification (default)
@@ -191,14 +195,14 @@ bench-verify: ## Run k6 scenario with post-test observability verification (defa
 
 .PHONY: bench-all
 bench-all: ## Run all k6 scenarios sequentially with verification (nightly)
-	@for s in load-sustained stress-bulk-payout ramp-to-peak fraud-throughput circuit-breaker reconciliation-integrity spike-surge cross-shard-throughput; do \
+	@for s in performance/load-sustained performance/stress-bulk-payout performance/ramp-to-peak performance/spike-surge reliability/fraud-throughput reliability/circuit-breaker reliability/reconciliation-integrity scalability/cross-shard-throughput compatibility/contract-compliance security/edge-protection; do \
 	  echo "=== Running $$s ==="; \
 	  $(MAKE) bench-verify SCENARIO=$$s; \
 	done
 
 .PHONY: bench-soak
 bench-soak: ## Run 4-hour soak test with verification (pre-release)
-	$(MAKE) bench-verify SCENARIO=soak-endurance
+	$(MAKE) bench-verify SCENARIO=performance/soak-endurance
 
 .PHONY: bench-full
 bench-full: bench-all bench-soak ## Full performance qualification suite (nightly + pre-release)

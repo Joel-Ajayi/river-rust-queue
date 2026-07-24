@@ -31,7 +31,7 @@ func main() {
 	}
 	defer logger.Sync()
 
-	if err := platform.InitTelemetry(platform.ServiceNameOutboxRelay); err != nil {
+	if err := platform.InitTelemetry(platform.ServiceNameOutboxRelay, cfg.OtelExporterEndpoint); err != nil {
 		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 

@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -10,6 +11,14 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
+)
+
+var (
+	ErrUnknownShard       = errors.New("unknown shard")
+	ErrCBMerchantsOpen    = errors.New("merchants circuit breaker is open")
+	ErrCBRWOpen           = errors.New("shard RW circuit breaker is open")
+	ErrCBROpen            = errors.New("shard RO circuit breaker is open")
+	ErrReconciliationHeld = errors.New("reconciliation lock is already held by another runner")
 )
 
 // ShardPools manages pgx connection pools keyed by shard ID.
@@ -23,15 +32,15 @@ type ShardPools struct {
 }
 
 const (
-	DBMaxConnIdleTime     = 10 * time.Minute
-	DBMaxConnLifetime     = 1 * time.Hour
-	MerchantsDBMaxConns   = 5
-	MerchantsROMaxConns   = 2
-	ShardRWMaxConns       = 20
-	ShardROMaxConns       = 5
-	DBHostRWSuffix        = "-rw"
-	DBHostROSuffix        = "-ro"
-	DefaultShardLetters   = "ABCDE"
+	DBMaxConnIdleTime   = 10 * time.Minute
+	DBMaxConnLifetime   = 1 * time.Hour
+	MerchantsDBMaxConns = 5
+	MerchantsROMaxConns = 2
+	ShardRWMaxConns     = 20
+	ShardROMaxConns     = 5
+	DBHostRWSuffix      = "-rw"
+	DBHostROSuffix      = "-ro"
+	DefaultShardLetters = "ABCDE"
 )
 
 func createPool(ctx context.Context, uri string, maxConns int32) (*pgxpool.Pool, error) {
@@ -116,7 +125,7 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 
 func (sp *ShardPools) MerchantsPool() *pgxpool.Pool   { return sp.merchants }
 func (sp *ShardPools) MerchantsPoolRO() *pgxpool.Pool { return sp.roMerchants }
-func (sp *ShardPools) HashRing() *HashRing             { return sp.hashRing }
+func (sp *ShardPools) HashRing() *HashRing            { return sp.hashRing }
 
 func (sp *ShardPools) AllShardPools() map[string]*pgxpool.Pool {
 	sp.mu.RLock()

@@ -32,9 +32,9 @@ func (m *MockCrossShardStore) CreditFromClearingAccount(ctx context.Context, int
 	return args.Error(0)
 }
 
-func (m *MockCrossShardStore) SettleCrossShardTransfer(ctx context.Context, srcShard, transferID string) error {
+func (m *MockCrossShardStore) SettleCrossShardTransfer(ctx context.Context, srcShard, transferID string) (int64, string, error) {
 	args := m.Called(ctx, srcShard, transferID)
-	return args.Error(0)
+	return args.Get(0).(int64), args.String(1), args.Error(2)
 }
 
 func (m *MockCrossShardStore) ReverseCrossShardTransfer(ctx context.Context, srcShard, transferID, reason string) error {

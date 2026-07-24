@@ -32,7 +32,7 @@ func main() {
 	defer logger.Sync()
 
 	// Initialize Telemetry
-	if err := platform.InitTelemetry(platform.ServiceNameWebhookWorker); err != nil {
+	if err := platform.InitTelemetry(platform.ServiceNameWebhookWorker, cfg.OtelExporterEndpoint); err != nil {
 		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 

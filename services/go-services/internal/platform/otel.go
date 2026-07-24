@@ -32,15 +32,19 @@ const (
 // InitTelemetry configures the global OpenTelemetry MeterProvider with an OTLP exporter.
 // It explicitly attaches the service name as a Resource Attribute so that all metrics automatically
 // contain the `service.name` label.
-func InitTelemetry(serviceName string) error {
+func InitTelemetry(serviceName string, endpoint string) error {
 	ctx := context.Background()
+
 	res := resource.NewWithAttributes(
 		semconv.SchemaURL,
 		semconv.ServiceName(serviceName),
 	)
 
-	// 2. Configure Metric Exporter
-	metricExporter, err := otlpmetricgrpc.New(ctx, otlpmetricgrpc.WithInsecure())
+	// 2. Configure Metric Exporter targeting local OTel Collector proxy
+	metricExporter, err := otlpmetricgrpc.New(ctx,
+		otlpmetricgrpc.WithEndpoint(endpoint),
+		otlpmetricgrpc.WithInsecure(),
+	)
 	if err != nil {
 		return err
 	}
@@ -51,8 +55,11 @@ func InitTelemetry(serviceName string) error {
 	)
 	otel.SetMeterProvider(meterProvider)
 
-	// 3. Configure Trace Exporter
-	traceExporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithInsecure())
+	// 3. Configure Trace Exporter targeting local OTel Collector proxy
+	traceExporter, err := otlptracegrpc.New(ctx,
+		otlptracegrpc.WithEndpoint(endpoint),
+		otlptracegrpc.WithInsecure(),
+	)
 	if err != nil {
 		return err
 	}

@@ -94,12 +94,12 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 
 	mux.Handle("POST "+platform.APIAuthTokenPath, s.withLogging(s.withBulkhead(http.HandlerFunc(s.handleAuthToken))))
 
-	mux.Handle("POST "+platform.APITransfersPath, s.withLogging(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleCreateTransfer)))))
-	mux.Handle("GET "+platform.APIJobPathPrefix+"{id}", s.withLogging(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleGetJob)))))
-	mux.Handle("GET "+platform.APIBalancesPath, s.withLogging(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleGetBalance)))))
+	mux.Handle("POST "+platform.APITransfersPath, s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleCreateTransfer)))))
+	mux.Handle("GET "+platform.APIJobPathPrefix+"{id}", s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleGetJob)))))
+	mux.Handle("GET "+platform.APIBalancesPath, s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleGetBalance)))))
 
 	mux.Handle("POST "+platform.APIMerchantsPath, s.withLogging(s.withBulkhead(http.HandlerFunc(s.handleCreateMerchant))))
-	mux.Handle("POST "+platform.APIAdminDLQReplayPath, s.withLogging(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleAdminDLQReplay)))))
-	mux.Handle("POST "+platform.APIWalletsPath, s.withLogging(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleCreateWallet)))))
-	mux.Handle("POST "+platform.APIWalletsPath+"/{wallet_id}/deposit", s.withLogging(s.withBulkhead(s.requireAuth(http.HandlerFunc(s.handleDeposit)))))
+	mux.Handle("POST "+platform.APIAdminDLQReplayPath, s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleAdminDLQReplay)))))
+	mux.Handle("POST "+platform.APIWalletsPath, s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleCreateWallet)))))
+	mux.Handle("POST "+platform.APIWalletsPath+"/{wallet_id}/deposit", s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleDeposit)))))
 }

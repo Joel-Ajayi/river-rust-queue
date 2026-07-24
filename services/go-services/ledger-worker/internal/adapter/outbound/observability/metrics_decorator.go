@@ -62,12 +62,12 @@ func (m *crossShardStoreMetrics) CreditFromClearingAccount(ctx context.Context, 
 	return err
 }
 
-func (m *crossShardStoreMetrics) SettleCrossShardTransfer(ctx context.Context, srcShard, transferID string) error {
-	err := m.next.SettleCrossShardTransfer(ctx, srcShard, transferID)
+func (m *crossShardStoreMetrics) SettleCrossShardTransfer(ctx context.Context, srcShard, transferID string) (int64, string, error) {
+	amount, currency, err := m.next.SettleCrossShardTransfer(ctx, srcShard, transferID)
 	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
 		platform.RecordInfrastructureError(ctx, platform.ComponentCrossShardStore)
 	}
-	return err
+	return amount, currency, err
 }
 
 func (m *crossShardStoreMetrics) ReverseCrossShardTransfer(ctx context.Context, srcShard, transferID, reason string) error {

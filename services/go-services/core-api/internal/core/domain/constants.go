@@ -4,10 +4,10 @@ import "time"
 
 const (
 	// Operational Limits
-	MaxRequestBytes    = 512 * 1024      // 512KB
-	BulkheadLimit      = 100             // semaphore count
-	JWTLeeway          = 5 * time.Minute // 5min
-	JWTExpiration      = 1 * time.Hour   // 1hr
+	MaxRequestBytes = 512 * 1024      // 512KB
+	BulkheadLimit   = 200             // semaphore count
+	JWTLeeway       = 5 * time.Minute // 5min
+	JWTExpiration   = 240 * time.Hour // 1hr //240 when testing
 
 	// Timeouts
 	ServerShutdownTimeout = 15 * time.Second

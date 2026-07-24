@@ -11,6 +11,6 @@ import (
 type CrossShardStore interface {
 	DebitToClearingAccount(ctx context.Context, srcShard, dstShard, jobID string, transfer domain.Transfer) error
 	CreditFromClearingAccount(ctx context.Context, intent *eventsv1.XShardTransferRequestedPayload) error
-	SettleCrossShardTransfer(ctx context.Context, srcShard, transferID string) error
+	SettleCrossShardTransfer(ctx context.Context, srcShard, transferID string) (int64, string, error)
 	ReverseCrossShardTransfer(ctx context.Context, srcShard, transferID, reason string) error
 }

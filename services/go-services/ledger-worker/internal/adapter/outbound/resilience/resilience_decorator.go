@@ -80,11 +80,13 @@ func (x *crossShardStoreResilience) CreditFromClearingAccount(ctx context.Contex
 	return err
 }
 
-func (x *crossShardStoreResilience) SettleCrossShardTransfer(ctx context.Context, srcShard, transferID string) error {
-	_, err := x.cbs.ShardRW(srcShard).Execute(func() (interface{}, error) {
-		return nil, x.next.SettleCrossShardTransfer(ctx, srcShard, transferID)
+func (x *crossShardStoreResilience) SettleCrossShardTransfer(ctx context.Context, srcShard, transferID string) (int64, string, error) {
+	res, err := x.cbs.ShardRW(srcShard).Execute(func() (interface{}, error) {
+		amount, currency, err := x.next.SettleCrossShardTransfer(ctx, srcShard, transferID)
+		return []interface{}{amount, currency}, err
 	})
-	return err
+	result := res.([]interface{})
+	return result[0].(int64), result[1].(string), err
 }
 
 func (x *crossShardStoreResilience) ReverseCrossShardTransfer(ctx context.Context, srcShard, transferID, reason string) error {

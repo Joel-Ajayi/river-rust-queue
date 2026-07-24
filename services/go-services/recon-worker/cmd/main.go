@@ -30,7 +30,7 @@ func main() {
 
 	logger.Info(platform.LogEventServerStarted)
 
-	if err := platform.InitTelemetry(platform.ServiceNameReconWorker); err != nil {
+	if err := platform.InitTelemetry(platform.ServiceNameReconWorker, cfg.OtelExporterEndpoint); err != nil {
 		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 
@@ -44,7 +44,7 @@ func main() {
 	defer pools.Close()
 
 	repo := postgres.NewReconRepository(pools)
-	runner := app.NewRunner(logger, repo, cfg.HTTPPort, pools) // HTTPPort reused for parallelism limit or default limit
+	runner := app.NewRunner(logger, repo, cfg.HTTPPort, pools) // HTTPPort reused for parallelism limit
 
 	now := time.Now()
 	windowEnd := now

@@ -3,7 +3,7 @@ INSERT INTO merchants (id, name, api_key_hash, tier, status, shard_id)
 VALUES (
   'merchant_00000000-0000-0000-0000-000000000001',
   'Platform Premium Merchant',
-  '$2b$04$EqX2GZ.vWk7aCVYMbVpRoug3rpu3Hi1Mtqdy5EPTI.vXPS36IaX1G',
+  '$argon2id$v=19$m=65536,t=1,p=4$DkQfRDtWT3sIErR0nvzk/g$/4en1aTRWdG65p5NA5+9zlqY87jl1FezreZoqC26Gmo',
   'premium',
   'active',
   '__platform__'
