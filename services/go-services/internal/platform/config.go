@@ -46,7 +46,7 @@ type Config struct {
 }
 
 // LoadConfig reads configuration from env vars (injected by K8s ConfigMap + Secret).
-func LoadConfig() (*Config, error) {
+func LoadConfig() *Config {
 	cfg := &Config{
 		MerchantsDBURI: os.Getenv("MERCHANTS_DB_URI"),
 		ShardURIs:      make(map[string]string),
@@ -80,7 +80,7 @@ func LoadConfig() (*Config, error) {
 		}
 	}
 
-	return cfg, nil
+	return cfg
 }
 
 func (c *Config) RedisAddr() string             { return c.RedisDataHost + ":" + c.RedisDataPort }

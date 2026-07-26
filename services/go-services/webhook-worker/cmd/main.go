@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -20,14 +19,11 @@ import (
 )
 
 func main() {
-	cfg, err := platform.LoadConfig()
-	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
-	}
+	cfg := platform.LoadConfig()
 
 	logger, err := platform.NewLogger(cfg.LogLevel)
 	if err != nil {
-		log.Fatalf("Failed to initialize logger: %v", err)
+		panic("Failed to initialize logger" + err.Error())
 	}
 	defer logger.Sync()
 

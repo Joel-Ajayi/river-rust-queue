@@ -143,7 +143,6 @@ func dbIsSuccessfulPolicy(isTerminal IsTerminalFunc) func(error) bool {
 			default:
 				// For other PG structural errors (e.g., syntax error),
 				// they are application faults, but the DB is healthy.
-				// We don't trip the breaker for bad queries.
 				return true
 			}
 		}

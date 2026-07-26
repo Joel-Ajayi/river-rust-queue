@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -19,18 +18,13 @@ import (
 )
 
 func main() {
-	fmt.Printf("Starting %s service...\n", os.Args[0])
 	// Load Config
-	cfg, err := platform.LoadConfig()
-	if err != nil {
-		fmt.Printf("Failed to load config: %v\n", err)
-		os.Exit(1)
-	}
+	cfg := platform.LoadConfig()
+
 	// Load Logger
 	logger, err := platform.NewLogger(cfg.LogLevel)
 	if err != nil {
-		fmt.Printf("Failed to init logger: %v\n", err)
-		os.Exit(1)
+		panic("logger:" + err.Error())
 	}
 	defer logger.Sync()
 

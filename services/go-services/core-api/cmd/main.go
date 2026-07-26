@@ -21,10 +21,7 @@ import (
 
 func main() {
 	// Config & Logger
-	cfg, err := platform.LoadConfig()
-	if err != nil {
-		panic("config: " + err.Error())
-	}
+	cfg := platform.LoadConfig()
 
 	log, err := platform.NewLogger(cfg.LogLevel)
 	if err != nil {

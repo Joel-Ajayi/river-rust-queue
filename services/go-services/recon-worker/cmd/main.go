@@ -17,10 +17,7 @@ const (
 )
 
 func main() {
-	cfg, err := platform.LoadConfig()
-	if err != nil {
-		panic("config: " + err.Error())
-	}
+	cfg := platform.LoadConfig()
 
 	logger, err := platform.NewLogger(cfg.LogLevel)
 	if err != nil {

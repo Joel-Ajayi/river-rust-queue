@@ -24,7 +24,7 @@ const (
 	HeaderValEventStream = "text/event-stream"
 	HeaderConnection     = "Connection"
 	HeaderValKeepAlive   = "keep-alive"
-	HeaderIdempotencyKey = "Idempotency-Key"
+	HeaderIdempotencyKey = "X-Idempotency-Key"
 	HeaderMerchantID     = "X-Merchant-Id"
 	HeaderMerchantTier   = "X-Merchant-Tier"
 
