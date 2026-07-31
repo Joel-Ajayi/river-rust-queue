@@ -24,7 +24,7 @@ const (
 	RootPath        = "/"
 	ContentTypeKey  = "Content-Type"
 	ContentTypeJSON = "application/json"
-	SignatureHeader = "X-Webhook-Signature"
+	SignatureHeader = "X-RRQ-Signature"
 	OkResponse      = `{"status":"ok"}`
 	ShutdownTimeout = 5 * time.Second
 )
@@ -38,7 +38,7 @@ func main() {
 	}
 	defer logger.Sync()
 
-	if err := platform.InitTelemetry(platform.ServiceNameWebhookWorker, "http://agent-collector.observability.svc.cluster.local:4317"); err != nil {
+	if err := platform.InitTelemetry(platform.ServiceNameWebhookEcho, "http://agent-collector.observability.svc.cluster.local:4317"); err != nil {
 		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 
@@ -88,10 +88,16 @@ func handleWebhook(logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 
+		sig := r.Header.Get(SignatureHeader)
+		if sig == "" {
+			sig = r.Header.Get("X-Webhook-Signature")
+		}
+
 		maskedPayload := pii.Mask(body)
 		logger.Info(platform.LogEventWebhookReceived,
 			zap.String("payload_size", fmt.Sprintf("%d", len(body))),
 			zap.ByteString("masked_payload", maskedPayload),
+			zap.String("signature", sig),
 		)
 
 		w.Header().Set(ContentTypeKey, ContentTypeJSON)
