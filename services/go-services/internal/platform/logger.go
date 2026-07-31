@@ -13,6 +13,7 @@ import (
 
 const (
 	// Logging Fields
+	LogFieldComponent  = "component"
 	LogFieldEvent      = "event"
 	LogFieldJobID      = "job_id"
 	LogFieldDuration   = "duration_ms"
@@ -98,6 +99,7 @@ const (
 	LogEventRelayBatchProcessFailed      = "relay_batch_process_failed"
 	LogEventAllRelayersShutdown          = "all_relayers_shut_down_gracefully"
 	LogEventOutboxShutdownTimeout        = "outbox_shutdown_timeout_exceeded"
+	LogEventWebhookShutdownTimeout       = "webhook_shutdown_timeout_exceeded"
 	LogEventAllConsumersShutdown         = "all_consumers_shut_down_gracefully"
 	LogEventConsumerShutdownTimeout      = "consumer_shutdown_timeout_exceeded"
 	LogEventReconRunFailed               = "recon_run_failed"
@@ -145,6 +147,10 @@ const (
 	// Fraud
 	EventFraudVelocityCheck CanonicalEvent = "fraud.velocity_check"
 	EventFraudWalletFrozen  CanonicalEvent = "fraud.wallet_frozen"
+
+	// Administration & Registration
+	EventMerchantCreated CanonicalEvent = "merchant.created"
+	EventWalletCreated   CanonicalEvent = "wallet.created"
 
 	// Reconciliation
 	EventReconStarted   CanonicalEvent = "recon.started"
