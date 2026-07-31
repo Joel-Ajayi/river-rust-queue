@@ -5,8 +5,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/adapter/inbound/kafka"
@@ -32,8 +34,8 @@ func main() {
 		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// 1. Database
 	pools, err := platform.NewShardPools(ctx, cfg, logger)
@@ -56,6 +58,7 @@ func main() {
 			Timeout:     domain.CBTimeout,
 			MaxFails:    domain.CBMaxFails,
 		},
+		logger,
 	)
 
 	// 2. Adapters
@@ -63,11 +66,15 @@ func main() {
 	decoratedRepo := observability.NewRepositoryMetrics(resilience.NewRepositoryResilience(repo, cbs))
 
 	httpClient := http.NewWebhookClient()
-	breakers := resilience.NewBreakerRegistry()
+	breakers := resilience.NewBreakerRegistry(logger)
+	resilientHttpClient := resilience.NewHTTPClientResilience(httpClient, breakers)
 
 	// 3. Application core
-	service := app.NewWebhookService(decoratedRepo, httpClient, breakers, logger)
-	decoratedService := observability.NewWebhookAppTraces(observability.NewWebhookAppMetrics(service))
+	service := app.NewWebhookService(decoratedRepo, resilientHttpClient, logger)
+	decoratedService := resilience.NewWebhookAppResilience(
+		observability.NewWebhookAppTraces(observability.NewWebhookAppMetrics(service)),
+		logger,
+	)
 
 	// 4. Kafka consumer
 	reader := platform.NewKafkaReader(
@@ -78,35 +85,65 @@ func main() {
 	)
 	defer reader.Close()
 
-	consumer := kafka.NewConsumer(reader, decoratedService, logger)
+	resilientReader := resilience.NewKafkaReaderResilience(reader)
+	consumer := kafka.NewConsumer(resilientReader, decoratedService, logger)
+	resilientConsumer := resilience.NewConsumerResilience(consumer, logger)
 
 	// 5. Start background routines
-	go func() {
-		logger.Info(platform.LogEventKafkaMessageHandled, zap.String("component", "kafka_consumer"))
-		if err := consumer.Consume(ctx); err != nil && err != context.Canceled {
-			logger.Error(platform.LogEventKafkaConsumerStopped, zap.Error(err))
+	g, gCtx := errgroup.WithContext(ctx)
+
+	g.Go(service.StartFastLaneWorkers(gCtx, domain.FastLaneWorkerPoolSize))
+
+	g.Go(func() error {
+		return resilientConsumer.Consume(gCtx)
+	})
+
+	g.Go(func() error {
+		return decoratedService.RetryScheduler(gCtx)
+	})
+
+	g.Go(func() error {
+		ticker := time.NewTicker(domain.BreakerEvictionInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-gCtx.Done():
+				return nil
+			case <-ticker.C:
+				breakers.CleanupEvicted(domain.BreakerEvictionTTL)
+			}
 		}
+	})
+
+	// 6. Wait for shutdown or fatal error with timeout protection
+	waitCh := make(chan struct{})
+	var groupErr error
+	go func() {
+		groupErr = g.Wait()
+		close(waitCh)
 	}()
 
-	go func() {
-		logger.Info(platform.LogEventRetrySchedulerStarted)
-		if err := service.RetryScheduler(ctx); err != nil && err != context.Canceled {
-			logger.Error(platform.LogEventRetrySchedulerStopped, zap.Error(err))
+	select {
+	case <-waitCh:
+		// Background worker failed fatally
+		if groupErr != nil && groupErr != context.Canceled {
+			logger.Error(platform.LogEventServerFatalError, zap.Error(groupErr))
+			os.Exit(1)
 		}
-	}()
+	case <-ctx.Done():
+		// Received OS Shutdown Signal
+		logger.Info(platform.LogEventShutdownSignalReceived)
 
-	// 6. Graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), domain.ServerShutdownTimeout)
+		defer shutdownCancel()
 
-	<-sigCh
-	logger.Info(platform.LogEventShutdownSignalReceived)
-	cancel()
+		select {
+		case <-waitCh:
+			logger.Info(platform.LogEventServerShutdown)
+		case <-shutdownCtx.Done():
+			logger.Warn(platform.LogEventWebhookShutdownTimeout)
+		}
+	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), domain.ServerShutdownTimeout)
-	defer shutdownCancel()
-
-	_ = platform.ShutdownTelemetry(shutdownCtx)
-
-	logger.Info(platform.LogEventServerShutdown)
+	_ = platform.ShutdownTelemetry(context.Background())
 }

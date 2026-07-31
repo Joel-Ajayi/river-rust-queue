@@ -13,12 +13,12 @@ import (
 )
 
 type Consumer struct {
-	reader *kafka.Reader
+	reader port.KafkaReader
 	app    port.WebhookApp
 	logger *zap.Logger
 }
 
-func NewConsumer(reader *kafka.Reader, app port.WebhookApp, logger *zap.Logger) *Consumer {
+func NewConsumer(reader port.KafkaReader, app port.WebhookApp, logger *zap.Logger) *Consumer {
 	return &Consumer{
 		reader: reader,
 		app:    app,
@@ -27,7 +27,6 @@ func NewConsumer(reader *kafka.Reader, app port.WebhookApp, logger *zap.Logger) 
 }
 
 func (c *Consumer) Consume(ctx context.Context) error {
-	attempt := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -37,51 +36,29 @@ func (c *Consumer) Consume(ctx context.Context) error {
 
 		msg, err := c.reader.FetchMessage(ctx)
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			platform.LoggerWithTrace(ctx, c.logger).Error(platform.LogEventKafkaFetchFailed, zap.Error(err))
-			c.sleepBackoff(ctx, &attempt)
-			continue
+			return err
 		}
 
 		merchantID := string(msg.Key)
-		
 		tracedCtx := platform.InjectTraceIntoContext(ctx, &msg)
-		
 		processCtx, cancel := context.WithTimeout(tracedCtx, domain.ServerShutdownTimeout)
 
-		err = c.processMessage(processCtx, msg, func() error {
+		procErr := c.processMessage(processCtx, msg, func() error {
 			return c.app.HandleMessage(processCtx, merchantID, msg.Value)
 		})
 		cancel()
 
-		if err != nil {
-			c.sleepBackoff(ctx, &attempt)
-			continue
+		if procErr != nil {
+			// If HandleMessage returns an error, it is an infrastructure failure (e.g. DB outage).
+			return procErr
 		}
 
-		if err := c.reader.CommitMessages(ctx, msg); err != nil {
-			platform.LoggerWithTrace(ctx, c.logger).Error(platform.LogEventKafkaCommitFailed, zap.Error(err))
-			c.sleepBackoff(ctx, &attempt)
-			continue
+		if commitErr := c.reader.CommitMessages(ctx, msg); commitErr != nil {
+			platform.LoggerWithTrace(ctx, c.logger).Error(platform.LogEventKafkaCommitFailed, zap.Error(commitErr))
+			return commitErr
 		}
 		platform.RecordConsumerCommit(ctx, msg.Topic)
-
-		attempt = 0
 	}
-}
-
-func (c *Consumer) sleepBackoff(ctx context.Context, attempt *int) {
-	jitterDelay := platform.CalculateJitterBackoff(*attempt, platform.ConsumerBackoffMinDelay, platform.ConsumerBackoffMaxDelay)
-	timer := time.NewTimer(jitterDelay)
-	select {
-	case <-ctx.Done():
-		timer.Stop()
-	case <-timer.C:
-	}
-	platform.RecordConsumerBackoffDuration(ctx, platform.ComponentConsumer, jitterDelay)
-	*attempt++
 }
 
 func (c *Consumer) processMessage(ctx context.Context, msg kafka.Message, processFn func() error) (err error) {
@@ -96,7 +73,11 @@ func (c *Consumer) processMessage(ctx context.Context, msg kafka.Message, proces
 				panicErr = fmt.Errorf("%w: %v", domain.ErrPanic, r)
 			}
 			platform.LoggerWithTrace(ctx, c.logger).Error(platform.LogEventPanicRecovered, zap.Any(platform.LogFieldPanic, r), zap.Duration(platform.LogFieldDuration, duration))
-			_ = panicErr
+
+			// Route to global DLQ to isolate the poison pill
+			c.app.RouteToGlobalDLQ(ctx, msg.Value, panicErr.Error())
+
+			// Return nil so the offset is committed and the consumer can move past the poison pill
 			err = nil
 		}
 	}()
