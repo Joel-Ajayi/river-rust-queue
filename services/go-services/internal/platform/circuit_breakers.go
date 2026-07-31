@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"github.com/failsafe-go/failsafe-go"
+	"github.com/failsafe-go/failsafe-go/bulkhead"
 	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/segmentio/kafka-go"
+	"go.uber.org/zap"
 )
 
 // CircuitBreaker wraps a failsafe-go circuitbreaker.CircuitBreaker[any] with helper methods.
@@ -20,11 +22,11 @@ type CircuitBreaker struct {
 }
 
 func (c *CircuitBreaker) Execute(fn func() (any, error)) (any, error) {
-	return failsafe.NewExecutor[any](c.cb).Get(fn)
+	return failsafe.With[any](c.cb).Get(fn)
 }
 
 func (c *CircuitBreaker) ExecuteVoid(fn func() error) error {
-	return failsafe.NewExecutor[any](c.cb).Run(fn)
+	return failsafe.With[any](c.cb).Run(fn)
 }
 
 func (c *CircuitBreaker) State() circuitbreaker.State {
@@ -57,6 +59,7 @@ const (
 // --- Circuit Breaker ---
 type CircuitBreakerConfig struct {
 	Name          string
+	Logger        *zap.Logger
 	MaxRequests   uint32
 	Timeout       time.Duration
 	Interval      time.Duration
@@ -64,17 +67,26 @@ type CircuitBreakerConfig struct {
 	MinRequests   uint32
 	ErrorRate     float64
 	IsSuccessful  func(error) bool
-	OnStateChange func(name string, from circuitbreaker.State, to circuitbreaker.State)
+	OnStateChange func(logger *zap.Logger, name string, from circuitbreaker.State, to circuitbreaker.State)
 }
 
 // newCircuitBreaker creates a standardized failsafe-go CircuitBreaker for the platform.
 func newCircuitBreaker(cfg CircuitBreakerConfig) *CircuitBreaker {
-	builder := circuitbreaker.Builder[any]()
+	builder := circuitbreaker.NewBuilder[any]()
 
-	if cfg.MaxFails > 0 {
+	switch {
+	case cfg.ErrorRate > 0 && cfg.MinRequests > 0 && cfg.Interval > 0:
+		builder.WithFailureRateThreshold(cfg.ErrorRate, uint(cfg.MinRequests), cfg.Interval)
+	case cfg.ErrorRate > 0 && cfg.MinRequests > 0:
+		builder.WithFailureThresholdRatio(uint(cfg.ErrorRate*float64(cfg.MinRequests)), uint(cfg.MinRequests))
+	case cfg.MaxFails > 0:
 		builder.WithFailureThreshold(uint(cfg.MaxFails))
-	} else if cfg.MinRequests > 0 {
-		builder.WithFailureThresholdRatio(uint(cfg.MinRequests), 10)
+	case cfg.MinRequests > 0:
+		builder.WithFailureThresholdRatio(uint(0.50*float64(cfg.MinRequests)), uint(cfg.MinRequests))
+	}
+
+	if cfg.MaxRequests > 0 {
+		builder.WithSuccessThreshold(uint(cfg.MaxRequests))
 	}
 
 	if cfg.Timeout > 0 {
@@ -88,19 +100,8 @@ func newCircuitBreaker(cfg CircuitBreakerConfig) *CircuitBreaker {
 	}
 
 	builder.OnStateChanged(func(e circuitbreaker.StateChangedEvent) {
-		var stateVal int64
-		switch e.NewState {
-		case circuitbreaker.ClosedState:
-			stateVal = CBGaugeClosed
-		case circuitbreaker.HalfOpenState:
-			stateVal = CBGaugeHalfOpen
-		case circuitbreaker.OpenState:
-			stateVal = CBGaugeOpen
-		}
-		RecordCircuitBreakerState(context.Background(), cfg.Name, stateVal)
-
 		if cfg.OnStateChange != nil {
-			cfg.OnStateChange(cfg.Name, e.OldState, e.NewState)
+			cfg.OnStateChange(cfg.Logger, cfg.Name, e.OldState, e.NewState)
 		}
 	})
 
@@ -173,6 +174,53 @@ func kafkaEgressIsSuccessful(err error) bool {
 	return false
 }
 
+// WebhookResilience wraps a Bulkhead and a CircuitBreaker to limit concurrency and fail fast.
+type WebhookResilience struct {
+	executor failsafe.Executor[any]
+	cb       circuitbreaker.CircuitBreaker[any]
+}
+
+func (w *WebhookResilience) Execute(fn func() (any, error)) (any, error) {
+	return w.executor.Get(fn)
+}
+
+func (w *WebhookResilience) ExecuteVoid(fn func() error) error {
+	return w.executor.Run(fn)
+}
+
+func (w *WebhookResilience) IsOpen() bool {
+	return w.cb.IsOpen()
+}
+
+func webhookIsSuccessfulPolicy(isTerminal func(error) bool) func(error) bool {
+	return func(err error) bool {
+		if err == nil {
+			return true
+		}
+		class := ClassifyError(err, isTerminal)
+		if class == ClassificationTerminal || class == ClassificationPoison {
+			return true
+		}
+		return false
+	}
+}
+
+// NewWebhookResilience creates a bulkhead and circuit breaker for webhook egress.
+func NewWebhookResilience(name string, maxConcurrency uint, isTerminal func(error) bool, cbConfig CircuitBreakerConfig, logger *zap.Logger) *WebhookResilience {
+	cbConfig.Name = name
+	cbConfig.Logger = logger
+	cbConfig.IsSuccessful = webhookIsSuccessfulPolicy(isTerminal)
+	cbConfig.OnStateChange = recordBreakerStateChange
+
+	cb := newCircuitBreaker(cbConfig).cb
+	bh := bulkhead.New[any](maxConcurrency)
+
+	return &WebhookResilience{
+		executor: failsafe.With[any](bh, cb),
+		cb:       cb,
+	}
+}
+
 // DBCircuitBreakers implements the per-pool breaker registry: one instance
 // per physical connection pool (merchants-global + one-per-shard RW + one-per-shard RO).
 type DBCircuitBreakers struct {
@@ -186,7 +234,8 @@ type DBCircuitBreakers struct {
 
 // NewDBCircuitBreakers builds one breaker for the merchants pool, one per shard RW, and one per shard RO.
 // All breakers are pre-created at startup for deterministic observability.
-func NewDBCircuitBreakers(merchantPoolName string, shardIDs []string, isTerminal IsTerminalFunc, cbConfig CircuitBreakerConfig) *DBCircuitBreakers {
+func NewDBCircuitBreakers(merchantPoolName string, shardIDs []string, isTerminal IsTerminalFunc, cbConfig CircuitBreakerConfig, logger *zap.Logger) *DBCircuitBreakers {
+	cbConfig.Logger = logger
 	reg := &DBCircuitBreakers{
 		shardsRW:   make(map[string]*CircuitBreaker, len(shardIDs)),
 		shardsRO:   make(map[string]*CircuitBreaker, len(shardIDs)),
@@ -224,7 +273,7 @@ func (r *DBCircuitBreakers) newDBBreaker(name string) *CircuitBreaker {
 }
 
 // recordBreakerStateChange records state gauge and open/half-open counters.
-func recordBreakerStateChange(name string, from circuitbreaker.State, to circuitbreaker.State) {
+func recordBreakerStateChange(logger *zap.Logger, name string, from circuitbreaker.State, to circuitbreaker.State) {
 	var stateVal int64
 	switch to {
 	case circuitbreaker.ClosedState:
@@ -239,6 +288,13 @@ func recordBreakerStateChange(name string, from circuitbreaker.State, to circuit
 		RecordCircuitBreakerOpen(context.Background(), name)
 		if from == circuitbreaker.HalfOpenState {
 			RecordCircuitBreakerHalfOpenFailure(context.Background(), name)
+		}
+		if logger != nil {
+			logger.Warn("Circuit breaker opened", zap.String(LogFieldComponent, "circuit-breaker"), zap.String("circuit_breaker_name", name))
+		}
+	} else if to == circuitbreaker.ClosedState && from != circuitbreaker.ClosedState {
+		if logger != nil {
+			logger.Info("Circuit breaker closed", zap.String(LogFieldComponent, "circuit-breaker"), zap.String("circuit_breaker_name", name))
 		}
 	}
 }
@@ -292,11 +348,12 @@ type KafkaCircuitBreaker struct {
 }
 
 // NewKafkaCircuitBreaker returns the singleton Kafka egress breaker.
-func NewKafkaCircuitBreaker(name string, cbConfig CircuitBreakerConfig) *KafkaCircuitBreaker {
+func NewKafkaCircuitBreaker(name string, cbConfig CircuitBreakerConfig, logger *zap.Logger) *KafkaCircuitBreaker {
 	if name == "" {
 		name = CBNameKafkaEgress
 	}
 	cbConfig.Name = name
+	cbConfig.Logger = logger
 	cbConfig.IsSuccessful = kafkaEgressIsSuccessful
 	cbConfig.OnStateChange = recordBreakerStateChange
 
