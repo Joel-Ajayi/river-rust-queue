@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -65,16 +64,18 @@ func (r *Repository) CreatePendingDelivery(ctx context.Context, shardID string, 
 	return err
 }
 
-
 func (r *Repository) FetchPendingRetries(ctx context.Context, shardID string, limit int) ([]*domain.WebhookDelivery, error) {
 	pool, err := r.pools.ShardPool(shardID)
 	if err != nil {
 		return nil, err
 	}
 
-	query := fmt.Sprintf(`
+	// Use an atomic UPDATE ... RETURNING to enforce a visibility timeout.
+	// This hides the fetched webhooks from other concurrent pods for 5 minutes,
+	// preventing a thundering herd. The worker will overwrite next_retry_at when done.
+	query := `
 		UPDATE webhook_deliveries
-		SET next_retry_at = NOW() + INTERVAL '%d minutes'
+		SET next_retry_at = NOW() + INTERVAL '5 minutes'
 		WHERE id IN (
 			SELECT id
 			FROM webhook_deliveries
@@ -86,7 +87,7 @@ func (r *Repository) FetchPendingRetries(ctx context.Context, shardID string, li
 		RETURNING id, merchant_id, source_event_id, url, payload, signature,
 			attempt_count, last_attempt_at, next_retry_at, last_error,
 			last_status, status, delivered_at, created_at
-	`, domain.SchedulerVisibilityTimeoutMinutes)
+	`
 
 	rows, err := pool.Query(ctx, query, limit, domain.StatusPending)
 	if err != nil {
@@ -115,7 +116,7 @@ func (r *Repository) CompleteDelivery(ctx context.Context, shardID string, d *do
 	if err != nil {
 		return err
 	}
-	
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -166,7 +167,7 @@ func (r *Repository) FailDeliveryAndRouteToDLQ(ctx context.Context, shardID stri
 	if err != nil {
 		return err
 	}
-	
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -231,7 +232,7 @@ func (r *Repository) ScheduleRetry(ctx context.Context, shardID string, d *domai
 	if err != nil {
 		return err
 	}
-	
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -298,7 +299,7 @@ func extractTraceAndSpanID(ctx context.Context) (string, string) {
 
 func (r *Repository) RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error {
 	pool := r.pools.MerchantsPool() // Use global DB pool
-	
+
 	traceID, spanID := extractTraceAndSpanID(ctx)
 
 	_, err := pool.Exec(ctx, `
@@ -310,7 +311,7 @@ func (r *Repository) RouteToGlobalDLQ(ctx context.Context, payload []byte, error
 			$5, NOW(), NOW(), $6, NULLIF($7, ''), NULLIF($8, '')
 		)
 	`, domain.EventSourceWebhook, payload, errorMsg, string(platform.ClassificationTerminal), 1, domain.StatusOpen, traceID, spanID)
-	
+
 	if err == nil {
 		platform.RecordDLQIngestion(ctx, platform.ServiceNameWebhookWorker)
 	}

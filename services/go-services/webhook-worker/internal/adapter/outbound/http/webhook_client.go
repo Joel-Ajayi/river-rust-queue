@@ -18,21 +18,23 @@ type WebhookClient struct {
 	client *http.Client
 }
 
-func NewWebhookClient() *WebhookClient {
+func NewWebhookClient(cfg *platform.Config) *WebhookClient {
+	httpTimeout := time.Duration(cfg.Capacity.HTTPTimeoutMs) * time.Millisecond
+
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          domain.HTTPMaxIdleConns,
-		MaxIdleConnsPerHost:   domain.HTTPMaxIdleConnsPerHost,
-		IdleConnTimeout:       domain.HTTPIdleConnTimeout,
-		ResponseHeaderTimeout: 5 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+		MaxIdleConns:          int(cfg.Capacity.HTTPMaxIdleConns),
+		MaxIdleConnsPerHost:   int(cfg.Capacity.HTTPMaxIdleConnsPerHost),
+		IdleConnTimeout:       time.Duration(cfg.Capacity.HTTPIdleConnTimeoutMs) * time.Millisecond,
+		ResponseHeaderTimeout: time.Duration(cfg.Capacity.HTTPResponseHeaderTimeoutMs) * time.Millisecond,
+		TLSHandshakeTimeout:   time.Duration(cfg.Capacity.HTTPTLSHandshakeTimeoutMs) * time.Millisecond,
+		ExpectContinueTimeout: time.Duration(cfg.Capacity.HTTPExpectContinueTimeoutMs) * time.Millisecond,
 	}
 
 	return &WebhookClient{
 		client: &http.Client{
-			Timeout:   domain.HTTPClientTimeout,
+			Timeout:   httpTimeout,
 			Transport: otelhttp.NewTransport(transport),
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if len(via) >= 3 {

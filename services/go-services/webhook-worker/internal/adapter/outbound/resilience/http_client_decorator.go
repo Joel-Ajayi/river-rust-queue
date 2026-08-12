@@ -21,10 +21,11 @@ type breakerEntry struct {
 type BreakerRegistry struct {
 	breakers sync.Map
 	logger   *zap.Logger
+	cfg      *platform.Config
 }
 
-func NewBreakerRegistry(logger *zap.Logger) *BreakerRegistry {
-	return &BreakerRegistry{logger: logger}
+func NewBreakerRegistry(logger *zap.Logger, cfg *platform.Config) *BreakerRegistry {
+	return &BreakerRegistry{logger: logger, cfg: cfg}
 }
 
 func (r *BreakerRegistry) For(merchantID string) *platform.WebhookResilience {
@@ -35,15 +36,20 @@ func (r *BreakerRegistry) For(merchantID string) *platform.WebhookResilience {
 		return entry.cb
 	}
 
+	capCfg := r.cfg.Capacity
 	cfg := platform.CircuitBreakerConfig{
 		Name:        domain.PrefixWebhook + merchantID,
-		MaxRequests: domain.BreakerMaxRequests,
-		Interval:    domain.BreakerResetWindow,
-		Timeout:     domain.BreakerCooldown,
-		MaxFails:    domain.BreakerConsecutiveFailures,
+		MaxRequests: uint32(capCfg.CBHalfOpenProbes),
+		Interval:    time.Duration(capCfg.CBIntervalMs) * time.Millisecond,
+		Timeout:     time.Duration(capCfg.CBTimeoutMs) * time.Millisecond,
+		MaxFails:    uint32(capCfg.CBMaxFails),
 	}
 
-	newCB := platform.NewWebhookResilience(domain.PrefixWebhook+merchantID, domain.WebhookMaxConcurrency, domain.IsTerminalError, cfg, r.logger)
+	maxConc := capCfg.WebhookMaxConcurrency
+	if maxConc <= 0 {
+		maxConc = domain.WebhookMaxConcurrency // sensible default
+	}
+	newCB := platform.NewWebhookResilience(domain.PrefixWebhook+merchantID, uint(maxConc), domain.IsTerminalError, cfg, r.logger)
 	entry := &breakerEntry{cb: newCB}
 	entry.lastAccess.Store(now)
 

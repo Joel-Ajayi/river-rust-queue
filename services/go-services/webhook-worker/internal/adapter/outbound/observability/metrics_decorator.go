@@ -27,8 +27,32 @@ func (m *repositoryMetrics) GetMerchantConfig(ctx context.Context, merchantID st
 	return merchant, err
 }
 
-func (m *repositoryMetrics) SaveDelivery(ctx context.Context, shardID string, d *domain.WebhookDelivery) error {
-	err := m.next.SaveDelivery(ctx, shardID, d)
+func (m *repositoryMetrics) CreatePendingDelivery(ctx context.Context, shardID string, d *domain.WebhookDelivery) error {
+	err := m.next.CreatePendingDelivery(ctx, shardID, d)
+	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
+		platform.RecordInfrastructureError(ctx, platform.ComponentWebhookStore)
+	}
+	return err
+}
+
+func (m *repositoryMetrics) CompleteDelivery(ctx context.Context, shardID string, d *domain.WebhookDelivery, successEventPayload []byte, eventID string) error {
+	err := m.next.CompleteDelivery(ctx, shardID, d, successEventPayload, eventID)
+	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
+		platform.RecordInfrastructureError(ctx, platform.ComponentWebhookStore)
+	}
+	return err
+}
+
+func (m *repositoryMetrics) FailDeliveryAndRouteToDLQ(ctx context.Context, shardID string, d *domain.WebhookDelivery, errorMsg string, failEventPayload []byte, eventID string, firstFailedAt time.Time, lastFailedAt time.Time) error {
+	err := m.next.FailDeliveryAndRouteToDLQ(ctx, shardID, d, errorMsg, failEventPayload, eventID, firstFailedAt, lastFailedAt)
+	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
+		platform.RecordInfrastructureError(ctx, platform.ComponentDLQStore)
+	}
+	return err
+}
+
+func (m *repositoryMetrics) ScheduleRetry(ctx context.Context, shardID string, d *domain.WebhookDelivery, failEventPayload []byte, eventID string) error {
+	err := m.next.ScheduleRetry(ctx, shardID, d, failEventPayload, eventID)
 	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
 		platform.RecordInfrastructureError(ctx, platform.ComponentWebhookStore)
 	}
@@ -43,24 +67,16 @@ func (m *repositoryMetrics) FetchPendingRetries(ctx context.Context, shardID str
 	return deliveries, err
 }
 
-func (m *repositoryMetrics) RecordEvent(ctx context.Context, shardID string, eventID, eventType, aggregateType, aggregateID string, payload []byte) error {
-	err := m.next.RecordEvent(ctx, shardID, eventID, eventType, aggregateType, aggregateID, payload)
-	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
-		platform.RecordInfrastructureError(ctx, platform.ComponentWebhookStore)
-	}
-	return err
+func (r *repositoryMetrics) GetAvailableShardIDs() []string {
+	return r.next.GetAvailableShardIDs()
 }
 
-func (m *repositoryMetrics) RouteToDLQ(ctx context.Context, shardID string, source string, payload []byte, errorMsg string, attemptCount int, firstFailedAt, lastFailedAt time.Time) error {
-	err := m.next.RouteToDLQ(ctx, shardID, source, payload, errorMsg, attemptCount, firstFailedAt, lastFailedAt)
+func (m *repositoryMetrics) RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error {
+	err := m.next.RouteToGlobalDLQ(ctx, payload, errorMsg)
 	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
 		platform.RecordInfrastructureError(ctx, platform.ComponentDLQStore)
 	}
 	return err
-}
-
-func (m *repositoryMetrics) GetAvailableShardIDs() []string {
-	return m.next.GetAvailableShardIDs()
 }
 
 // -- WebhookApp Decorator --
@@ -74,13 +90,17 @@ func NewWebhookAppMetrics(next port.WebhookApp) port.WebhookApp {
 }
 
 func (m *webhookAppMetrics) HandleMessage(ctx context.Context, merchantID string, payload []byte) error {
-	start := time.Now()
 	err := m.next.HandleMessage(ctx, merchantID, payload)
-	duration := time.Since(start)
-
-	platform.RecordConsumerMsgDuration(ctx, platform.TopicNotify, duration)
 	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
 		platform.RecordInfrastructureError(ctx, platform.ComponentWebhookHandler)
 	}
 	return err
+}
+
+func (w *webhookAppMetrics) RetryScheduler(ctx context.Context) error {
+	return w.next.RetryScheduler(ctx)
+}
+
+func (w *webhookAppMetrics) RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error {
+	return w.next.RouteToGlobalDLQ(ctx, payload, errorMsg)
 }

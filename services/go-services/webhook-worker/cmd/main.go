@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"os"
+	"errors"
 	"os/signal"
 	"syscall"
 	"time"
@@ -11,8 +11,9 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform/platform_consumer"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/adapter/inbound/kafka"
-	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/adapter/outbound/http"
+	adapterHttp "github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/adapter/outbound/http"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/adapter/outbound/observability"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/adapter/outbound/postgres"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/adapter/outbound/resilience"
@@ -21,18 +22,13 @@ import (
 )
 
 func main() {
-	cfg := platform.LoadConfig()
+	cfg := platform.LoadConfig("WEBHOOK_WORKER_")
 
 	logger, err := platform.NewLogger(cfg.LogLevel)
 	if err != nil {
 		panic("Failed to initialize logger" + err.Error())
 	}
 	defer logger.Sync()
-
-	// Initialize Telemetry
-	if err := platform.InitTelemetry(platform.ServiceNameWebhookWorker, cfg.OtelExporterEndpoint); err != nil {
-		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -44,7 +40,6 @@ func main() {
 	}
 	defer pools.Close()
 
-	// Initialize Circuit Breakers (per-pool, with terminal error policy)
 	shardIDs := pools.GetAvailableShardIDs()
 	if len(shardIDs) == 0 {
 		logger.Panic(platform.LogEventNoShardsAvailable)
@@ -54,68 +49,85 @@ func main() {
 		shardIDs,
 		domain.IsTerminalError,
 		platform.CircuitBreakerConfig{
-			MaxRequests: domain.CBMaxRequests,
-			Timeout:     domain.CBTimeout,
-			MaxFails:    domain.CBMaxFails,
+			MaxRequests: uint32(cfg.Capacity.CBHalfOpenProbes),
+			Timeout:     time.Duration(cfg.Capacity.CBTimeoutMs) * time.Millisecond,
+			Interval:    time.Duration(cfg.Capacity.CBIntervalMs) * time.Millisecond,
+			MinRequests: uint32(cfg.Capacity.CBMinRequests),
+			ErrorRate:   cfg.Capacity.CBErrorThreshold,
+			MaxFails:    uint32(cfg.Capacity.CBMaxFails),
 		},
 		logger,
 	)
 
-	// 2. Adapters
+	// 2. Adapters (Outbound)
 	repo := postgres.NewRepository(pools)
 	decoratedRepo := observability.NewRepositoryMetrics(resilience.NewRepositoryResilience(repo, cbs))
 
-	httpClient := http.NewWebhookClient()
-	breakers := resilience.NewBreakerRegistry(logger)
-	resilientHttpClient := resilience.NewHTTPClientResilience(httpClient, breakers)
+	httpAdapter := adapterHttp.NewWebhookClient(cfg)
+	breakers := resilience.NewBreakerRegistry(logger, cfg)
+	resilientHttpClient := resilience.NewHTTPClientResilience(httpAdapter, breakers)
 
 	// 3. Application core
-	service := app.NewWebhookService(decoratedRepo, resilientHttpClient, logger)
+	service := app.NewWebhookService(decoratedRepo, resilientHttpClient, logger, app.WebhookConfig{
+		MaxDeliveryAttempts:   cfg.Capacity.DeliveryMaxAttempts,
+		BaseRetryDelaySec:     float64(cfg.Capacity.DeliveryBackoffBaseMs) / 1000,
+		CapRetryDelaySec:      float64(cfg.Capacity.DeliveryBackoffCapMs) / 1000,
+		SchedulerPollInterval: time.Duration(cfg.Capacity.SchedulerPollIntervalMs) * time.Millisecond,
+		SchedulerBatchSize:    cfg.Capacity.SchedulerBatchSize,
+		FastLaneGracePeriod:   time.Duration(cfg.Capacity.FastLaneGracePeriodMs) * time.Millisecond,
+		FastLaneBufferSize:    cfg.Capacity.FastLaneBufferSize,
+		MaxConcurrency:        cfg.Capacity.WebhookMaxConcurrency,
+	})
+	appRetryCfg := platform.RetryConfig{
+		BaseDelay: time.Duration(cfg.Capacity.BackoffBaseMs) * time.Millisecond,
+		MaxDelay:  time.Duration(cfg.Capacity.BackoffCapMs) * time.Millisecond,
+	}
 	decoratedService := resilience.NewWebhookAppResilience(
 		observability.NewWebhookAppTraces(observability.NewWebhookAppMetrics(service)),
+		appRetryCfg,
 		logger,
 	)
 
 	// 4. Kafka consumer
-	reader := platform.NewKafkaReader(
-		cfg.KafkaBrokers,
-		platform.TopicNotify,
-		platform.ConsumerGroupWebhookWorker,
-		logger,
-	)
+	reader := platform.NewKafkaConsumerReader(cfg, cfg.KafkaBrokers, platform.TopicNotify, platform.ConsumerGroupWebhookWorker, time.Duration(cfg.Capacity.KafkaSessionMs)*time.Millisecond, time.Duration(cfg.Capacity.KafkaHeartbeatMs)*time.Millisecond, logger)
 	defer reader.Close()
 
-	resilientReader := resilience.NewKafkaReaderResilience(reader)
-	consumer := kafka.NewConsumer(resilientReader, decoratedService, logger)
-	resilientConsumer := resilience.NewConsumerResilience(consumer, logger)
+	consumerRetryCfg := platform.RetryConfig{
+		MaxRetries: int(cfg.Capacity.MaxRetries),
+		BaseDelay:  time.Duration(cfg.Capacity.BackoffBaseMs) * time.Millisecond,
+		MaxDelay:   time.Duration(cfg.Capacity.BackoffCapMs) * time.Millisecond,
+	}
 
-	// 5. Start background routines
+	handler := kafka.WebhookHandler(decoratedService, consumerRetryCfg, logger)
+	pipeline := platform_consumer.NewConsumerPipeline(reader, handler,
+		platform_consumer.NewConsumerConfigFromCapacity(cfg), logger)
+
+	resilientConsumer := resilience.NewConsumerResilience(pipeline, consumerRetryCfg, logger)
+
+	// 5. Background routines
 	g, gCtx := errgroup.WithContext(ctx)
 
-	g.Go(service.StartFastLaneWorkers(gCtx, domain.FastLaneWorkerPoolSize))
-
+	g.Go(service.StartFastLaneWorkers(gCtx, cfg.Capacity.FastLaneWorkerPoolSize))
 	g.Go(func() error {
 		return resilientConsumer.Consume(gCtx)
 	})
-
 	g.Go(func() error {
 		return decoratedService.RetryScheduler(gCtx)
 	})
-
 	g.Go(func() error {
-		ticker := time.NewTicker(domain.BreakerEvictionInterval)
+		ticker := time.NewTicker(time.Duration(cfg.Capacity.BreakerEvictionIntervalMs) * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-gCtx.Done():
 				return nil
 			case <-ticker.C:
-				breakers.CleanupEvicted(domain.BreakerEvictionTTL)
+				breakers.CleanupEvicted(time.Duration(cfg.Capacity.BreakerEvictionTTLMs) * time.Millisecond)
 			}
 		}
 	})
 
-	// 6. Wait for shutdown or fatal error with timeout protection
+	// 6. Wait for shutdown or fatal error
 	waitCh := make(chan struct{})
 	var groupErr error
 	go func() {
@@ -125,18 +137,13 @@ func main() {
 
 	select {
 	case <-waitCh:
-		// Background worker failed fatally
-		if groupErr != nil && groupErr != context.Canceled {
+		if groupErr != nil && !errors.Is(groupErr, context.Canceled) {
 			logger.Error(platform.LogEventServerFatalError, zap.Error(groupErr))
-			os.Exit(1)
 		}
 	case <-ctx.Done():
-		// Received OS Shutdown Signal
 		logger.Info(platform.LogEventShutdownSignalReceived)
-
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), domain.ServerShutdownTimeout)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Capacity.ShutdownTimeoutMs)*time.Millisecond)
 		defer shutdownCancel()
-
 		select {
 		case <-waitCh:
 			logger.Info(platform.LogEventServerShutdown)

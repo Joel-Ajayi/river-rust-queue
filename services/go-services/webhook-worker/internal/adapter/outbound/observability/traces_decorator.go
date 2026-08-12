@@ -39,3 +39,31 @@ func (t *webhookAppTraces) HandleMessage(ctx context.Context, merchantID string,
 	}
 	return err
 }
+
+func (t *webhookAppTraces) RetryScheduler(ctx context.Context) error {
+	spanCtx, span := platform.GetTracer().Start(ctx, "RetryScheduler")
+	defer span.End()
+
+	err := t.next.RetryScheduler(spanCtx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(
+			attribute.String(platform.MetricLabelErrorType, fmt.Sprintf("%T", err)),
+			attribute.String(platform.MetricLabelErrorMessage, err.Error()),
+		)
+	}
+	return err
+}
+
+func (t *webhookAppTraces) RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error {
+	spanCtx, span := platform.GetTracer().Start(ctx, "RouteToGlobalDLQ")
+	defer span.End()
+
+	err := t.next.RouteToGlobalDLQ(spanCtx, payload, errorMsg)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
+}

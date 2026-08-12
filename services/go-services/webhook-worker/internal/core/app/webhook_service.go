@@ -26,19 +26,55 @@ type FastLaneJob struct {
 	Merchant *domain.Merchant
 }
 
-type WebhookService struct {
-	repo       port.Repository
-	client     port.HTTPClient
-	logger     *zap.Logger
-	fastLaneCh chan FastLaneJob
+// WebhookConfig carries the delivery-retry, scheduler, and fast-lane parameters
+// derived by the capacity engine (WEBHOOK_WORKER_* env).
+type WebhookConfig struct {
+	MaxDeliveryAttempts   int
+	BaseRetryDelaySec     float64
+	CapRetryDelaySec      float64
+	SchedulerPollInterval time.Duration
+	SchedulerBatchSize    int
+	FastLaneGracePeriod   time.Duration
+	FastLaneBufferSize    int
+	MaxConcurrency        int // per-merchant concurrency limit for retry scheduler
 }
 
-func NewWebhookService(repo port.Repository, client port.HTTPClient, logger *zap.Logger) *WebhookService {
+type WebhookService struct {
+	repo   port.Repository
+	client port.HTTPClient
+	logger *zap.Logger
+
+	fastLaneCh        chan FastLaneJob
+	fastLaneGrace     time.Duration
+	maxAttempts       int
+	baseRetryDelaySec float64
+	capRetryDelaySec  float64
+	schedulerPoll     time.Duration
+	schedulerBatch    int
+	maxConcurrency    int           // per-merchant concurrency limit (retry scheduler)
+	retrySemaphores   sync.Map      // merchantID -> chan struct{} semaphore
+	schedulerSem      chan struct{} // global concurrency limit for retry scheduler
+}
+
+func NewWebhookService(repo port.Repository, client port.HTTPClient, logger *zap.Logger, cfg WebhookConfig) *WebhookService {
+	maxConc := cfg.MaxConcurrency
+	if maxConc <= 0 {
+		maxConc = domain.WebhookMaxConcurrency // sensible default (50)
+	}
 	return &WebhookService{
-		repo:       repo,
-		client:     client,
-		logger:     logger,
-		fastLaneCh: make(chan FastLaneJob, domain.FastLaneBufferSize),
+		repo:              repo,
+		client:            client,
+		logger:            logger,
+		fastLaneCh:        make(chan FastLaneJob, cfg.FastLaneBufferSize),
+		maxAttempts:       cfg.MaxDeliveryAttempts,
+		baseRetryDelaySec: cfg.BaseRetryDelaySec,
+		capRetryDelaySec:  cfg.CapRetryDelaySec,
+		schedulerPoll:     cfg.SchedulerPollInterval,
+		schedulerBatch:    cfg.SchedulerBatchSize,
+		fastLaneGrace:     cfg.FastLaneGracePeriod,
+		maxConcurrency:    maxConc,
+		retrySemaphores:   sync.Map{},
+		schedulerSem:      make(chan struct{}, cfg.FastLaneBufferSize), // Use FastLaneBufferSize or PoolSize as global bound
 	}
 }
 
@@ -91,6 +127,7 @@ func (s *WebhookService) executeFastLaneJob(ctx context.Context, job FastLaneJob
 }
 
 func (s *WebhookService) processFastLaneJob(ctx context.Context, job FastLaneJob) {
+	// tracedCtx := platform.InjectTraceIntoContext(ctx, &msg)
 	merchant := job.Merchant
 	var err error
 
@@ -132,9 +169,9 @@ func (s *WebhookService) processFastLaneJob(ctx context.Context, job FastLaneJob
 		if !job.Delivery.CreatedAt.IsZero() {
 			firstFailed = job.Delivery.CreatedAt
 		}
-		s.handleFailure(ctx, job.ShardID, merchant, job.Delivery.ID, job.Delivery.SourceEventID, job.Delivery.Payload, attempt, err, firstFailed, latencyMs)
+		go s.handleFailure(context.WithoutCancel(ctx), job.ShardID, merchant, job.Delivery.ID, job.Delivery.SourceEventID, job.Delivery.Payload, attempt, statusCode, err, firstFailed, latencyMs)
 	} else {
-		s.recordSuccess(ctx, job.ShardID, merchant, job.Delivery.ID, job.Delivery.SourceEventID, job.Delivery.Payload, statusCode, attempt, latencyMs)
+		go s.recordSuccess(context.WithoutCancel(ctx), job.ShardID, merchant, job.Delivery.ID, job.Delivery.SourceEventID, job.Delivery.Payload, statusCode, attempt, latencyMs)
 	}
 }
 
@@ -167,12 +204,21 @@ func (s *WebhookService) HandleMessage(ctx context.Context, merchantID string, p
 	}
 
 	if merchant.Status != domain.StatusActive {
+		err = s.repo.RouteToGlobalDLQ(ctx, payload, domain.ErrorMerchantInactive)
+		if err != nil {
+			return err
+		}
+		platform.LoggerWithTrace(ctx, s.logger).Warn(
+			domain.LogEventMerchantInactive,
+			zap.String(domain.JSONKeyMerchantID, merchantID),
+			zap.String(platform.LogFieldEventID, eventID),
+		)
 		return nil
 	}
 
 	deliveryID := platform.NewDeterministicDeliveryID(eventID, merchantID)
 	now := time.Now()
-	nextRetry := now.Add(domain.FastLaneGracePeriod)
+	nextRetry := now.Add(s.fastLaneGrace)
 
 	d := &domain.WebhookDelivery{
 		ID:            deliveryID,
@@ -210,12 +256,17 @@ func (s *WebhookService) attemptDelivery(ctx context.Context, m *domain.Merchant
 	return s.client.Post(ctx, m.ID, m.WebhookURL, payload, sig, timestamp, eventID, attempt)
 }
 
-func (s *WebhookService) handleFailure(ctx context.Context, shardID string, merchant *domain.Merchant, deliveryID, eventID string, payload []byte, attempt int, err error, firstFailedAt time.Time, latencyMs float64) {
+func (s *WebhookService) handleFailure(ctx context.Context, shardID string, merchant *domain.Merchant, deliveryID, eventID string, payload []byte, attempt, statusCode int, err error, firstFailedAt time.Time, latencyMs float64) {
 	// Use detached context for terminal writes to prevent state corruption on shutdown
 	detachedCtx := context.WithoutCancel(ctx)
 	now := time.Now()
 	log := platform.LoggerWithTrace(ctx, s.logger)
 	lastErr := err.Error()
+
+	var lastStatus *int
+	if statusCode > 0 {
+		lastStatus = &statusCode
+	}
 
 	d := domain.WebhookDelivery{
 		ID:            deliveryID,
@@ -226,12 +277,13 @@ func (s *WebhookService) handleFailure(ctx context.Context, shardID string, merc
 		Signature:     domain.ComputeHMACSHA256(merchant.WebhookSecret, "", payload),
 		AttemptCount:  attempt,
 		LastAttemptAt: &now,
+		LastStatus:    lastStatus,
 		LastError:     &lastErr,
 	}
 
 	isTerminal := platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationTerminal
 
-	if attempt >= domain.MaxDeliveryAttempts || isTerminal {
+	if attempt >= s.maxAttempts || isTerminal {
 		d.Status = domain.StatusDLQ
 		if dbErr := s.repo.FailDeliveryAndRouteToDLQ(detachedCtx, shardID, &d, lastErr, pii.Mask(payload), platform.NewEventID(), firstFailedAt, now); dbErr != nil {
 			log.Error(platform.LogEventDLQWriteFailed, zap.Error(dbErr))
@@ -251,8 +303,8 @@ func (s *WebhookService) handleFailure(ctx context.Context, shardID string, merc
 	// 2) Otherwise, schedule a retry
 	d.Status = domain.StatusPending
 	// exponential backoff with full jitter
-	base := float64(domain.BaseRetryDelaySeconds)
-	cap := float64(domain.CapRetryDelaySeconds)
+	base := s.baseRetryDelaySec
+	cap := s.capRetryDelaySec
 	delaySeconds := base * math.Pow(2, float64(attempt-1))
 	if delaySeconds > cap {
 		delaySeconds = cap
@@ -266,7 +318,7 @@ func (s *WebhookService) handleFailure(ctx context.Context, shardID string, merc
 	if dbErr := s.repo.ScheduleRetry(detachedCtx, shardID, &d, pii.Mask(payload), platform.NewEventID()); dbErr != nil {
 		log.Error(platform.LogEventDLQWriteFailed, zap.Error(dbErr))
 	}
-	
+
 	platform.LogCanonicalEvent(ctx, s.logger, platform.ServiceNameWebhookWorker, platform.CanonicalLogLine{
 		Event:         platform.EventWebhookFailed,
 		Status:        platform.StatusRetry,
@@ -292,6 +344,7 @@ func (s *WebhookService) recordSuccess(ctx context.Context, shardID string, merc
 		Signature:     domain.ComputeHMACSHA256(merchant.WebhookSecret, "", payload),
 		AttemptCount:  attempt,
 		LastAttemptAt: &now,
+		LastStatus:    &statusCode,
 		Status:        domain.StatusDelivered,
 		DeliveredAt:   &now,
 	}
@@ -313,7 +366,7 @@ func (s *WebhookService) recordSuccess(ctx context.Context, shardID string, merc
 
 // RetryScheduler polls Postgres for due retries and attempts them.
 func (s *WebhookService) RetryScheduler(ctx context.Context) error {
-	ticker := time.NewTicker(domain.SchedulerPollInterval)
+	ticker := time.NewTicker(s.schedulerPoll)
 	defer ticker.Stop()
 
 	for {
@@ -334,7 +387,7 @@ func (s *WebhookService) processDueRetries(ctx context.Context) {
 	}()
 
 	for _, shardID := range s.repo.GetAvailableShardIDs() {
-		deliveries, err := s.repo.FetchPendingRetries(ctx, shardID, domain.SchedulerBatchSize)
+		deliveries, err := s.repo.FetchPendingRetries(ctx, shardID, s.schedulerBatch)
 		if err != nil {
 			platform.LoggerWithTrace(ctx, s.logger).Error(domain.LogEventFetchRetries, zap.Error(err), zap.String(platform.LogFieldShardID, shardID))
 			continue
@@ -360,15 +413,29 @@ func (s *WebhookService) processDueRetries(ctx context.Context) {
 					}
 				}()
 
-				// Use detached context with timeout to ensure drain completes on shutdown
-				drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), domain.ServerShutdownTimeout)
-				defer cancel()
+				// Global concurrency limit: acquire semaphore before processing
+				s.schedulerSem <- struct{}{}
+				defer func() { <-s.schedulerSem }()
 
-				s.processFastLaneJob(drainCtx, FastLaneJob{ShardID: shardID, Delivery: d, Merchant: nil})
+				// Per-merchant concurrency limit: acquire semaphore before processing
+				sem := s.getRetrySemaphore(d.MerchantID)
+				sem <- struct{}{}
+				// free up slot when done processing
+				defer func() { <-sem }()
+
+				s.processFastLaneJob(ctx, FastLaneJob{ShardID: shardID, Delivery: d, Merchant: nil})
 			}()
 		}
 		wg.Wait()
 	}
+
+}
+
+// getRetrySemaphore returns the per-merchant concurrency semaphore.
+// Each merchant gets a buffered channel of size maxConcurrency, limiting concurrent retry goroutines for that merchant.
+func (s *WebhookService) getRetrySemaphore(merchantID string) chan struct{} {
+	actual, _ := s.retrySemaphores.LoadOrStore(merchantID, make(chan struct{}, s.maxConcurrency))
+	return actual.(chan struct{})
 }
 
 // RouteToGlobalDLQ allows the consumer to write poison pills (e.g. panics) directly to the global DLQ

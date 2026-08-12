@@ -21,7 +21,15 @@ import (
 
 func newMockBreakerRegistry() *resilience.BreakerRegistry {
 	mockLogger := zap.NewNop()
-	reg := resilience.NewBreakerRegistry(mockLogger)
+	cfg := &platform.Config{
+		Capacity: &platform.CapacityConfig{
+			CBMaxFails:       5,
+			CBHalfOpenProbes: 5,
+			CBIntervalMs:     60000,
+			CBTimeoutMs:      30000,
+		},
+	}
+	reg := resilience.NewBreakerRegistry(mockLogger, cfg)
 	_ = reg.For("test-merchant")
 	return reg
 }
@@ -97,9 +105,22 @@ func makeTestPayload(eventID string) []byte {
 	return bytes
 }
 
+func testWebhookConfig() app.WebhookConfig {
+	return app.WebhookConfig{
+		MaxDeliveryAttempts:   10,
+		BaseRetryDelaySec:     5,
+		CapRetryDelaySec:      14400,
+		SchedulerPollInterval: 5 * time.Second,
+		SchedulerBatchSize:    100,
+		FastLaneGracePeriod:   5 * time.Second,
+		FastLaneBufferSize:    1000,
+		MaxConcurrency:        50,
+	}
+}
+
 func TestWebhookService_HandleMessage_UnmarshalError(t *testing.T) {
 	mockRepo := new(MockRepository)
-	svc := app.NewWebhookService(mockRepo, new(MockHTTPClient), zap.NewNop())
+	svc := app.NewWebhookService(mockRepo, new(MockHTTPClient), zap.NewNop(), testWebhookConfig())
 
 	mockRepo.On("RouteToGlobalDLQ", mock.Anything, []byte("{invalid json}"), mock.Anything).Return(nil)
 
@@ -111,7 +132,7 @@ func TestWebhookService_HandleMessage_UnmarshalError(t *testing.T) {
 
 func TestWebhookService_HandleMessage_MerchantNotFoundRoutesToGlobalDLQ(t *testing.T) {
 	mockRepo := new(MockRepository)
-	svc := app.NewWebhookService(mockRepo, new(MockHTTPClient), zap.NewNop())
+	svc := app.NewWebhookService(mockRepo, new(MockHTTPClient), zap.NewNop(), testWebhookConfig())
 	payload := makeTestPayload("ev_1")
 
 	// 1. Mock: GetMerchantConfig returns nil, nil (not found)
@@ -126,10 +147,10 @@ func TestWebhookService_HandleMessage_MerchantNotFoundRoutesToGlobalDLQ(t *testi
 	mockRepo.AssertExpectations(t)
 }
 
-func TestWebhookService_HandleMessage_SkipsInactiveMerchant(t *testing.T) {
+func TestWebhookService_HandleMessage_InactiveMerchantRoutesToDLQ(t *testing.T) {
 	mockRepo := new(MockRepository)
 	mockClient := new(MockHTTPClient)
-	svc := app.NewWebhookService(mockRepo, mockClient, zap.NewNop())
+	svc := app.NewWebhookService(mockRepo, mockClient, zap.NewNop(), testWebhookConfig())
 	payload := makeTestPayload("ev_1")
 
 	mockRepo.On("GetMerchantConfig", mock.Anything, "merch_1").Return(&domain.Merchant{
@@ -137,9 +158,11 @@ func TestWebhookService_HandleMessage_SkipsInactiveMerchant(t *testing.T) {
 		Status: domain.StatusFrozen,
 	}, nil)
 
+	mockRepo.On("RouteToGlobalDLQ", mock.Anything, payload, domain.ErrorMerchantInactive).Return(nil)
+
 	err := svc.HandleMessage(context.Background(), "merch_1", payload)
 
-	require.NoError(t, err)
+	require.NoError(t, err) // Returns nil to commit offset
 	mockRepo.AssertExpectations(t)
 	mockClient.AssertNotCalled(t, "Post", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 	mockRepo.AssertNotCalled(t, "CompleteDelivery", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
@@ -148,7 +171,7 @@ func TestWebhookService_HandleMessage_SkipsInactiveMerchant(t *testing.T) {
 func TestWebhookService_HandleMessage_DeliverySuccess(t *testing.T) {
 	mockRepo := new(MockRepository)
 	mockClient := new(MockHTTPClient)
-	svc := app.NewWebhookService(mockRepo, mockClient, zap.NewNop())
+	svc := app.NewWebhookService(mockRepo, mockClient, zap.NewNop(), testWebhookConfig())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -181,7 +204,7 @@ func TestWebhookService_HandleMessage_DeliverySuccess(t *testing.T) {
 func TestWebhookService_HandleMessage_DeliveryFailureSchedulesRetry(t *testing.T) {
 	mockRepo := new(MockRepository)
 	mockClient := new(MockHTTPClient)
-	svc := app.NewWebhookService(mockRepo, mockClient, zap.NewNop())
+	svc := app.NewWebhookService(mockRepo, mockClient, zap.NewNop(), testWebhookConfig())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -212,7 +235,7 @@ func TestWebhookService_HandleMessage_DeliveryFailureSchedulesRetry(t *testing.T
 func TestWebhookService_HandleMessage_Concurrent(t *testing.T) {
 	mockRepo := new(MockRepository)
 	mockClient := new(MockHTTPClient)
-	svc := app.NewWebhookService(mockRepo, mockClient, zap.NewNop())
+	svc := app.NewWebhookService(mockRepo, mockClient, zap.NewNop(), testWebhookConfig())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
