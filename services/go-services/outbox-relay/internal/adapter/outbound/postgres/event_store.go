@@ -11,7 +11,7 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/port"
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 type EventStore struct {
@@ -84,12 +84,13 @@ func (e *EventStore) ProcessUnpublishedEvents(ctx context.Context, shardID strin
 		return nil
 	}
 
-	// 2. Publish events
+	// 2 & 3. Publish to Kafka, then mark events as published.
+	// The fetch batch size already bounds the number of events per transaction,
+	// so a sub-batch loop is unnecessary (see issue 21).
 	if err := publisher(ctx, events); err != nil {
 		return err
 	}
 
-	// 3. Mark as published
 	_, err = tx.Exec(ctx, `UPDATE events SET published_at = NOW() WHERE event_id = ANY($1)`, eventIDs)
 	if err != nil {
 		return err
@@ -100,22 +101,6 @@ func (e *EventStore) ProcessUnpublishedEvents(ctx context.Context, shardID strin
 		return err
 	}
 
-	return nil
-}
-
-func (e *EventStore) PurgePublishedEvents(ctx context.Context, shardID string, olderThan time.Duration) error {
-	pool, err := e.pools.ShardPool(shardID)
-	if err != nil {
-		return err
-	}
-
-	cutoff := time.Now().Add(-olderThan)
-	tag, err := pool.Exec(ctx, `DELETE FROM events WHERE published_at IS NOT NULL AND occurred_at < $1`, cutoff)
-	if err != nil {
-		return err
-	}
-
-	platform.RecordOutboxPurgedEvents(ctx, shardID, tag.RowsAffected())
 	return nil
 }
 
@@ -145,7 +130,7 @@ func (e *EventStore) RouteToDLQ(ctx context.Context, shardID string, event domai
 
 	var traceID, spanID string
 	var envelope eventsv1.EventEnvelope
-	if err := protojson.Unmarshal(event.Payload, &envelope); err == nil && envelope.Traceparent != "" {
+	if err := proto.Unmarshal(event.Payload, &envelope); err == nil && envelope.Traceparent != "" {
 		traceID, spanID = platform.ExtractTraceFromParentString(envelope.Traceparent)
 	}
 
@@ -155,7 +140,7 @@ func (e *EventStore) RouteToDLQ(ctx context.Context, shardID string, event domai
 		ON CONFLICT (id) DO UPDATE SET
 			error_message = EXCLUDED.error_message,
 			error_classification = EXCLUDED.error_classification,
-			attempt_count = EXCLUDED.attempt_count,
+			attempt_count = EXCLUDED.attempt_count + 1,
 			last_failed_at = EXCLUDED.last_failed_at,
 			status = EXCLUDED.status
 	`, event.ID, platform.ServiceNameOutboxRelay, event.Payload, errorMsg, string(platform.ClassificationPoison), 0, platform.DLQStatusOpen, traceID, spanID)

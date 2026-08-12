@@ -24,13 +24,13 @@ func NewMetricsPublisherDecorator(next port.EventPublisher, shardID string) port
 	}
 }
 
-func (m *metricsPublisherDecorator) PublishEvents(ctx context.Context, events []domain.Event) ([]string, error) {
+func (m *metricsPublisherDecorator) PublishBatch(ctx context.Context, shardID string, events []domain.Event) ([]string, error) {
 	if len(events) == 0 {
-		return m.next.PublishEvents(ctx, events)
+		return m.next.PublishBatch(ctx, shardID, events)
 	}
 
 	start := time.Now()
-	res, err := m.next.PublishEvents(ctx, events)
+	res, err := m.next.PublishBatch(ctx, shardID, events)
 	if err != nil {
 		if platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || errors.Is(err, circuitbreaker.ErrOpen) {
 			platform.RecordInfrastructureError(ctx, platform.ComponentKafkaPublisher)
@@ -59,7 +59,7 @@ type metricsStoreDecorator struct {
 	shardID string
 }
 
-// NewMetricsStoreDecorator wraps an EventStore to record purge and poison pill metrics.
+// NewMetricsStoreDecorator wraps an EventStore
 func NewMetricsStoreDecorator(next port.EventStore, shardID string) port.EventStore {
 	return &metricsStoreDecorator{
 		next:    next,
@@ -81,14 +81,6 @@ func (m *metricsStoreDecorator) GetOldestUnpublishedEventAge(ctx context.Context
 		platform.RecordInfrastructureError(ctx, platform.ComponentEventStore)
 	}
 	return dur, err
-}
-
-func (m *metricsStoreDecorator) PurgePublishedEvents(ctx context.Context, shardID string, olderThan time.Duration) error {
-	err := m.next.PurgePublishedEvents(ctx, shardID, olderThan)
-	if err != nil && (platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || platform.ClassifyError(err, nil) == platform.ClassificationTransient || errors.Is(err, circuitbreaker.ErrOpen)) {
-		platform.RecordInfrastructureError(ctx, platform.ComponentEventStore)
-	}
-	return err
 }
 
 func (m *metricsStoreDecorator) RouteToDLQ(ctx context.Context, shardID string, event domain.Event, reason string) error {

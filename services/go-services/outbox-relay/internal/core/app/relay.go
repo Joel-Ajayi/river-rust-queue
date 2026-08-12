@@ -2,153 +2,119 @@ package app
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
+	"sync/atomic"
 	"time"
 
-	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
-	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/port"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 )
 
 type RelayService struct {
-	store     port.EventStore
-	publisher port.EventPublisher
-	log       *zap.Logger
+	store          port.EventStore
+	publisher      port.EventPublisher
+	log            *zap.Logger
+	draining       chan struct{}
+	shardID        string
+	pollInterval   atomic.Int64 // nanoseconds; adjusted by the Kafka buffer monitor
+	processTimeout time.Duration
+	fetchBatchSize int
+	maxPayloadSize int
 }
 
-func NewRelayService(store port.EventStore, publisher port.EventPublisher, log *zap.Logger) *RelayService {
-	return &RelayService{
-		store:     store,
-		publisher: publisher,
-		log:       log,
+type RelayServiceConfig struct {
+	ProcessTimeout time.Duration
+	FetchBatchSize int
+	PollInterval   time.Duration
+	MaxPayloadSize int
+}
+
+func NewRelayService(store port.EventStore, publisher port.EventPublisher, log *zap.Logger, shardID string, cfg RelayServiceConfig) *RelayService {
+	s := &RelayService{
+		store:          store,
+		publisher:      publisher,
+		log:            log,
+		draining:       make(chan struct{}),
+		shardID:        shardID,
+		processTimeout: cfg.ProcessTimeout,
+		fetchBatchSize: cfg.FetchBatchSize,
+		maxPayloadSize: cfg.MaxPayloadSize,
 	}
+	s.pollInterval.Store(int64(cfg.PollInterval))
+	return s
 }
 
-func (s *RelayService) Start(ctx context.Context, shardID string) {
-	purgeTicker := time.NewTicker(domain.OutboxPurgeInterval)
-	defer purgeTicker.Stop()
+// SetDraining signals the relay to stop starting new polls after the current batch completes.
+func (s *RelayService) SetDraining() {
+	close(s.draining)
+}
 
+// SetPollInterval updates the poll interval (used by the Kafka buffer monitor).
+func (s *RelayService) SetPollInterval(d time.Duration) {
+	s.pollInterval.Store(int64(d))
+}
+
+// ShardID returns the shard this relay is responsible for.
+func (s *RelayService) ShardID() string {
+	return s.shardID
+}
+
+func (s *RelayService) Start(ctx context.Context, shardID string) error {
 	platform.LoggerWithTrace(ctx, s.log).Info(platform.LogEventRelayServiceStarted, zap.String(platform.LogFieldShardID, shardID))
 
-	attempt := 0
+	timer := time.NewTimer(time.Duration(s.pollInterval.Load()))
+	defer timer.Stop()
+
 	for {
-		jitterDelay := domain.RelayPoolInterval
-		if attempt > 0 {
-			// Outer layer exponential backoff for infrastructure failures
-			jitterDelay = platform.CalculateJitterBackoff(attempt, domain.RelayBackoffMinDelay, domain.RelayBackoffMaxDelay)
-		}
-
-		timer := time.NewTimer(jitterDelay)
-
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			platform.LoggerWithTrace(ctx, s.log).Info(platform.LogEventRelayServiceShutdown, zap.String(platform.LogFieldShardID, shardID))
-			return
-		case <-purgeTicker.C:
-			timer.Stop()
-			if err := s.store.PurgePublishedEvents(ctx, shardID, domain.OutboxPurgeAge); err != nil {
-				// Purge failure is non-fatal; log at debug level if needed
-				_ = err
-			}
+			return nil
+		case <-s.draining:
+			platform.LoggerWithTrace(ctx, s.log).Info(platform.LogEventRelayServiceDraining, zap.String(platform.LogFieldShardID, shardID))
+			return nil
 		case <-timer.C:
-			err := s.processBatch(ctx, shardID)
-			if err != nil {
-				platform.LoggerWithTrace(ctx, s.log).Error(platform.LogEventRelayBatchProcessFailed, zap.Error(err), zap.String(platform.LogFieldShardID, shardID))
-				attempt++
-			} else {
-				attempt = 0
+			start := time.Now()
+			if err := s.processBatch(ctx, shardID); err != nil {
+				s.log.Error(platform.LogEventRelayBatchProcessFailed, zap.String(platform.LogFieldShardID, shardID), zap.Error(err))
 			}
+			elapsed := time.Since(start)
+			interval := time.Duration(s.pollInterval.Load())
+			nextDelay := interval - elapsed
+			if nextDelay < 0 {
+				nextDelay = 0
+			}
+			timer.Reset(nextDelay)
 		}
 	}
 }
 
-func (s *RelayService) processBatch(ctx context.Context, shardID string) error {
-	// Record Outbox Lag Metric
-	lag, lagErr := s.store.GetOldestUnpublishedEventAge(ctx, shardID)
-	if lagErr == nil {
-		platform.RecordOutboxLag(ctx, shardID, lag)
-	}
+func (s *RelayService) processBatch(ctx context.Context, shardID string) (err error) {
+	batchCtx, cancel := context.WithTimeout(ctx, s.processTimeout)
+	defer cancel()
 
-	// 1. Process Batch of Unpublished events
-	batchCtx, batchCancel := context.WithTimeout(ctx, domain.RelayProcessTimeout)
-	defer batchCancel()
-	err := s.store.ProcessUnpublishedEvents(batchCtx, shardID, domain.RelayBatchSize, func(ctx context.Context, events []domain.Event) (err error) {
-		// Panic Middleware for Poison Pills - per-event isolation
-		defer func() {
-			if r := recover(); r != nil {
-				platform.LoggerWithTrace(ctx, s.log).Error(platform.LogEventPanicRecoveredDLQ, zap.Any(platform.LogFieldPanic, r))
-				var lastDlqErr error
-				for _, e := range events {
-					if dlqErr := s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonPanic); dlqErr != nil {
-						lastDlqErr = dlqErr
-					}
-				}
-				// If DLQ write fails, propagate error to rollback the transaction; otherwise nil to commit
-				err = lastDlqErr
-			}
-		}()
-
-		var validEvents []domain.Event
-
-		// 1. Validate each event in the batch and route invalid ones to DLQ
-		// maintain order of events in the batch
-		for _, e := range events {
-			// 1. Corrupted payload check
-			if !json.Valid(e.Payload) {
-				if dlqErr := s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonCorruptedPayload); dlqErr != nil {
-					err = dlqErr
-				}
-				continue
-			}
-
-			// 2. Message too large check
-			if len(e.Payload) > platform.KafkaMaxMessageBytes {
-				if dlqErr := s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonMessageTooLarge); dlqErr != nil {
-					err = dlqErr
-				}
-				continue
-			}
-
-			// 3. Schema validation
-			var envelope eventsv1.EventEnvelope
-			if unmarshalErr := proto.Unmarshal(e.Payload, &envelope); unmarshalErr != nil {
-				if dlqErr := s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonInvalidSchema); dlqErr != nil {
-					err = dlqErr
-				}
-				continue
-			}
-
-			validEvents = append(validEvents, e)
+	// Panic recovery at the batch level — `GetOldestUnpublishedEventAge` runs
+	// BEFORE the per-event panic recovery in processEvents can engage, so a
+	// panic here would propagate up to Start's error log without any DLQ.
+	// We count the panic via RecordOutboxPanic so it shows up in alerting
+	defer func() {
+		if r := recover(); r != nil {
+			platform.RecordOutboxPanic(batchCtx, shardID)
+			platform.LoggerWithTrace(batchCtx, s.log).Error(platform.LogEventPanicRecoveredDLQ,
+				zap.String(platform.LogFieldShardID, shardID),
+				zap.Any(platform.LogFieldPanic, r))
+			err = fmt.Errorf("panic in processBatch: %v", r)
 		}
+	}()
 
-		// 4. Publish Valid Events
-		if len(validEvents) > 0 {
-			publishCtx, publishCancel := context.WithTimeout(ctx, domain.RelayPublishTimeout)
-			_, err := s.publisher.PublishEvents(publishCtx, validEvents)
-			publishCancel()
-			if err != nil {
-				return err
-			}
-
-			// Canonical log: outbox events published (per event)
-			for _, e := range validEvents {
-				platform.LogCanonicalEvent(ctx, s.log, platform.ServiceNameOutboxRelay, platform.CanonicalLogLine{
-					Event:      platform.EventOutboxPublished,
-					Status:     platform.StatusSuccess,
-					TransferID: e.AggregateID,
-				})
-			}
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		return err
+	// Record outbox lag metric.
+	lag, lagErr := s.store.GetOldestUnpublishedEventAge(batchCtx, shardID)
+	if lagErr != nil {
+		return lagErr
 	}
-	return nil
+	platform.RecordOutboxLag(batchCtx, shardID, lag)
+
+	// Process a batch of unpublished events within the transaction.
+	return s.store.ProcessUnpublishedEvents(batchCtx, shardID, s.fetchBatchSize, s.processEvents)
 }

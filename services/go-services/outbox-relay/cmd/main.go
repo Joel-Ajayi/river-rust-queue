@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
-	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/adapter/outbound/kafka"
@@ -20,20 +20,16 @@ import (
 
 func main() {
 	// --- Config & Logs ---
-	cfg := platform.LoadConfig()
+	cfg := platform.LoadConfig("OUTBOX_RELAY_")
 	logger, err := platform.NewLogger(cfg.LogLevel)
 	if err != nil {
 		panic("logger: " + err.Error())
 	}
 	defer logger.Sync()
 
-	if err := platform.InitTelemetry(platform.ServiceNameOutboxRelay, cfg.OtelExporterEndpoint); err != nil {
-		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
-	}
-
-	// --- Context ---
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// --- Context (webhook-worker pattern: signal.NotifyContext) ---
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// --- Infrastructure ---
 	pools, err := platform.NewShardPools(ctx, cfg, logger)
@@ -42,30 +38,45 @@ func main() {
 	}
 	defer pools.Close()
 
-	kafkaWriter := platform.NewKafkaWriter(cfg.KafkaBrokers, "", logger.Named(platform.LogComponentKafka))
-	defer kafkaWriter.Close()
+	kafkaWriter := platform.NewKafkaWriter(cfg, cfg.KafkaBrokers, "", cfg.Capacity.RelayBatchMsgCount, time.Duration(cfg.Capacity.RelayBatchTimeoutMs)*time.Millisecond, logger.Named(platform.LogComponentKafka))
 
-	// Single shared Kafka Egress Circuit Breaker for all shards
-	kafkaCB := platform.NewKafkaCircuitBreaker("", platform.CircuitBreakerConfig{
-		MaxRequests: domain.CBMaxRequests,
-		Timeout:     domain.CBTimeout,
-		MaxFails:    domain.CBMaxFails,
-	})
+	// Per-shard DB circuit breakers (RW pool, the one the EventStore actually uses)
+	dbCBs := platform.NewDBCircuitBreakers(
+		platform.CBNameMerchantsGlobal,
+		pools.GetAvailableShardIDs(),
+		domain.IsTerminalError,
+		platform.CircuitBreakerConfig{
+			MaxRequests: uint32(cfg.Capacity.CBHalfOpenProbes),
+			Timeout:     time.Duration(cfg.Capacity.CBTimeoutMs) * time.Millisecond,
+			Interval:    time.Duration(cfg.Capacity.CBIntervalMs) * time.Millisecond,
+			MinRequests: uint32(cfg.Capacity.CBMinRequests),
+			ErrorRate:   cfg.Capacity.CBErrorThreshold,
+			MaxFails:    uint32(cfg.Capacity.CBMaxFails),
+		},
+		logger,
+	)
 
 	// --- Driven adapters (outbound base) ---
 	var baseEventStore port.EventStore = postgres.NewEventStore(pools, logger)
-	baseEventPublisher := resilience.NewEventPublisherCB(kafka.NewEventPublisher(kafkaWriter), kafkaCB)
+	baseKafkaPublisher := kafka.NewEventPublisher(kafkaWriter)
+	publishRetryCfg := platform.RetryConfig{
+		MaxRetries: cfg.Capacity.MaxRetries,
+		BaseDelay:  time.Duration(cfg.Capacity.BackoffBaseMs) * time.Millisecond,
+		MaxDelay:   time.Duration(cfg.Capacity.BackoffCapMs) * time.Millisecond,
+	}
+	publishTimeout := time.Duration(cfg.Capacity.RequestTimeoutMs) * time.Millisecond
+	baseEventPublisher := resilience.NewEventPublisherRetry(baseKafkaPublisher, publishRetryCfg, publishTimeout)
 
 	// Add trace decorators (global, not per-shard)
 	baseEventStore = observability.NewEventStoreTraces(baseEventStore)
-	baseEventPublisher = observability.NewEventPublisherTraces(baseEventPublisher)
 
 	// --- Workers ---
 	var wg sync.WaitGroup
+	var relays []*app.RelayService
 	for _, shardId := range pools.GetAvailableShardIDs() {
 		// Decorate dependencies per shard to isolate circuit breakers and metrics
 		shardEventStore := observability.NewMetricsStoreDecorator(
-			resilience.NewEventStoreCB(baseEventStore, shardId),
+			resilience.NewEventStoreCB(baseEventStore, shardId, dbCBs),
 			shardId,
 		)
 
@@ -78,40 +89,58 @@ func main() {
 			shardEventStore,
 			shardEventPublisher,
 			logger,
+			shardId,
+			app.RelayServiceConfig{
+				ProcessTimeout: time.Duration(cfg.Capacity.RequestTimeoutMs) * time.Millisecond,
+				FetchBatchSize: cfg.Capacity.FetchBatchSize,
+				PollInterval:   time.Duration(cfg.Capacity.RelayPoolIntervalMs) * time.Millisecond,
+				MaxPayloadSize: cfg.Capacity.RelayMaxPayloadBytes,
+			},
 		)
+		relays = append(relays, shardRelayApp)
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			shardRelayApp.Start(ctx, shardId)
+			if err := shardRelayApp.Start(ctx, shardId); err != nil {
+				logger.Error(platform.LogEventRelayWorkerError, zap.String(platform.LogFieldShardID, shardId), zap.Error(err))
+			}
 		}()
 	}
 
-	// --- Graceful Shutdown ---
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
+	// --- Kafka buffer monitor: throttle/pause polling when in-flight bytes fill ---
+	go monitorKafkaBuffer(ctx, baseKafkaPublisher, relays, cfg, logger)
 
-	// Read your standard shutdown timeout limit from your configuration structs
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), domain.ServerShutdownTimeout)
+	// --- Graceful Shutdown (webhook-worker pattern: wait on the signal context) ---
+	<-ctx.Done() // Triggers ctx.Done() for all relayers
+
+	// 1. Signal all shards to stop starting new poll cycles (they finish the current batch).
+	for _, r := range relays {
+		r.SetDraining()
+	}
+
+	// 2. Wait for all in-flight batches to complete (or timeout).
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Capacity.ShutdownTimeoutMs)*time.Millisecond)
 	defer shutdownCancel()
 
-	// Fix: Protect the WaitGroup against permanent thread lockups
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
 		close(done)
 	}()
 
-	cancel() // Triggers ctx.Done() for all relayers
-
 	select {
 	case <-done:
 		logger.Info(platform.LogEventAllRelayersShutdown)
 	case <-shutdownCtx.Done():
-		// Force close the database pool and telemetry here to release handles before crashing
 		logger.Warn(platform.LogEventOutboxShutdownTimeout)
 	}
 
+	// 3. Close the Kafka producer (flushes buffered messages automatically).
+	if err := kafkaWriter.Close(); err != nil {
+		logger.Error(platform.LogEventKafkaWriterCloseFailed, zap.Error(err))
+	}
+
+	// 5. Flush telemetry.
 	_ = platform.ShutdownTelemetry(context.Background())
 }

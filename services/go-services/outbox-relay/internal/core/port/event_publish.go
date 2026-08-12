@@ -9,5 +9,5 @@ import (
 // -- outbound --
 // EventPublisher is a driven port for publishing events to Kafka.
 type EventPublisher interface {
-	PublishEvents(ctx context.Context, events []domain.Event) ([]string, error)
+	PublishBatch(ctx context.Context, shardID string, events []domain.Event) ([]string, error)
 }
