@@ -8,11 +8,8 @@ type WalletType string
 const (
 	WalletStatusFrozen WalletStatus = WalletStatus(platform.WalletStatusFrozen)
 	WalletStatusClosed WalletStatus = WalletStatus(platform.WalletStatusClosed)
-	WalletStatusActive WalletStatus = WalletStatus(platform.WalletStatusActive)
 
-	WalletTypeSystem    WalletType = WalletType(platform.WalletTypeSystem)
-	WalletTypeCustomer  WalletType = WalletType(platform.WalletTypeCustomer)
-	WalletTypeFiatVault WalletType = WalletType(platform.WalletTypeFiatVault)
+	WalletTypeSystem WalletType = WalletType(platform.WalletTypeSystem)
 )
 
 // IsSystemWallet returns true for wallet types that are allowed negative balances.

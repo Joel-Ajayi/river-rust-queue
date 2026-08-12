@@ -3,10 +3,10 @@ package domain
 type WalletID string
 
 type VelocityRule struct {
-	Name          string
-	WindowSeconds int
-	Threshold     int
-	Reason        string
+	Name      string
+	WindowMs  int
+	Threshold int
+	Reason    string
 }
 
 type Event struct {

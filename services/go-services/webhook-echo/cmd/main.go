@@ -38,10 +38,6 @@ func main() {
 	}
 	defer logger.Sync()
 
-	if err := platform.InitTelemetry(platform.ServiceNameWebhookEcho, "http://agent-collector.observability.svc.cluster.local:4317"); err != nil {
-		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
-	}
-
 	// -- Port --
 	port := os.Getenv(EnvVarPort)
 

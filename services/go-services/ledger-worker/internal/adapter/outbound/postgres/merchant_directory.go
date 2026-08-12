@@ -41,4 +41,3 @@ func (md *MerchantDirectory) ShardFor(ctx context.Context, merchantID string) (s
 
 	return shardID, nil
 }
-

@@ -36,7 +36,7 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 		return err
 	}
 
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return err
 	}

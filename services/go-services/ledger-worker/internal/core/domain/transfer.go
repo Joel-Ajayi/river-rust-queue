@@ -16,18 +16,3 @@ type Transfer struct {
 	FailureReason *string
 	PostedAt      time.Time
 }
-
-type XShardTransfer struct {
-	TransferID string
-	JobID      string
-	SrcShard   string
-	DstShard   string
-	FromWallet string
-	ToWallet   string
-	Amount     int64
-	Currency   string
-	State      string
-	Reason     string
-}
-
-

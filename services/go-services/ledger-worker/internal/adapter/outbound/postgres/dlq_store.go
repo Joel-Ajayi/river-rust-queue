@@ -37,7 +37,7 @@ func (s *dlqStore) WriteDLQEntry(ctx context.Context, shardID string, entry doma
 		INSERT INTO dlq_entries (id, source, original_payload, error_message, error_classification, attempt_count, first_failed_at, last_failed_at, status, trace_id, span_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
 		ON CONFLICT (id) DO UPDATE SET
 			error_message = EXCLUDED.error_message,
-			attempt_count = EXCLUDED.attempt_count,
+			attempt_count = EXCLUDED.attempt_count + 1,
 			last_failed_at = EXCLUDED.last_failed_at,
 			status = EXCLUDED.status
 	`,

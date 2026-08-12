@@ -2,8 +2,9 @@ package main
 
 import (
 	"context"
-	"os"
+	"errors"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,84 +20,116 @@ import (
 )
 
 func main() {
-	// Load Config
-	cfg := platform.LoadConfig()
+	cfg := platform.LoadConfig("FRAUD_WORKER_")
 
-	// Initialize Logger
 	logger, err := platform.NewLogger(cfg.LogLevel)
 	if err != nil {
 		panic("logger: " + err.Error())
 	}
 	defer logger.Sync()
 
-	// Initialize Telemetry
-	if err := platform.InitTelemetry(platform.ServiceNameFraudWorker, cfg.OtelExporterEndpoint); err != nil {
-		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
-	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Initialize Database Pools
 	pools, err := platform.NewShardPools(ctx, cfg, logger)
 	if err != nil {
 		logger.Panic(platform.LogEventPostgresInitFailed, zap.Error(err))
 	}
 	defer pools.Close()
 
-	// Initialize Redis
 	redisClient, err := platform.NewRedisClient(ctx, cfg.RedisAddr(), cfg.RedisDataPassword, logger)
 	if err != nil {
 		logger.Panic(platform.LogEventRedisInitFailed, zap.Error(err))
 	}
 	defer redisClient.Close()
 
-	// Initialize Circuit Breakers (per-pool, with default CB configurations)
 	cbs := platform.NewDBCircuitBreakers(
 		platform.CBNameMerchantsGlobal,
 		pools.GetAvailableShardIDs(),
-		func(error) bool { return false },
+		domain.IsTerminalError,
 		platform.CircuitBreakerConfig{
-			MaxRequests: 10,
-			Timeout:     5 * time.Second,
-			MaxFails:    3,
+			MaxRequests: uint32(cfg.Capacity.CBHalfOpenProbes),
+			Timeout:     time.Duration(cfg.Capacity.CBTimeoutMs) * time.Millisecond,
+			Interval:    time.Duration(cfg.Capacity.CBIntervalMs) * time.Millisecond,
+			MinRequests: uint32(cfg.Capacity.CBMinRequests),
+			ErrorRate:   cfg.Capacity.CBErrorThreshold,
+			MaxFails:    uint32(cfg.Capacity.CBMaxFails),
 		},
+		logger,
 	)
 
-	// Initialize adapters with metrics & resilience decorators
 	walletRepo := observability.NewWalletRepositoryMetrics(resilience.NewWalletRepositoryResilience(postgres.NewWalletRepository(pools, logger), cbs))
 	merchantDir := observability.NewMerchantDirectoryMetrics(resilience.NewMerchantDirectoryResilience(postgres.NewMerchantDirectory(pools, logger), cbs))
 	dlqStore := observability.NewDLQStoreMetrics(resilience.NewDLQStoreResilience(postgres.NewDLQStore(pools, logger), cbs))
 
-	redisStore := redis.NewRedisStore(redisClient)
+	redisBreaker := platform.NewRedisCircuitBreaker(
+		platform.CBNameRedis,
+		platform.CircuitBreakerConfig{
+			MaxRequests: uint32(cfg.Capacity.CBHalfOpenProbes),
+			Timeout:     time.Duration(cfg.Capacity.CBTimeoutMs) * time.Millisecond,
+			Interval:    time.Duration(cfg.Capacity.CBIntervalMs) * time.Millisecond,
+			MinRequests: uint32(cfg.Capacity.CBMinRequests),
+			ErrorRate:   cfg.Capacity.CBErrorThreshold,
+			MaxFails:    uint32(cfg.Capacity.CBMaxFails),
+		},
+		logger,
+	)
+	redisStore := observability.NewRedisStoreMetrics(resilience.NewRedisStoreResilience(redis.NewRedisStore(redisClient), redisBreaker))
 
-	// Default velocity rule: 50 transfers in 60s
+	velocityThreshold := int(cfg.Capacity.VelocityThreshold)
+
 	rules := []domain.VelocityRule{
 		{
-			Name:          "velocity_high",
-			WindowSeconds: 60,
-			Threshold:     50,
-			Reason:        "50+ transfers from wallet in 60 seconds",
+			Name:      domain.DefaultVelocityRuleName,
+			WindowMs:  domain.DefaultVelocityThreshold,
+			Threshold: velocityThreshold,
+			Reason:    domain.DefaultVelocityReason,
 		},
 	}
 
-	// Initialize Fraud Service (no in-memory goroutine dispatch — Redis is the single source of truth for velocity state)
 	fraudService := app.NewFraudService(logger, walletRepo, redisStore, merchantDir, rules)
-
-	// Wrap in traces + metrics handlers
 	handler := observability.NewJobHandlerTraces(observability.NewJobHandlerMetrics(fraudService))
 
-	// Initialize Kafka Reader & ConsumerManager
-	reader := platform.NewKafkaReader(cfg.KafkaBrokers, platform.TopicJobs, platform.ConsumerGroupFraudWorker, logger)
-	consumerManager := kafka.NewConsumerManager(logger, reader, handler, dlqStore, merchantDir, pools)
-	consumerManager.Start(ctx)
+	reader := platform.NewKafkaConsumerReader(cfg, cfg.KafkaBrokers, platform.TopicJobs, platform.ConsumerGroupFraudWorker, time.Duration(cfg.Capacity.KafkaSessionMs)*time.Millisecond, time.Duration(cfg.Capacity.KafkaHeartbeatMs)*time.Millisecond, logger)
+	consumerManager := kafka.NewConsumerManager(logger, reader, handler, dlqStore, merchantDir, pools, cfg)
+	retryCfg := platform.RetryConfig{
+		MaxRetries: int(cfg.Capacity.MaxRetries),
+		BaseDelay:  time.Duration(cfg.Capacity.BackoffBaseMs) * time.Millisecond,
+		MaxDelay:   time.Duration(cfg.Capacity.BackoffCapMs) * time.Millisecond,
+	}
+	resilientConsumer := resilience.NewConsumerResilience(consumerManager, retryCfg, logger)
 
-	// Wait for shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	logger.Info(platform.LogEventServerStarted)
 
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := resilientConsumer.Consume(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error(platform.LogEventKafkaConsumerStopped, zap.Error(err))
+		}
+	}()
+
+	<-ctx.Done()
 	logger.Info(platform.LogEventShutdownSignalReceived)
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Capacity.ShutdownTimeoutMs)*time.Millisecond)
+	defer shutdownCancel()
+
+	select {
+	case <-done:
+		logger.Info(platform.LogEventAllConsumersShutdown)
+	case <-shutdownCtx.Done():
+		logger.Warn(platform.LogEventConsumerShutdownTimeout)
+	}
+
 	consumerManager.Stop()
-	logger.Info(platform.LogEventServerShutdown)
+
+	_ = platform.ShutdownTelemetry(context.Background())
 }

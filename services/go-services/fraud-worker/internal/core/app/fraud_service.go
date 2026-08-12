@@ -47,18 +47,20 @@ func (s *FraudService) ProcessJob(ctx context.Context, payload *eventsv1.JobRequ
 		return nil
 	}
 
+	// Account for deposit transfers, check destination wallet if source wallet is empty
 	event := domain.Event{
 		EventID:   eventID,
 		WalletID:  transferData.FromWallet,
 		Timestamp: occurredAt,
+	}
+	if transferData.FromWallet == "" {
+		event.WalletID = transferData.ToWallet
 	}
 
 	return s.processEvent(ctx, payload.MerchantId, event)
 }
 
 func (s *FraudService) processEvent(ctx context.Context, merchantID string, event domain.Event) error {
-	walletID := event.WalletID
-
 	shardID, err := s.merchantDir.ShardFor(ctx, merchantID)
 	if err != nil {
 		s.logger.Error(platform.LogEventMerchantLookupFailed, zap.String(platform.MetricLabelMerchantID, merchantID), zap.Error(err))
@@ -70,10 +72,13 @@ func (s *FraudService) processEvent(ctx context.Context, merchantID string, even
 			return ctx.Err()
 		}
 
-		count, err := s.redis.UpdateVelocity(ctx, walletID, event.EventID, event.Timestamp, rule.WindowSeconds)
+		count, err := s.redis.UpdateVelocity(ctx, event.WalletID, event.EventID, event.Timestamp, rule.WindowMs)
 		if err != nil {
-			s.logger.Error(platform.LogEventRedisVelocityUpdateFailed, zap.String(platform.MetricLabelWalletID, walletID), zap.Error(err))
-			continue
+			// Record fail-closed metric so operators can distinguish Redis outages
+			// from legitimate business-rule rejections (see issue 27).
+			platform.RecordRedisFailClosed(ctx)
+			s.logger.Error(platform.LogEventRedisVelocityUpdateFailed, zap.String(platform.MetricLabelWalletID, event.WalletID), zap.Error(err))
+			return err
 		}
 
 		if count >= rule.Threshold {
@@ -82,15 +87,15 @@ func (s *FraudService) processEvent(ctx context.Context, merchantID string, even
 				Event:        platform.EventFraudVelocityCheck,
 				Status:       platform.StatusFailed,
 				MerchantID:   merchantID,
-				WalletID:     walletID,
+				WalletID:     event.WalletID,
 				ErrorCode:    platform.ErrorCodeVelocityLimitExceeded,
 				ErrorMessage: fmt.Sprintf("rule=%s count=%d threshold=%d", rule.Name, count, rule.Threshold),
 			})
 
 			// Metric: velocity limit exceeded
-			platform.RecordVelocityLimitExceeded(ctx, walletID, rule.Name)
+			platform.RecordVelocityLimitExceeded(ctx, event.WalletID, rule.Name)
 
-			if freezeErr := s.maybeFreezeWallet(ctx, shardID, walletID, rule); freezeErr != nil {
+			if freezeErr := s.maybeFreezeWallet(ctx, shardID, event.WalletID, rule); freezeErr != nil {
 				return freezeErr
 			}
 		}

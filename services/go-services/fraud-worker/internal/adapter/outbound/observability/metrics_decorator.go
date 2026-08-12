@@ -78,6 +78,24 @@ func (m *jobHandlerMetrics) ProcessJob(ctx context.Context, payload *eventsv1.Jo
 	return err
 }
 
+type redisStoreMetrics struct {
+	next port.RedisStore
+}
+
+func NewRedisStoreMetrics(next port.RedisStore) port.RedisStore {
+	return &redisStoreMetrics{next: next}
+}
+
+func (m *redisStoreMetrics) UpdateVelocity(ctx context.Context, walletID string, eventID string, timestampMs int64, windowMs int) (int, error) {
+	count, err := m.next.UpdateVelocity(ctx, walletID, eventID, timestampMs, windowMs)
+	if err != nil {
+		if platform.ClassifyError(err, func(error) bool { return false }) == platform.ClassificationInfrastructure {
+			platform.RecordInfrastructureError(ctx, platform.ComponentRedis)
+		}
+	}
+	return count, err
+}
+
 type dlqStoreMetrics struct {
 	next port.DLQStore
 }

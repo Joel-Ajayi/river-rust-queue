@@ -59,7 +59,7 @@ func (p *JobService) ProcessJob(ctx context.Context, payload *eventsv1.JobReques
 	}
 
 	transfer := domain.Transfer{
-		ID:         platform.NewTransferID(),
+		ID:         platform.NewDeterministicTransferID(payload.JobId),
 		JobID:      payload.JobId,
 		MerchantID: payload.MerchantId,
 		FromWallet: transferData.FromWallet,

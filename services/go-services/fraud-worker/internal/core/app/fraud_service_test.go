@@ -22,10 +22,10 @@ func TestFraudService_ProcessJob_TripsThreshold(t *testing.T) {
 
 	rules := []domain.VelocityRule{
 		{
-			Name:          "test_rule",
-			WindowSeconds: 60,
-			Threshold:     5,
-			Reason:        "Velocity high",
+			Name:      "test_rule",
+			WindowMs:  60,
+			Threshold: 5,
+			Reason:    "Velocity high",
 		},
 	}
 
@@ -62,10 +62,10 @@ func TestFraudService_ProcessJob_BelowThreshold(t *testing.T) {
 
 	rules := []domain.VelocityRule{
 		{
-			Name:          "test_rule",
-			WindowSeconds: 60,
-			Threshold:     5,
-			Reason:        "Velocity high",
+			Name:      "test_rule",
+			WindowMs:  60,
+			Threshold: 5,
+			Reason:    "Velocity high",
 		},
 	}
 
@@ -142,10 +142,10 @@ func TestFraudService_ProcessJob_Concurrent(t *testing.T) {
 
 	rules := []domain.VelocityRule{
 		{
-			Name:          "test_rule",
-			WindowSeconds: 60,
-			Threshold:     10,
-			Reason:        "Velocity high",
+			Name:      "test_rule",
+			WindowMs:  60,
+			Threshold: 10,
+			Reason:    "Velocity high",
 		},
 	}
 
