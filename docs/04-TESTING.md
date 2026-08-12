@@ -1,6 +1,6 @@
 # 04: Testing Strategy
 
-RRQ is a **high-throughput closed-loop ledger** targeted at **2,000–5,000 TPS sustained** and **10,000+ TPS peak**. The testing strategy is designed to match that — it is _not_ a side-project test suite.
+RRQ is a **high-throughput closed-loop ledger** targeted at **5,000–10,000 TPS sustained/peak**. The testing strategy is designed to match that — it is _not_ a side-project test suite.
 
 ---
 
@@ -36,10 +36,10 @@ The pyramid is wider in the middle than classic because a distributed payment sy
 
 | Metric                         | Target       | How Measured                       |
 | ------------------------------ | ------------ | ---------------------------------- |
-| **Sustained TPS**              | 2,000+       | API 202 acceptance rate over 30min |
+| **Sustained TPS**              | 5,000+       | API 202 acceptance rate over 30min |
 | **Peak TPS**                   | 10,000+      | Ramp-to-peak scenario              |
-| **API acceptance p95 latency** | <200ms       | k6 `http_req_duration`             |
-| **API acceptance p99 latency** | <500ms       | k6 `http_req_duration`             |
+| **API acceptance p95 latency** | <100ms       | k6 `http_req_duration`             |
+| **API acceptance p99 latency** | <200ms       | k6 `http_req_duration`             |
 | **End-to-end settlement p95**  | <2s          | Job completion → status check      |
 | **End-to-end settlement p99**  | <5s          | Job completion → status check      |
 | **Error rate**                 | <0.1%        | k6 `http_req_failed`               |
@@ -111,7 +111,7 @@ Protobuf schemas in `api/proto/` are validated with `buf` for lint and breaking 
 
 ## Non-Functional Testing (k6)
 
-All performance testing uses [k6](https://k6.io). Scenarios are designed to simulate real payment traffic patterns against the production-grade target of **2,000+ sustained TPS**.
+All performance testing uses [k6](https://k6.io). Scenarios are designed to simulate real payment traffic patterns against the production-grade target of **5,000+ sustained TPS**.
 
 ### Wallet Pool
 
@@ -125,49 +125,49 @@ The scenarios are divided into five main testing categories:
 
 Verifies response times, throughput, and system resource limits under varying load conditions.
 
-- **Load Testing (`load-sustained.js`)**: Evaluates normal operating parameters with 1,000 VUs over 30 minutes at a target rate of 2,000+ TPS. Thresholds: `p95<200ms`, `errors<0.1%`.
-- **Stress Testing (`stress-bulk-payout.js`)**: Assesses behaviour at/beyond capacity limits (50 VUs, 15m, 25,000 payout legs). Thresholds: `p95<2s`, `errors<1%`.
-- **Spike Testing (`spike-surge.js`)**: Tests response to sudden, extreme load changes (0 to 2,000 VUs in 5s). Thresholds: `p99<1s`, `errors<1%`.
-- **Soak Testing (`soak-endurance.js`)**: Confirms endurance and checks for memory/connection leaks over 4 hours with 500 VUs. Thresholds: `no degradation`.
+- **Load Testing (`load.ts`)**: Evaluates normal operating parameters with open-model `ramping-arrival-rate` at 5,000 TPS. Thresholds: `p95<100ms`, `p99<200ms`, `errors<0.05%`.
+- **Stress Testing (`stress.ts`)**: Assesses behaviour at/beyond capacity limits up to 15,000 TPS. Thresholds: `p99<1000ms`.
+- **Spike Testing (`spike.ts`)**: Tests response to sudden, extreme load changes (500 → 10,000 TPS ramp in 1m, hold 1m, ramp down 3m). Thresholds: `errors<1%`.
+- **Soak Testing (`soak.ts`)**: Confirms endurance and checks for memory/connection leaks over 4 hours at 2,500 TPS. Thresholds: `p95<150ms`, `errors<0.1%`.
 
 #### 2. Security Testing
 
 Verifies that the edge gateway and API handlers restrict unauthorized access and handle malicious payloads under load.
 
-- **Edge Protection (`edge-protection.js`)**: Floods the gateway with requests lacking credentials, using invalid signatures, or carrying giant bodies to verify edge isolation. Thresholds: `100% blocked/unauthorized`.
+- **Edge Protection**: Floods the gateway with requests lacking credentials, using invalid signatures, or carrying giant bodies to verify edge isolation. Thresholds: `100% blocked/unauthorized`.
 
 #### 3. Compatibility Testing
 
 Validates API contract schema structure and types against specification schema definitions.
 
-- **Contract Compliance (`contract-compliance.js`)**: Validates that all REST response payloads conform exactly to Protobuf specifications. Thresholds: `errors<0.001%`.
+- **Contract Compliance**: Validates that all REST response payloads conform exactly to Protobuf specifications. Thresholds: `errors<0.001%`.
 
 #### 4. Reliability / Fault Tolerant Testing
 
 Verifies system behaviour, self-healing, and fault tolerance during errors, limit violations, or component failures.
 
-- **Circuit Breaker / Fallback (`circuit-breaker.js`)**: Verifies that downstream database failures trigger circuit breakers, preserving API response times.
-- **Fraud Limit Restrictions (`fraud-throughput.js`)**: Validates that velocity limit checks trigger correct 429/403 status codes and protect system databases under high rate.
-- **Data Integrity / Reconciliation (`reconciliation-integrity.js`)**: Proves ledger correctness and double-entry consistency under concurrent load.
+- **Circuit Breaker / Fallback**: Verifies that downstream database failures trigger circuit breakers, preserving API response times.
+- **Fraud Limit Restrictions**: Validates that velocity limit checks trigger correct 429/403 status codes and protect system databases under high rate.
+- **Data Integrity / Reconciliation**: Proves ledger correctness and double-entry consistency under concurrent load.
 
 #### 5. Scalability Testing
 
 Evaluates how the system scales as load increases and verifies dynamic multi-shard database routing.
 
-- **Ramp to Peak (`ramp-to-peak.js`)**: Ramps up VUs (0 to 5,000) over 20 minutes to profile scaling limits at 10,000 TPS. Thresholds: `p95<500ms`, `errors<0.5%`.
-- **Cross-Shard Throughput (`cross-shard-throughput.js`)**: Verifies two-phase commit saga coordinator throughput and network balance across database shards.
+- **Breakpoint / Ramp to Peak (`breakpoint.ts`)**: Ramps arrival rate from 100 → 3,000 TPS on a single pod to profile per-core capacity. Thresholds: `p95<500ms`, `errors<1%`.
+- **Cross-Shard Throughput**: Verifies two-phase commit saga coordinator throughput and network balance across database shards.
 
 ### Running k6
 
 ```bash
-# Run a specific scenario (default: load-sustained)
-make bench SCENARIO=load-sustained
+# Run a specific scenario (default: load)
+make bench SCENARIO=load
 
 # Run all scenarios sequentially (nightly)
 make bench-all
 
 # Run against a specific environment
-BASE_URL=https://staging.rrq.io make bench SCENARIO=load-sustained
+BASE_URL=https://staging.rrq.io make bench SCENARIO=load
 
 # Quick smoke test (1 minute, for CI)
 make bench-smoke
@@ -195,7 +195,7 @@ In addition to k6 scenarios, pre-release qualification includes:
 
 ## Observability-Backed Verification
 
-k6 tests **are not just load generators**. They are real users driving real traffic through the full deployed platform (Kong → Gateway → Postgres → Outbox Relay → Kafka → Workers). Every request produces real Postgres rows, Kafka messages, OTel traces, Prometheus metrics, and canonical log lines.
+k6 tests **are not just load generators**. They are real users driving real traffic through the full deployed platform (Envoy → Gateway → Postgres → Outbox Relay → Kafka → Workers). Every request produces real Postgres rows, Kafka messages, OTel traces, Prometheus metrics, and canonical log lines.
 
 After the load generation phase ends, `k6/verify.sh` runs automated checks against the observability stack to validate the system _actually_ behaved correctly — not just that HTTP status codes looked right.
 
@@ -287,8 +287,8 @@ Summary reports are written to `k6/reports/<scenario>-verify.json` with all chec
 | Test package          | `xxx_test` (external) for black-box testing             |
 | Mock file             | `mock_*.go` or `mock_ports_test.go` in the same package |
 | Test function         | `Test<Type>_<Method>_<Scenario>`                        |
-| k6 scenario file      | `k6/scenarios/<letter>-<hyphenated-name>.js`            |
-| k6 helper             | `lib/helpers.js` — shared HTTP request builders         |
+| k6 scenario file      | `k6/scenarios/<letter>-<hyphenated-name>.ts`            |
+| k6 helper             | `lib/<helper>.ts` — shared HTTP request builders        |
 
 ---
 
@@ -305,7 +305,7 @@ Summary reports are written to `k6/reports/<scenario>-verify.json` with all chec
 | Platform unit tests           | `services/go-services/internal/platform/`                                   |
 | Per-service unit tests        | Each service's `internal/core/app/`                                         |
 | Per-service integration tests | Various `*_test.go` files with `integration` build tag                      |
-| k6 scenarios                  | `k6/scenarios/performance/`, `k6/scenarios/reliability/`, etc.              |
+| k6 scenarios                  | `k6/scenarios/*.ts`                                                         |
 | k6 shared lib                 | `k6/lib/`                                                                   |
 | k6 reports                    | `k6/reports/`                                                               |
 | Fraud service tests           | `services/go-services/fraud-worker/internal/core/app/fraud_service_test.go` |

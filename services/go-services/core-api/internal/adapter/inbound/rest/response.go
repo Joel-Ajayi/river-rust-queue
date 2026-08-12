@@ -36,9 +36,17 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	}
 }
 
+// SetMaxRequestBodyBytes overrides the HTTP body limit from the capacity engine (CORE_API_MAX_REQUEST_BYTES).
+func SetMaxRequestBodyBytes(n int64) {
+	maxRequestBodyBytes = n
+}
+
+// maxRequestBodyBytes defaults to the engine-derived 512 KiB (see slo-input payload bytes × 64).
+var maxRequestBodyBytes int64 = 512 * 1024
+
 // decodeProtoBody reads the HTTP request body safely and decodes it into a protobuf message.
 func decodeProtoBody(w http.ResponseWriter, r *http.Request, msg proto.Message) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, domain.MaxRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError

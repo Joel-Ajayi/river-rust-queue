@@ -1,12 +1,14 @@
 package rest
 
 import (
+	"context"
 	"net/http"
 	"time"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
 	apiv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/api/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
+	"github.com/failsafe-go/failsafe-go"
 )
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
@@ -24,9 +26,9 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 
 	// Get job status inside the Layer 1 retry boundary.
 	var job domain.Job
-	err := retryBoundary(r.Context(), func() error {
+	err := s.retryBoundary(r.Context(), func(attemptCtx context.Context, exec failsafe.Execution[any]) error {
 		var fnErr error
-		job, fnErr = s.jobs.GetJobStatus(r.Context(), principal.MerchantID, jobID)
+		job, fnErr = s.jobs.GetJobStatus(attemptCtx, principal.MerchantID, jobID)
 		return fnErr
 	})
 	if err != nil {

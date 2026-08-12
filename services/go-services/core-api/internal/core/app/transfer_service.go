@@ -26,9 +26,9 @@ func NewTransferService(mDir port.MerchantDirectory, wDir port.WalletDirectory, 
 	}
 }
 
-func (s *TransferService) Submit(ctx context.Context, t domain.Transfer, idempKey string) (domain.SubmitResult, error) {
+func (s *TransferService) Transfer(ctx context.Context, t domain.Transfer, idempKey string) (domain.SubmitResult, error) {
 	// Validate and return destination MerchantID
-	toMerchantID, err := t.Validate()
+	toMerchantID, err := t.Validate(false)
 	if err != nil {
 		return domain.SubmitResult{}, err
 	}

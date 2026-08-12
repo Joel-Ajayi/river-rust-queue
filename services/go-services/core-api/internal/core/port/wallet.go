@@ -10,7 +10,7 @@ import (
 // WalletUseCase is a driving port for wallet actions.
 type WalletUseCase interface {
 	CreateWallet(ctx context.Context, merchantID, currency string) (string, error)
-	Deposit(ctx context.Context, merchantID, walletID string, amount int64, currency, idempKey string) (domain.SubmitResult, error)
+	Deposit(ctx context.Context, t domain.Transfer, idempKey string) (domain.SubmitResult, error)
 }
 
 // -- Outgoing ports --
@@ -27,6 +27,7 @@ type ShardPools interface {
 	ShardPoolRO(shardId string) (*pgxpool.Pool, error)
 	AllShardPools() map[string]*pgxpool.Pool
 }
+
 // WalletStore is a driven port for wallet persistence and queries on shards.
 type WalletStore interface {
 	CreateWallet(ctx context.Context, shardID, walletID, merchantID, currency, walletType string) error

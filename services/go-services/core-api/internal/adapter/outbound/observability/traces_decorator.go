@@ -21,7 +21,7 @@ func NewTransferSubmitterTraces(next port.TransferSubmitter) port.TransferSubmit
 	return &transferSubmitterTraces{next: next}
 }
 
-func (t *transferSubmitterTraces) Submit(ctx context.Context, tr domain.Transfer, idempKey string) (domain.SubmitResult, error) {
+func (t *transferSubmitterTraces) Transfer(ctx context.Context, tr domain.Transfer, idempKey string) (domain.SubmitResult, error) {
 	ctx, span := platform.GetTracer().Start(ctx, "api.transfer_submitter.submit",
 		trace.WithAttributes(
 			attribute.String(platform.MetricLabelMerchantID, tr.MerchantID),
@@ -30,7 +30,7 @@ func (t *transferSubmitterTraces) Submit(ctx context.Context, tr domain.Transfer
 			attribute.String("idempotency_key", idempKey)))
 	defer span.End()
 
-	result, err := t.next.Submit(ctx, tr, idempKey)
+	result, err := t.next.Transfer(ctx, tr, idempKey)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -183,4 +183,59 @@ func (w *walletDirectoryTraces) GetBalance(ctx context.Context, shardID, walletI
 		)
 	}
 	return bal, curr, err
+}
+
+// Trace wrapper for WalletUseCase
+type walletUseCaseTraces struct {
+	next port.WalletUseCase
+}
+
+func NewWalletUseCaseTraces(next port.WalletUseCase) port.WalletUseCase {
+	return &walletUseCaseTraces{next: next}
+}
+
+func (w *walletUseCaseTraces) CreateWallet(ctx context.Context, merchantID, currency string) (string, error) {
+	ctx, span := platform.GetTracer().Start(ctx, "api.wallet_use_case.create_wallet",
+		trace.WithAttributes(
+			attribute.String(platform.MetricLabelMerchantID, merchantID),
+			attribute.String("currency", currency)))
+	defer span.End()
+
+	walletID, err := w.next.CreateWallet(ctx, merchantID, currency)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(
+			attribute.String(platform.MetricLabelErrorType, fmt.Sprintf("%T", err)),
+			attribute.String(platform.MetricLabelErrorMessage, err.Error()),
+		)
+		return "", err
+	}
+
+	span.SetAttributes(attribute.String(platform.MetricLabelWalletID, walletID))
+	return walletID, nil
+}
+
+func (w *walletUseCaseTraces) Deposit(ctx context.Context, t domain.Transfer, idempKey string) (domain.SubmitResult, error) {
+	ctx, span := platform.GetTracer().Start(ctx, "api.wallet_use_case.deposit",
+		trace.WithAttributes(
+			attribute.String(platform.MetricLabelMerchantID, t.MerchantID),
+			attribute.Int64("amount", t.Amount),
+			attribute.String("currency", t.Currency),
+			attribute.String("idempotency_key", idempKey)))
+	defer span.End()
+
+	result, err := w.next.Deposit(ctx, t, idempKey)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(
+			attribute.String(platform.MetricLabelErrorType, fmt.Sprintf("%T", err)),
+			attribute.String(platform.MetricLabelErrorMessage, err.Error()),
+		)
+		return domain.SubmitResult{}, err
+	}
+
+	span.SetAttributes(attribute.String(platform.MetricLabelJobID, result.Job.ID))
+	return result, nil
 }

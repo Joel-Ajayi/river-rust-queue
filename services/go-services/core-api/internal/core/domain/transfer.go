@@ -23,12 +23,12 @@ type CircuitBreakerWalletBalanceRes struct {
 	Cur string
 }
 
-func (t Transfer) Validate() (string, error) {
+func (t Transfer) Validate(isDeposit bool) (string, error) {
 	_, _, fromValid := platform.IsValidWalletID(t.FromWallet)
 	toMerchantID, _, toValid := platform.IsValidWalletID(t.ToWallet)
 
 	switch {
-	case !fromValid:
+	case !isDeposit && !fromValid:
 		return "", ErrInvalidFromWallet
 	case !toValid:
 		return "", ErrInvalidToWallet

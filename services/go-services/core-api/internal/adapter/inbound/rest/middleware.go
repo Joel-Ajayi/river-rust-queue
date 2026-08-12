@@ -3,6 +3,7 @@ package rest
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
@@ -43,11 +44,21 @@ func (s *Server) extractMerchant(next http.Handler) http.Handler {
 
 func (s *Server) withBulkhead(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		if !s.bulkhead.TryAcquire(1) {
+			platform.RecordBulkheadRejection(ctx)
+			s.log.Warn(platform.LogEventBulkheadRejected,
+				zap.String(platform.LogFieldMethod, r.Method),
+				zap.String(platform.LogFieldPath, r.URL.Path),
+			)
 			writeError(w, platform.ErrServiceUnavailable(domain.ErrMsgBulkheadExhausted))
 			return
 		}
-		defer s.bulkhead.Release(1)
+		platform.AddBulkheadInFlight(ctx, 1)
+		defer func() {
+			s.bulkhead.Release(1)
+			platform.AddBulkheadInFlight(ctx, -1)
+		}()
 		next.ServeHTTP(w, r)
 	})
 }
@@ -65,6 +76,7 @@ func (r *statusRecorder) WriteHeader(status int) {
 
 func (s *Server) withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
 
@@ -77,6 +89,7 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 			zap.String(platform.LogFieldMethod, r.Method),
 			zap.String(platform.LogFieldPath, route),
 			zap.Int(platform.LogFieldStatus, rec.status),
+			zap.Duration(platform.LogFieldDuration, time.Since(start)),
 		)
 	})
 }

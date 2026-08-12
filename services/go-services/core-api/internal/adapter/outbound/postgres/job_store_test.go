@@ -49,7 +49,7 @@ func TestJobStore_ClaimAndRecord(t *testing.T) {
 			Amount:     1000,
 			Currency:   "NGN",
 		}
-		
+
 		job := domain.Job{
 			ID:             jobID,
 			MerchantID:     merchantID,
@@ -138,10 +138,10 @@ func TestJobStore_ClaimAndRecord(t *testing.T) {
 		// Second submission with same key but different body (amount)
 		transfer2 := transfer1
 		transfer2.Amount = 5000
-		
+
 		job2 := job
 		job2.PayloadHash = transfer2.Hash()
-		
+
 		// The job store should return ErrIdempotencyConflict
 		_, err2 := jobStore.ClaimAndRecord(ctx, shardID, job2, transfer2, idempKey)
 		if !errors.Is(err2, domain.ErrIdempotencyConflict) {

@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/adapter/inbound/rest"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/adapter/outbound/observability"
@@ -16,12 +16,20 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/port"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
+	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"go.uber.org/zap"
 )
 
 func main() {
 	// Config & Logger
-	cfg := platform.LoadConfig()
+	cfg := platform.LoadConfig("CORE_API_")
+
+	platform.SetArgon2Params(
+		cfg.Capacity.Argon2Iterations,
+		cfg.Capacity.Argon2MemoryKib,
+		cfg.Capacity.Argon2Parallelism,
+	)
+	rest.SetMaxRequestBodyBytes(int64(cfg.Capacity.MaxRequestBytes))
 
 	log, err := platform.NewLogger(cfg.LogLevel)
 	if err != nil {
@@ -29,31 +37,28 @@ func main() {
 	}
 	defer log.Sync()
 
-	if err := platform.InitTelemetry(platform.ServiceNameCoreAPI, cfg.OtelExporterEndpoint); err != nil {
-		log.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// Infrastructure
 	pools, err := platform.NewShardPools(ctx, cfg, log)
 	if err != nil {
 		log.Panic(platform.LogEventPostgresInitFailed, zap.Error(err))
 	}
-	defer pools.Close()
 
 	cbs := platform.NewDBCircuitBreakers(
 		platform.CBNameMerchantsGlobal,
 		pools.GetAvailableShardIDs(),
 		domain.IsTerminalError,
 		platform.CircuitBreakerConfig{
-			MaxRequests: domain.CBMaxRequests,
-			Timeout:     domain.CBTimeout,
-			Interval:    domain.CBInterval,
-			MinRequests: domain.CBMinRequests,
-			ErrorRate:   domain.CBErrorRate,
+			MaxRequests: uint32(cfg.Capacity.CBHalfOpenProbes),
+			Timeout:     time.Duration(cfg.Capacity.CBTimeoutMs) * time.Millisecond,
+			Interval:    time.Duration(cfg.Capacity.CBIntervalMs) * time.Millisecond,
+			MinRequests: uint32(cfg.Capacity.CBMinRequests),
+			ErrorRate:   cfg.Capacity.CBErrorThreshold,
+			MaxFails:    uint32(cfg.Capacity.CBMaxFails),
 		},
+		log,
 	)
 
 	// Driven adapters (outbound)
@@ -81,7 +86,9 @@ func main() {
 	adminSvc := app.NewAdminService(dlqReplayer)
 	jobSvc := app.NewJobService(merchantDir, jobStore)
 	merchantSvc := app.NewMerchantService(merchantStore, pools.HashRing())
-	walletSvc := app.NewWalletService(merchantDir, walletDir, walletStore, jobStore, platform.NewJobID)
+	var walletUseCase port.WalletUseCase = app.NewWalletService(merchantDir, walletDir, walletStore, jobStore, platform.NewJobID)
+	walletUseCase = observability.NewWalletUseCaseMetrics(walletUseCase)
+	walletUseCase = observability.NewWalletUseCaseTraces(walletUseCase) // trace decorator
 	transferSvc := app.NewTransferService(merchantDir, walletDir, jobStore, platform.NewJobID)
 	var transferSubmitter port.TransferSubmitter = transferSvc
 	transferSubmitter = observability.NewTransferServiceMetrics(transferSubmitter)
@@ -89,7 +96,7 @@ func main() {
 
 	// Driving adapter (inbound)
 	ready := func(ctx context.Context) error { return readiness(ctx, pools, cbs) }
-	srv := rest.NewServer(cfg.HTTPPort, cfg.JWTSigningKeys, cfg.JWTActiveKeyID, transferSubmitter, jobSvc, merchantSvc, walletSvc, adminSvc, ready, log)
+	srv := rest.NewServer(cfg, transferSubmitter, jobSvc, merchantSvc, walletUseCase, adminSvc, ready, log)
 
 	go func() {
 		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
@@ -97,18 +104,21 @@ func main() {
 		}
 	}()
 
-	// Graceful Shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh  // Blocker until signal is received
-	cancel() // Trigger global context cancellation
+	<-ctx.Done() // Blocker until signal is received
 
-	log.Info(platform.LogEventShutdownSignalReceived)
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), domain.ServerShutdownTimeout)
+	// Begin draining: readiness returns 503 so Kubernetes removes this pod from
+	// Service endpoints before we shut the server down. New traffic stops
+	srv.BeginDrain()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Capacity.ShutdownTimeoutMs)*time.Millisecond)
 	defer shutdownCancel()
+
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error(platform.LogEventShutdownFailed, zap.Error(err))
 	}
+
+	pools.Close()
+
 	_ = platform.ShutdownTelemetry(shutdownCtx)
 
 }
@@ -120,14 +130,14 @@ func readiness(ctx context.Context, pools *platform.ShardPools, cbs *platform.DB
 		return err
 	}
 	// Check circuit breaker state - if any CB is open, we're not ready
-	if cbs.Merchants().State() == platform.CBStateOpen {
+	if cbs.Merchants().State() == circuitbreaker.OpenState {
 		return fmt.Errorf("%w", platform.ErrCBMerchantsOpen)
 	}
 	for _, shardID := range pools.GetAvailableShardIDs() {
-		if cbs.ShardRW(shardID).State() == platform.CBStateOpen {
+		if cbs.ShardRW(shardID).State() == circuitbreaker.OpenState {
 			return fmt.Errorf("%w: %s", platform.ErrCBRWOpen, shardID)
 		}
-		if cbs.ShardRO(shardID).State() == platform.CBStateOpen {
+		if cbs.ShardRO(shardID).State() == circuitbreaker.OpenState {
 			return fmt.Errorf("%w: %s", platform.ErrCBROpen, shardID)
 		}
 	}

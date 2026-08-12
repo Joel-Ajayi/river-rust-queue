@@ -1,12 +1,14 @@
 package rest
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
+	"github.com/failsafe-go/failsafe-go"
 
 	apiv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/api/v1"
 )
@@ -19,16 +21,10 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get request body from request
 	var req apiv1.CreateTransferRequest
 	if !decodeProtoBody(w, r, &req) {
 		return
-	}
-	t := domain.Transfer{
-		FromWallet: req.FromWallet,
-		ToWallet:   req.ToWallet,
-		Amount:     req.Amount,
-		Currency:   req.Currency,
-		Reference:  req.Reference,
 	}
 
 	// Get Merchant Identity from Context
@@ -39,18 +35,31 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call service inside the single Layer 1 retry boundary.
+	t := domain.Transfer{
+		FromWallet: req.FromWallet,
+		ToWallet:   req.ToWallet,
+		Amount:     req.Amount,
+		Currency:   req.Currency,
+		Reference:  req.Reference,
+	}
 	t.MerchantID = principal.MerchantID
 	var res domain.SubmitResult
-	err := retryBoundary(r.Context(), func() error {
+	var attempts int
+	start := time.Now()
+	err := s.retryBoundary(r.Context(), func(attemptCtx context.Context, exec failsafe.Execution[any]) error {
 		var fnErr error
-		res, fnErr = s.transfers.Submit(r.Context(), t, idempKey)
+		attempts = exec.Executions() + 1
+		// Handle Deposit
+		if req.FromWallet == "" {
+			res, fnErr = s.wallets.Deposit(attemptCtx, t, idempKey)
+		} else {
+			res, fnErr = s.transfers.Transfer(attemptCtx, t, idempKey)
+		}
 		return fnErr
 	})
+	dbDuration := time.Since(start)
 	if err != nil {
 		err = mapHTTPError(err)
-		if errors.Is(err, domain.ErrIdempotencyConflict) {
-			platform.RecordIdempotencyConflict(r.Context(), principal.MerchantID, res.Job.ID, res.Job.ShardID)
-		}
 		writeError(w, err)
 		return
 	}
@@ -66,12 +75,15 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 
 	// Canonical log: transfer submitted (after DB commit)
 	platform.LogCanonicalEvent(r.Context(), s.log, platform.ServiceNameCoreAPI, platform.CanonicalLogLine{
-		Event:      platform.EventTransferSubmitted,
-		Status:     platform.StatusSuccess,
-		MerchantID: principal.MerchantID,
-		JobID:      res.Job.ID,
-		Amount:     t.Amount,
-		Currency:   t.Currency,
+		Event:          platform.EventTransferSubmitted,
+		Status:         platform.StatusSuccess,
+		MerchantID:     principal.MerchantID,
+		JobID:          res.Job.ID,
+		Amount:         t.Amount,
+		Currency:       t.Currency,
+		DurationMs:     float64(dbDuration.Milliseconds()),
+		RetryCount:     attempts,
+		IdempotencyHit: res.AlreadyExisted,
 	})
 
 	statusCode := http.StatusAccepted

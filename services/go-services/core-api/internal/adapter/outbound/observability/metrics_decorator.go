@@ -105,18 +105,59 @@ func NewTransferServiceMetrics(next port.TransferSubmitter) port.TransferSubmitt
 	return &transferServiceMetrics{next: next}
 }
 
-func (m *transferServiceMetrics) Submit(ctx context.Context, t domain.Transfer, idempKey string) (domain.SubmitResult, error) {
-	res, err := m.next.Submit(ctx, t, idempKey)
+func (m *transferServiceMetrics) Transfer(ctx context.Context, t domain.Transfer, idempKey string) (domain.SubmitResult, error) {
+	res, err := m.next.Transfer(ctx, t, idempKey)
 	if err != nil {
 		if errors.Is(err, domain.ErrIdempotencyConflict) {
 			platform.RecordIdempotencyConflict(ctx, t.MerchantID, res.ShardID, res.Job.ID)
 		} else if platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure || errors.Is(err, domain.ErrServiceUnavailable) {
 			platform.RecordInfrastructureError(ctx, platform.ComponentTransferService)
 		}
+	} else if res.AlreadyExisted {
+		platform.RecordIdempotencyHit(ctx, t.MerchantID, res.Job.ID, res.ShardID)
 	}
 	return res, err
 }
 
 func (m *transferServiceMetrics) GetBalance(ctx context.Context, walletID, merchantID string) (int64, string, error) {
 	return m.next.GetBalance(ctx, walletID, merchantID)
+}
+
+// -- Wallet Use Case Decorator --
+
+type walletUseCaseMetrics struct {
+	next port.WalletUseCase
+}
+
+func NewWalletUseCaseMetrics(next port.WalletUseCase) port.WalletUseCase {
+	return &walletUseCaseMetrics{next: next}
+}
+
+func (m *walletUseCaseMetrics) CreateWallet(ctx context.Context, merchantID, currency string) (string, error) {
+	walletID, err := m.next.CreateWallet(ctx, merchantID, currency)
+	if err == nil {
+		platform.RecordWalletCreated(ctx, merchantID, currency)
+	} else if platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure || errors.Is(err, domain.ErrServiceUnavailable) {
+		platform.RecordInfrastructureError(ctx, platform.ComponentJobStore)
+	}
+	return walletID, err
+}
+
+func (m *walletUseCaseMetrics) Deposit(ctx context.Context, t domain.Transfer, idempKey string) (domain.SubmitResult, error) {
+	res, err := m.next.Deposit(ctx, t, idempKey)
+
+	if err != nil {
+		platform.RecordDepositRequest(ctx, t.MerchantID, t.Currency, t.Amount, platform.TransferMetricFailed)
+		if errors.Is(err, domain.ErrIdempotencyConflict) {
+			platform.RecordIdempotencyConflict(ctx, t.MerchantID, res.ShardID, res.Job.ID)
+		} else if platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure || errors.Is(err, domain.ErrServiceUnavailable) {
+			platform.RecordInfrastructureError(ctx, platform.ComponentTransferService)
+		}
+	} else {
+		platform.RecordDepositRequest(ctx, t.MerchantID, t.Currency, t.Amount, platform.TransferMetricSuccess)
+		if res.AlreadyExisted {
+			platform.RecordIdempotencyHit(ctx, t.MerchantID, res.Job.ID, res.ShardID)
+		}
+	}
+	return res, err
 }

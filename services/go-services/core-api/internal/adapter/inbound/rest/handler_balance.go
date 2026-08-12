@@ -1,11 +1,13 @@
 package rest
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
 	apiv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/api/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
+	"github.com/failsafe-go/failsafe-go"
 )
 
 func (s *Server) handleGetBalance(w http.ResponseWriter, r *http.Request) {
@@ -25,9 +27,9 @@ func (s *Server) handleGetBalance(w http.ResponseWriter, r *http.Request) {
 	// b. Get balance inside the Layer 1 retry boundary.
 	var balance int64
 	var currency string
-	err := retryBoundary(r.Context(), func() error {
+	err := s.retryBoundary(r.Context(), func(attemptCtx context.Context, exec failsafe.Execution[any]) error {
 		var fnErr error
-		balance, currency, fnErr = s.transfers.GetBalance(r.Context(), walletID, principal.MerchantID)
+		balance, currency, fnErr = s.transfers.GetBalance(attemptCtx, walletID, principal.MerchantID)
 		return fnErr
 	})
 	if err != nil {

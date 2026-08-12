@@ -20,17 +20,17 @@ var (
 	ErrInvalidCurrency   = errors.New("currency is required")
 	ErrSameWallet        = errors.New("to_wallet must differ from from_wallet")
 
-	ErrInternal           = errors.New("an unexpected error occurred")
-	ErrServiceUnavailable = errors.New("service unavailable")
-	ErrInvalidBody        = errors.New("invalid json payload")
+	ErrInternal                = errors.New("an unexpected error occurred")
+	ErrServiceUnavailable      = errors.New("service unavailable")
+	ErrInvalidBody             = errors.New("invalid json payload")
 	ErrMissingAuthContext      = errors.New("missing authentication context")
 	ErrMissingConsumerIdentity = errors.New("missing or invalid consumer identity header")
 
 	ErrMsgBulkheadExhausted = errors.New("service unavailable - connection pool exhausted")
 	ErrMsgPayloadTooLarge   = errors.New("payload too large")
 
-	ErrMsgQueryParamRequired      = errors.New("query parameter is required")
-	ErrMsgInValidJobID            = errors.New("job id is invalid")
+	ErrMsgQueryParamRequired = errors.New("query parameter is required")
+	ErrMsgInValidJobID       = errors.New("job id is invalid")
 	ErrMsgRequestBodyLarge   = errors.New("http: request body too large")
 )
 

@@ -32,7 +32,7 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		domain.ClaimSub:  principal.MerchantID,
 		domain.ClaimIss:  platform.ServiceNameCoreAPI,
 		domain.ClaimIat:  now.Unix(),
-		domain.ClaimExp:  now.Add(domain.JWTExpiration).Unix(),
+		domain.ClaimExp:  now.Add(s.jwtExpiration).Unix(),
 		domain.ClaimTier: principal.Tier,
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
@@ -54,7 +54,7 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 
 	resp := &apiv1.AuthTokenResponse{
 		Token:     signed,
-		ExpiresIn: int32(domain.JWTExpiration.Seconds()),
+		ExpiresIn: int32(s.jwtExpiration.Seconds()),
 		Tier:      principal.Tier,
 	}
 	writeJSON(w, http.StatusOK, resp)

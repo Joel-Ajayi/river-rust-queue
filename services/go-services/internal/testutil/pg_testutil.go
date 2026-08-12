@@ -88,7 +88,7 @@ func SetupTestDB(t *testing.T) (merchantsDB TestDB, shardA TestDB, shardB TestDB
 	if !ok {
 		t.Fatalf("failed to get caller information")
 	}
-	
+
 	// filename is .../services/go-services/internal/testutil/pg_testutil.go
 	// Project root is 5 levels up
 	baseDir := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filename))))), "deploy", "db", "migrations")

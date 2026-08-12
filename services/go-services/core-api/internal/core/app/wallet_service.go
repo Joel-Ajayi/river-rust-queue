@@ -50,48 +50,35 @@ func (s *WalletService) CreateWallet(ctx context.Context, merchantID, currency s
 		return "", err
 	}
 
-	platform.RecordWalletCreated(ctx, merchantID, currency)
 	return walletID, nil
 }
 
 // Deposit deposits funds into a merchant's customer wallet from the platform fiat vault.
-func (s *WalletService) Deposit(ctx context.Context, merchantID, walletID string, amount int64, currency, idempKey string) (domain.SubmitResult, error) {
-	if amount <= 0 {
-		return domain.SubmitResult{}, domain.ErrInvalidAmount
+func (s *WalletService) Deposit(ctx context.Context, t domain.Transfer, idempKey string) (domain.SubmitResult, error) {
+	// Validate and return destination MerchantID
+	toMerchantID, err := t.Validate(true)
+	if err != nil {
+		return domain.SubmitResult{}, err
 	}
-	if currency == "" {
-		return domain.SubmitResult{}, domain.ErrInvalidCurrency
-	}
+	t.ToMerchantID = toMerchantID
 
-	shard, err := s.merchantsDir.ShardFor(ctx, merchantID)
+	// 1. Locate the fiat vault wallet on the shard.
+	shard, err := s.merchantsDir.ShardFor(ctx, t.ToMerchantID)
 	if err != nil {
 		return domain.SubmitResult{}, err
 	}
 
-	// Verify recipient wallet is owned by the requesting merchant.
-	if err := s.walletsDir.CheckWalletOwnership(ctx, shard, walletID, merchantID); err != nil {
-		return domain.SubmitResult{}, err
-	}
-
-	// Locate the fiat vault wallet on the shard.
-	fiatVault, err := s.walletsStore.FindFiatVault(ctx, shard, currency)
+	fiatVault, err := s.walletsStore.FindFiatVault(ctx, shard, t.Currency)
 	if err != nil {
 		return domain.SubmitResult{}, err
 	}
-
-	t := domain.Transfer{
-		MerchantID:   merchantID,
-		ToMerchantID: merchantID,
-		FromWallet:   fiatVault,
-		ToWallet:     walletID,
-		Amount:       amount,
-		Currency:     currency,
-		Reference:    platform.DepositReference,
-	}
+	t.FromWallet = fiatVault
+	fromMerchantID, _, _ := platform.IsValidWalletID(t.FromWallet)
+	t.MerchantID = fromMerchantID
 
 	job := domain.Job{
 		ID:             s.getNewJobID(),
-		MerchantID:     merchantID,
+		MerchantID:     t.MerchantID,
 		PayloadHash:    t.Hash(),
 		IdempotencyKey: idempKey,
 		Type:           platform.JobTypeTransfer,
@@ -102,11 +89,9 @@ func (s *WalletService) Deposit(ctx context.Context, merchantID, walletID string
 
 	res, err := s.jobStore.ClaimAndRecord(ctx, shard, job, t, idempKey)
 	if err != nil {
-		platform.RecordDepositRequest(ctx, merchantID, currency, amount, platform.TransferMetricFailed)
 		return domain.SubmitResult{}, err
 	}
 
 	res.ShardID = shard
-	platform.RecordDepositRequest(ctx, merchantID, currency, amount, platform.TransferMetricSuccess)
 	return res, nil
 }
