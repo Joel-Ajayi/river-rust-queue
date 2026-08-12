@@ -13,40 +13,50 @@ import (
 const (
 	// Observability Metrics
 	// names
-	MetricMeterName                  = "rrq/platform"
-	MetricCBOpenTotal                = "rrq_circuit_breaker_open_total"
-	MetricCBHalfOpenFailure          = "rrq_circuit_breaker_half_open_failure"
-	MetricCBState                    = "rrq_circuit_breaker_state"
-	MetricDLQIngestionRate           = "rrq_dlq_ingestion_rate"
-	MetricInfraErrorsTotal           = "rrq_infrastructure_errors_total"
-	MetricOutboxLagSeconds           = "rrq_outbox_lag_seconds"
-	MetricOutboxEventsPublishedTotal = "rrq_outbox_events_published_total"
-	MetricOutboxPublishDuration      = "rrq_outbox_publish_duration_seconds"
-	MetricOutboxPurgedEventsTotal    = "rrq_outbox_purged_events_total"
-	MetricOutboxPanicsTotal          = "rrq_outbox_panics_total"
-	MetricIdempotencyConflictsTotal  = "rrq_idempotency_conflicts_total"
-	MetricWeakAPIKeyAuth             = "rrq_weak_api_key_auth_total"
-	MetricConsumerMsgDuration        = "rrq_consumer_message_duration_seconds"
-	MetricConsumerBackoffDuration    = "rrq_consumer_backoff_duration_seconds"
-	MetricConsumerCommitsTotal       = "rrq_consumer_commits_total"
-	MetricLedgerImbalanceTotal       = "rrq_ledger_imbalance_total"
-	MetricSagaUnresolvedCount        = "rrq_saga_unresolved_count"
-	MetricVelocityLimitExceededTotal = "rrq_velocity_limit_exceeded_total"
-	MetricAdminDLQReplayedTotal      = "rrq_admin_dlq_replayed_total"
+	MetricMeterName                   = "rrq/platform"
+	MetricCBOpenTotal                 = "rrq.circuit.breaker.open_total"
+	MetricCBHalfOpenFailure           = "rrq.circuit.breaker.half.open.failure"
+	MetricCBState                     = "rrq.circuit.breaker.state"
+	MetricDLQIngestionRate            = "rrq.dlq.ingestion_rate"
+	MetricInfraErrorsTotal            = "rrq.infrastructure.errors.total"
+	MetricOutboxLagSeconds            = "rrq.outbox.lag.seconds"
+	MetricOutboxEventsPublishedTotal  = "rrq.outbox.events.published.total"
+	MetricOutboxPublishDuration       = "rrq.outbox.publish.duration.seconds"
+	MetricOutboxPanicsTotal           = "rrq.outbox.panics.total"
+	MetricConsumerPanicsTotal         = "rrq.consumer.panics.total"
+	MetricRedisFailClosed             = "rrq.redis.fail_closed.total"
+	MetricDLQInfrastructureFlood      = "rrq.dlq.infrastructure_flood.total"
+	MetricKafkaProducerBufferFill     = "rrq.kafka.producer.buffer.fill.ratio"
+	MetricIdempotencyConflictsTotal   = "rrq.idempotency.conflicts.total"
+	MetricIdempotencyHitsTotal        = "rrq.idempotency.hits.total"
+	MetricWeakAPIKeyAuth              = "rrq.weak.api.key.auth.total"
+	MetricConsumerMsgDuration         = "rrq.consumer.message.duration.seconds"
+	MetricConsumerBackoffDuration     = "rrq.consumer.backoff.duration.seconds"
+	MetricConsumerCommitsTotal        = "rrq.consumer.commits.total"
+	MetricConsumerLagMessages         = "rrq.consumer.lag.messages"
+	MetricCommitCoordinatorQueueDepth = "rrq.commit.coordinator.queue.depth"
+	MetricTaskChannelFillRatio        = "rrq.task.channel.fill.ratio"
+	MetricLedgerImbalanceTotal        = "rrq.ledger.imbalance.total"
+	MetricSagaUnresolvedCount         = "rrq.saga.unresolved.count"
+	MetricVelocityLimitExceededTotal  = "rrq.velocity.limit.exceeded.total"
+	MetricAdminDLQReplayedTotal       = "rrq.admin.dlq.replayed.total"
+	MetricBulkheadRejectionsTotal     = "rrq.bulkhead.rejections.total"
+	MetricBulkheadInFlight            = "rrq.bulkhead.in.flight"
 
 	// label
-	MetricLabelCircuitBreaker = "circuit_breaker"
+	MetricLabelCircuitBreaker = "circuit.breaker"
 	MetricLabelService        = "service"
 	MetricLabelComponent      = "component"
 	MetricLabelShard          = "shard"
 	MetricLabelTopic          = "topic"
-	MetricLabelMerchantID     = "merchant_id"
-	MetricLabelJobID          = "job_id"
-	MetricLabelWalletID       = "wallet_id"
+	MetricLabelMerchantID     = "merchant.id"
+	MetricLabelJobID          = "job.id"
+	MetricLabelWalletID       = "wallet.id"
 	MetricLabelErrorType      = "error.type"
 	MetricLabelErrorMessage   = "error.message"
 	MetricLabelHandler        = "handler"
-	MetricLabelLimitType      = "limit_type"
+	MetricLabelLimitType      = "limit.type"
+	MetricLabelPartition      = "partition"
 )
 
 var (
@@ -60,16 +70,25 @@ var (
 	outboxLagGauge                metric.Float64Gauge
 	outboxEventsPublishedTotal    metric.Int64Counter
 	outboxPublishDuration         metric.Float64Histogram
-	outboxPurgedEventsTotal       metric.Int64Counter
 	outboxPanicsTotal             metric.Int64Counter
+	consumerPanicsTotal           metric.Int64Counter
+	redisFailClosedTotal          metric.Int64Counter
+	dlqInfraFloodTotal            metric.Int64Counter
+	kafkaProducerBufferFill       metric.Float64Gauge
 	idempotencyConflictsTotal     metric.Int64Counter
+	idempotencyHitsTotal          metric.Int64Counter
 	consumerMsgDuration           metric.Float64Histogram
 	consumerBackoffDuration       metric.Float64Histogram
 	consumerCommitsTotal          metric.Int64Counter
+	consumerLagMessages           metric.Int64Gauge
+	commitCoordinatorQueueDepth   metric.Int64Gauge
+	taskChannelFillRatio          metric.Float64Gauge
 	ledgerImbalanceTotal          metric.Int64Gauge
 	sagaUnresolvedCount           metric.Int64Gauge
 	velocityLimitExceededTotal    metric.Int64Counter
 	adminDLQReplayedTotal         metric.Int64Counter
+	bulkheadRejectionsTotal       metric.Int64Counter
+	bulkheadInFlight              metric.Int64UpDownCounter
 
 	metricsOnce sync.Once
 )
@@ -143,14 +162,6 @@ func init() {
 			panic("failed to initialize outbox publish duration metric: " + err.Error())
 		}
 
-		outboxPurgedEventsTotal, err = meter.Int64Counter(
-			MetricOutboxPurgedEventsTotal,
-			metric.WithDescription("Total number of successfully published events purged from database"),
-		)
-		if err != nil {
-			panic("failed to initialize outbox purged events metric: " + err.Error())
-		}
-
 		outboxPanicsTotal, err = meter.Int64Counter(
 			MetricOutboxPanicsTotal,
 			metric.WithDescription("Total number of panics caught in outbox relay loop"),
@@ -159,9 +170,49 @@ func init() {
 			panic("failed to initialize outbox panics metric: " + err.Error())
 		}
 
+		consumerPanicsTotal, err = meter.Int64Counter(
+			MetricConsumerPanicsTotal,
+			metric.WithDescription("Total number of panics caught in any service's worker pool"),
+		)
+		if err != nil {
+			panic("failed to initialize consumer panics metric: " + err.Error())
+		}
+
+		redisFailClosedTotal, err = meter.Int64Counter(
+			MetricRedisFailClosed,
+			metric.WithDescription("Number of operations rejected because Redis was unavailable (fail-closed)"),
+		)
+		if err != nil {
+			panic("failed to initialize redis fail-closed metric: " + err.Error())
+		}
+
+		dlqInfraFloodTotal, err = meter.Int64Counter(
+			MetricDLQInfrastructureFlood,
+			metric.WithDescription("Number of messages routed to the DLQ specifically because an infrastructure dependency was down (vs. business-rule violations)"),
+		)
+		if err != nil {
+			panic("failed to initialize DLQ infrastructure flood metric: " + err.Error())
+		}
+
+		kafkaProducerBufferFill, err = meter.Float64Gauge(
+			MetricKafkaProducerBufferFill,
+			metric.WithDescription("Kafka producer staging buffer fill ratio (0.0-1.0) computed from writer.BufferedBytes vs the 50KB allocation budget"),
+		)
+		if err != nil {
+			panic("failed to initialize kafka producer buffer fill ratio metric: " + err.Error())
+		}
+
 		idempotencyConflictsTotal, err = meter.Int64Counter(
 			MetricIdempotencyConflictsTotal,
 			metric.WithDescription("Total number of idempotency conflicts"),
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		idempotencyHitsTotal, err = meter.Int64Counter(
+			MetricIdempotencyHitsTotal,
+			metric.WithDescription("Total number of idempotency key replay hits (duplicate submission resolved to prior job)"),
 		)
 		if err != nil {
 			panic(err)
@@ -191,6 +242,30 @@ func init() {
 		)
 		if err != nil {
 			panic("failed to initialize consumer commits metric: " + err.Error())
+		}
+
+		consumerLagMessages, err = meter.Int64Gauge(
+			MetricConsumerLagMessages,
+			metric.WithDescription("Consumer lag in messages per partition"),
+		)
+		if err != nil {
+			panic("failed to initialize consumer lag metric: " + err.Error())
+		}
+
+		commitCoordinatorQueueDepth, err = meter.Int64Gauge(
+			MetricCommitCoordinatorQueueDepth,
+			metric.WithDescription("Messages waiting in per-partition CommitCoordinator FIFO"),
+		)
+		if err != nil {
+			panic("failed to initialize commit coordinator queue depth metric: " + err.Error())
+		}
+
+		taskChannelFillRatio, err = meter.Float64Gauge(
+			MetricTaskChannelFillRatio,
+			metric.WithDescription("taskChan fill ratio (0.0-1.0) per partition"),
+		)
+		if err != nil {
+			panic("failed to initialize task channel fill ratio metric: " + err.Error())
 		}
 
 		ledgerImbalanceTotal, err = meter.Int64Gauge(
@@ -223,6 +298,22 @@ func init() {
 		)
 		if err != nil {
 			panic("failed to initialize admin dlq replayed metric: " + err.Error())
+		}
+
+		bulkheadRejectionsTotal, err = meter.Int64Counter(
+			MetricBulkheadRejectionsTotal,
+			metric.WithDescription("Total number of requests rejected by the bulkhead"),
+		)
+		if err != nil {
+			panic("failed to initialize bulkhead rejections metric: " + err.Error())
+		}
+
+		bulkheadInFlight, err = meter.Int64UpDownCounter(
+			MetricBulkheadInFlight,
+			metric.WithDescription("Current number of requests in flight through the bulkhead"),
+		)
+		if err != nil {
+			panic("failed to initialize bulkhead in flight metric: " + err.Error())
 		}
 	})
 }
@@ -284,13 +375,6 @@ func RecordOutboxPublishDuration(ctx context.Context, shardID string, duration t
 	))
 }
 
-// RecordOutboxPurgedEvents increments the counter for purged events.
-func RecordOutboxPurgedEvents(ctx context.Context, shardID string, count int64) {
-	outboxPurgedEventsTotal.Add(ctx, count, metric.WithAttributes(
-		attribute.String(MetricLabelShard, shardID),
-	))
-}
-
 // RecordOutboxPanic increments the counter for panics recovered in the outbox relay.
 func RecordOutboxPanic(ctx context.Context, shardID string) {
 	outboxPanicsTotal.Add(ctx, 1, metric.WithAttributes(
@@ -298,9 +382,53 @@ func RecordOutboxPanic(ctx context.Context, shardID string) {
 	))
 }
 
+// RecordConsumerPanic increments the counter for panics recovered in any
+// service's worker pool. The topic is required because the outbox relay uses
+// shardID (which is also a topic for the relay's purposes).
+func RecordConsumerPanic(ctx context.Context, topic string) {
+	consumerPanicsTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(MetricLabelTopic, topic),
+	))
+}
+
+// RecordRedisFailClosed increments the counter for operations rejected because
+// Redis was unavailable. Used by services that fail-closed on Redis errors
+// (e.g., fraud-worker) so operators can distinguish "Redis down" from
+// business-rule rejections in dashboards.
+func RecordRedisFailClosed(ctx context.Context) {
+	redisFailClosedTotal.Add(ctx, 1)
+}
+
+// RecordDLQInfraFlood increments the counter for messages routed to the DLQ
+// because of an infrastructure failure (Redis, PG, Kafka down). Pair with
+// RecordDLQIngestion to compute the ratio of infra-driven vs. business-driven
+// DLQ entries. See issue 36.
+func RecordDLQInfraFlood(ctx context.Context, serviceName string) {
+	dlqInfraFloodTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(MetricLabelService, serviceName),
+	))
+}
+
+// RecordKafkaProducerBufferFill records the Kafka staging buffer fill ratio (0.0-1.0).
+func RecordKafkaProducerBufferFill(ctx context.Context, shardID string, ratio float64) {
+	kafkaProducerBufferFill.Record(ctx, ratio, metric.WithAttributes(
+		attribute.String(MetricLabelShard, shardID),
+	))
+}
+
 // RecordIdempotencyConflict increments the counter for business/idempotency conflicts.
 func RecordIdempotencyConflict(ctx context.Context, merchantID, jobID, shardID string) {
 	idempotencyConflictsTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(MetricLabelMerchantID, merchantID),
+		attribute.String(MetricLabelJobID, jobID),
+		attribute.String(MetricLabelShard, shardID),
+	))
+}
+
+// RecordIdempotencyHit increments the counter for idempotency-key replay hits.
+// A hit is a duplicate submission resolved to the prior job without a conflict error.
+func RecordIdempotencyHit(ctx context.Context, merchantID, jobID, shardID string) {
+	idempotencyHitsTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(MetricLabelMerchantID, merchantID),
 		attribute.String(MetricLabelJobID, jobID),
 		attribute.String(MetricLabelShard, shardID),
@@ -360,3 +488,46 @@ func RecordAdminDLQReplayed(ctx context.Context, shardID string, count int64) {
 	))
 }
 
+// RecordBulkheadRejection increments the counter of requests rejected by the bulkhead.
+func RecordBulkheadRejection(ctx context.Context) {
+	bulkheadRejectionsTotal.Add(ctx, 1)
+}
+
+// AddBulkheadInFlight adjusts the current in-flight request count through the bulkhead.
+func AddBulkheadInFlight(ctx context.Context, delta int64) {
+	bulkheadInFlight.Add(ctx, delta)
+}
+
+// RecordConsumerLag records the number of messages behind the consumer per partition.
+func RecordConsumerLag(ctx context.Context, topic string, partition int, lag int64) {
+	consumerLagMessages.Record(ctx, lag, metric.WithAttributes(
+		attribute.String(MetricLabelTopic, topic),
+		attribute.Int(MetricLabelPartition, partition),
+	))
+}
+
+// RecordCommitCoordinatorQueueDepth records the number of messages waiting in a partition's FIFO.
+func RecordCommitCoordinatorQueueDepth(ctx context.Context, topic string, partition int, depth int64) {
+	commitCoordinatorQueueDepth.Record(ctx, depth, metric.WithAttributes(
+		attribute.String(MetricLabelTopic, topic),
+		attribute.Int(MetricLabelPartition, partition),
+	))
+}
+
+// RecordTaskChannelFillRatio records the fill ratio of a per-partition task channel.
+func RecordTaskChannelFillRatio(ctx context.Context, topic string, partition int, ratio float64) {
+	taskChannelFillRatio.Record(ctx, ratio, metric.WithAttributes(
+		attribute.String(MetricLabelTopic, topic),
+		attribute.Int(MetricLabelPartition, partition),
+	))
+}
+
+// RecordConsumerCommitWithPartition records a successful offset commit with partition info.
+func RecordConsumerCommitWithPartition(ctx context.Context, topic map[string]struct{}, partition int) {
+	for t := range topic {
+		consumerCommitsTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelTopic, t),
+			attribute.Int(MetricLabelPartition, partition),
+		))
+	}
+}

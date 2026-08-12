@@ -20,6 +20,22 @@ const (
 	ArgonFormat = "$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s"
 )
 
+// Package-level Argon2 params. Defaults match the RFC 9151 "OWASP recommended"
+// presets above; SetArgon2Params overrides them from the capacity engine.
+var (
+	argonTime    uint32 = ArgonTime
+	argonMemory  uint32 = ArgonMemory
+	argonThreads uint8  = ArgonThreads
+)
+
+// SetArgon2Params overrides the Argon2id cost parameters used by
+// HashAPIKeySecret with the capacity-engine derived values.
+func SetArgon2Params(timeCost, memoryKib, parallelism int) {
+	argonTime = uint32(timeCost)
+	argonMemory = uint32(memoryKib)
+	argonThreads = uint8(parallelism)
+}
+
 // HashAPIKey Secret hashes an API key secret using OWASP-recommended Argon2id parameters.
 func HashAPIKeySecret(secret string) (string, error) {
 	salt := make([]byte, ArgonSaltLen)
@@ -27,12 +43,12 @@ func HashAPIKeySecret(secret string) (string, error) {
 		return "", err
 	}
 
-	hash := argon2.IDKey([]byte(secret), salt, ArgonTime, ArgonMemory, ArgonThreads, ArgonKeyLen)
+	hash := argon2.IDKey([]byte(secret), salt, argonTime, argonMemory, argonThreads, ArgonKeyLen)
 
 	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
 	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
 
-	encoded := fmt.Sprintf(ArgonFormat, argon2.Version, ArgonMemory, ArgonTime, ArgonThreads, b64Salt, b64Hash)
+	encoded := fmt.Sprintf(ArgonFormat, argon2.Version, argonMemory, argonTime, argonThreads, b64Salt, b64Hash)
 	return encoded, nil
 }
 

@@ -5,14 +5,10 @@ import (
 
 	"github.com/segmentio/kafka-go"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -22,61 +18,14 @@ var (
 )
 
 const (
-	SpanProcessJob            = "ProcessJob"
+	SpanProcessJob            = "process.transfer"
+	SpanHandleWebhookMessage  = "HandleWebhookMessage"
+	SpanProcessMessage        = "process_message"
+	SpanCommitOffsets         = "kafka.commit"
 	SpanHandleXShardRequested = "HandleXShardRequested"
 	SpanHandleXShardSettled   = "HandleXShardSettled"
 	SpanHandleXShardFailed    = "HandleXShardFailed"
-	SpanHandleWebhookMessage  = "HandleWebhookMessage"
 )
-
-// InitTelemetry configures the global OpenTelemetry MeterProvider with an OTLP exporter.
-// It explicitly attaches the service name as a Resource Attribute so that all metrics automatically
-// contain the `service.name` label.
-func InitTelemetry(serviceName string, endpoint string) error {
-	ctx := context.Background()
-
-	res := resource.NewWithAttributes(
-		semconv.SchemaURL,
-		semconv.ServiceName(serviceName),
-	)
-
-	// 2. Configure Metric Exporter targeting local OTel Collector proxy
-	metricExporter, err := otlpmetricgrpc.New(ctx,
-		otlpmetricgrpc.WithEndpoint(endpoint),
-		otlpmetricgrpc.WithInsecure(),
-	)
-	if err != nil {
-		return err
-	}
-
-	meterProvider = sdkmetric.NewMeterProvider(
-		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),
-		sdkmetric.WithResource(res),
-	)
-	otel.SetMeterProvider(meterProvider)
-
-	// 3. Configure Trace Exporter targeting local OTel Collector proxy
-	traceExporter, err := otlptracegrpc.New(ctx,
-		otlptracegrpc.WithEndpoint(endpoint),
-		otlptracegrpc.WithInsecure(),
-	)
-	if err != nil {
-		return err
-	}
-	tracerProvider = sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(traceExporter),
-		sdktrace.WithResource(res),
-	)
-	otel.SetTracerProvider(tracerProvider)
-
-	// Register the W3C trace context and baggage propagators so they are automatically used.
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{},
-		propagation.Baggage{},
-	))
-
-	return nil
-}
 
 // ShutdownTelemetry should be called on application exit.
 func ShutdownTelemetry(ctx context.Context) error {

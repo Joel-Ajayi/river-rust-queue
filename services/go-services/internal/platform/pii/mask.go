@@ -7,22 +7,22 @@ import (
 
 var (
 	sensitiveKeys = map[string]bool{
-		"pan":                 true,
-		"card_number":         true,
-		"account_number":      true,
-		"credit_card":         true,
-		"cvv":                 true,
-		"cvc":                 true,
-		"security_code":       true,
-		"password":            true,
-		"secret":              true,
-		"api_key":             true,
-		"private_key":         true,
-		"access_token":        true,
-		"refresh_token":       true,
-		"webhook_secret":      true,
-		"hmac_secret":         true,
-		"signing_key":         true,
+		"pan":            true,
+		"card_number":    true,
+		"account_number": true,
+		"credit_card":    true,
+		"cvv":            true,
+		"cvc":            true,
+		"security_code":  true,
+		"password":       true,
+		"secret":         true,
+		"api_key":        true,
+		"private_key":    true,
+		"access_token":   true,
+		"refresh_token":  true,
+		"webhook_secret": true,
+		"hmac_secret":    true,
+		"signing_key":    true,
 	}
 )
 

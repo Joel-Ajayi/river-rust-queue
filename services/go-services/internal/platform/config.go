@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -43,10 +42,129 @@ type Config struct {
 	OtelExporterEndpoint string
 
 	PlatformAdminKey string
+
+	Capacity       *CapacityConfig
+	GlobalCapacity *GlobalCapacityConfig
+}
+
+// CapacityConfig holds all variables derived by the SLO capacity engine.
+type CapacityConfig struct {
+	RequestTimeoutMs    int
+	ServerTimeoutMs     int
+	ShutdownTimeoutMs   int
+	ServerIdleTimeoutMs int
+	CBErrorThreshold    float64
+	CBMinRequests       int
+	CBTimeoutMs         int
+	CBIntervalMs        int
+	MaxRetries          int
+	BackoffBaseMs       int
+	BackoffCapMs        int
+
+	// Memory request (MiB) derived by the capacity engine.
+	PodMemRequestMiB int
+	DBPoolSize       int
+	WorkerPoolSize   int
+	KafkaHeartbeatMs int
+	KafkaSessionMs   int
+
+	// HTTP Specific
+	HTTPMaxIdleConns        int
+	HTTPMaxIdleConnsPerHost int
+	HTTPTimeoutMs           int
+
+	// DLQ (dead-letter queue) retry policy
+	DLQMaxRetries     int
+	DLQBaseDelayMs    int
+	DLQCapDelayMs     int
+	DLQWriteTimeoutMs int // outer DLQ write deadline (engine-derived, == DLQ retry budget)
+
+	// Other Specific
+	JWTAccessHrs      int
+	Argon2MemoryKib   int
+	Argon2Iterations  int
+	Argon2Parallelism int
+	VelocityThreshold float64
+	VelocityWindowMs  int
+	FetchBatchSize    int
+	AIMDThrottleFrac  float64
+	AIMDPauseFrac     float64
+	AIMDResumeFrac    float64
+
+	// Per-pod per-shard RW cap (engine-derived, not the DB's hard max_connections).
+	// The DB's hard limit lives in the PG Cluster manifest, not in env vars.
+	PGShardRWMaxConns     map[string]int
+	PGMerchantsRWMaxConns int
+
+	// Circuit breaker probes (engine-derived)
+	CBMaxFails       int
+	CBHalfOpenProbes int
+
+	// Core-API
+	MaxRequestBytes int
+
+	// Webhook-API runtime
+	VisibilityTimeoutMs         int
+	DeliveryMaxAttempts         int
+	DeliveryBackoffBaseMs       int
+	DeliveryBackoffCapMs        int
+	SchedulerPollIntervalMs     int
+	SchedulerBatchSize          int
+	FastLaneGracePeriodMs       int
+	FastLaneBufferSize          int
+	FastLaneWorkerPoolSize      int
+	ConsumerPollTimeoutMs       int
+	HTTPIdleConnTimeoutMs       int
+	HTTPResponseHeaderTimeoutMs int
+	HTTPTLSHandshakeTimeoutMs   int
+	HTTPExpectContinueTimeoutMs int
+	BreakerEvictionIntervalMs   int
+	BreakerEvictionTTLMs        int
+	WebhookMaxConcurrency       int
+
+	// Outbox relay runtime
+	RelayPoolIntervalMs          int
+	RelayStagingKB               int // AIMD byte budget for the Kafka staging buffer
+	RelayBatchMsgCount           int // kafka.Writer.BatchSize — message count, NOT bytes
+	RelayBatchTimeoutMs          int
+	RelayMaxPayloadBytes         int // producer-side payload validation cap; independent of Kafka reader fetch cap
+	RelayBufferSampleIntervalMs  int
+	RelayBufferMaxThrottleLevel  int
+	RelayBufferMaxPollIntervalMs int
+}
+
+// Global DB pool bounds derived by the capacity engine.
+// NOTE: per-shard/per-pod RW caps (PGShardRWMaxConns map) live in
+// CapacityConfig (per-service). The values previously here (PG_SHARD_A_MAX_CONNS,
+// PG_MERCHANTS_MAX_CONNS) were server-side PG hard limits, not client-side
+// pool sizes — they belong in the PG Cluster manifest, not in this
+// configmap. See Issue 7 / Phase 1d.
+type GlobalCapacityConfig struct {
+	PGShardROMaxConns             int
+	PGMerchantsROMaxConns         int
+	RedisMaxMemoryMiB             int
+	KetamaVNodes                  int
+	KafkaReaderMinBytes           int
+	KafkaReaderMaxBytes           int
+	KafkaReaderMaxWaitMs          int
+	KafkaWriterMaxAttempts        int
+	ConsumerMaxPendingBytes       int64
+	ConsumerFetchGrabTimeoutMs    int
+	ConsumerFetchBackoffMinMs     int
+	ConsumerFetchBackoffMaxMs     int
+	ConsumerChannelRefreshMs      int
+	ConsumerDrainTimeoutMs        int
+	ConsumerCommitFlushTimeoutMs  int
+	ConsumerCommitFlushIntervalMs int
+	ConsumerCommitBatchCapacity   int
+	ConsumerPartitionChannelSize  int
+	ConsumerMinCommitCapFrac      float64
+	PGConnMaxIdleTimeMs           int
+	PGConnMaxLifetimeMs           int
 }
 
 // LoadConfig reads configuration from env vars (injected by K8s ConfigMap + Secret).
-func LoadConfig() *Config {
+func LoadConfig(servicePrefix string) *Config {
 	cfg := &Config{
 		MerchantsDBURI: os.Getenv("MERCHANTS_DB_URI"),
 		ShardURIs:      make(map[string]string),
@@ -71,10 +189,16 @@ func LoadConfig() *Config {
 		KubernetesNamespace: env("KUBERNETES_NAMESPACE", "rrq"),
 
 		OtelExporterEndpoint: env("OTEL_EXPORTER_OTLP_ENDPOINT", "agent-exporter.observability.svc.cluster.local:4317"),
+
+		Capacity:       LoadCapacityConfig(servicePrefix),
+		GlobalCapacity: LoadGlobalCapacityConfig(),
 	}
 
-	// dynamically load shard URIs from env vars
-	for _, shard := range strings.Split(DefaultShardLetters, "") {
+	// Determine which shard letters to load. The default set ("ABCDE") is
+	// overridable via SHARD_LETTERS so the engine can plan for F+ when
+	// traffic justifies a 6th shard (see issue 34).
+	shardLetters := env("SHARD_LETTERS", DefaultShardLetters)
+	for _, shard := range strings.Split(shardLetters, "") {
 		if uri := os.Getenv("SHARD_" + shard + "_URI"); uri != "" {
 			cfg.ShardURIs[ShardIDPrefix+strings.ToLower(shard)] = uri
 		}
@@ -83,8 +207,7 @@ func LoadConfig() *Config {
 	return cfg
 }
 
-func (c *Config) RedisAddr() string             { return c.RedisDataHost + ":" + c.RedisDataPort }
-func (c *Config) DefaultTimeout() time.Duration { return 30 * time.Second }
+func (c *Config) RedisAddr() string { return c.RedisDataHost + ":" + c.RedisDataPort }
 
 // parseJWTKeys parses a comma-separated list of kid:key pairs.
 func parseJWTKeys(keysEnv string) map[string]ed25519.PrivateKey {
@@ -131,4 +254,118 @@ func envOrDefaultFloat(key string, fallback float64) float64 {
 		}
 	}
 	return fallback
+}
+
+// loadShardRWCaps loads per-shard RW connection caps from env vars for all
+// configured shards (A–F, or as specified by SHARD_LETTERS). Each env var is
+// of the form <PREFIX>PG_SHARD_<LETTER>_RW_MAX_CONNS and is rendered by the
+// capacity engine.
+func loadShardRWCaps(prefix string) map[string]int {
+	shardLetters := env("SHARD_LETTERS", DefaultShardLetters)
+	caps := make(map[string]int)
+	for _, letter := range strings.Split(shardLetters, "") {
+		if letter == "" {
+			continue
+		}
+		envName := prefix + "PG_SHARD_" + strings.ToUpper(letter) + "_RW_MAX_CONNS"
+		if v := envOrDefaultInt(envName, 0); v > 0 {
+			shardID := ShardIDPrefix + strings.ToLower(letter)
+			caps[shardID] = v
+		}
+	}
+	return caps
+}
+
+// LoadCapacityConfig loads the capacity engine's derived variables for a specific service.
+func LoadCapacityConfig(prefix string) *CapacityConfig {
+	return &CapacityConfig{
+		RequestTimeoutMs:             envOrDefaultInt(prefix+"REQUEST_TIMEOUT_MS", 0),
+		ServerTimeoutMs:              envOrDefaultInt(prefix+"SERVER_TIMEOUT_MS", 0),
+		ShutdownTimeoutMs:            envOrDefaultInt(prefix+"SHUTDOWN_TIMEOUT_MS", 30000),
+		ServerIdleTimeoutMs:          envOrDefaultInt(prefix+"SERVER_IDLE_TIMEOUT_MS", 60000),
+		CBErrorThreshold:             envOrDefaultFloat(prefix+"CB_ERROR_THRESHOLD", 0.0),
+		CBMinRequests:                envOrDefaultInt(prefix+"CB_MIN_REQUESTS", 0),
+		CBTimeoutMs:                  envOrDefaultInt(prefix+"CB_TIMEOUT_MS", 0),
+		CBIntervalMs:                 envOrDefaultInt(prefix+"CB_INTERVAL_MS", 10000),
+		MaxRetries:                   envOrDefaultInt(prefix+"MAX_RETRIES", 0),
+		BackoffBaseMs:                envOrDefaultInt(prefix+"BACKOFF_BASE_MS", 0),
+		BackoffCapMs:                 envOrDefaultInt(prefix+"BACKOFF_CAP_MS", 0),
+		PodMemRequestMiB:             envOrDefaultInt(prefix+"POD_MEM_REQUEST_MIB", 0),
+		DBPoolSize:                   envOrDefaultInt(prefix+"DB_POOL_SIZE", 0),
+		WorkerPoolSize:               envOrDefaultInt(prefix+"WORKER_POOL_SIZE", 0),
+		KafkaHeartbeatMs:             envOrDefaultInt(prefix+"KAFKA_HEARTBEAT_MS", 0),
+		KafkaSessionMs:               envOrDefaultInt(prefix+"KAFKA_SESSION_MS", 0),
+		HTTPMaxIdleConns:             envOrDefaultInt(prefix+"HTTP_MAX_IDLE_CONNS", 0),
+		HTTPMaxIdleConnsPerHost:      envOrDefaultInt(prefix+"HTTP_MAX_IDLE_PER_HOST", 0),
+		HTTPTimeoutMs:                envOrDefaultInt(prefix+"HTTP_TIMEOUT_MS", 0),
+		DLQMaxRetries:                envOrDefaultInt(prefix+"DLQ_MAX_RETRIES", 0),
+		DLQBaseDelayMs:               envOrDefaultInt(prefix+"DLQ_BASE_DELAY_MS", 0),
+		DLQCapDelayMs:                envOrDefaultInt(prefix+"DLQ_CAP_DELAY_MS", 0),
+		DLQWriteTimeoutMs:            envOrDefaultInt(prefix+"DLQ_WRITE_TIMEOUT_MS", 0),
+		JWTAccessHrs:                 envOrDefaultInt(prefix+"JWT_ACCESS_HRS", 0),
+		Argon2MemoryKib:              envOrDefaultInt(prefix+"ARGON2_MEMORY_KIB", 0),
+		Argon2Iterations:             envOrDefaultInt(prefix+"ARGON2_ITERATIONS", 0),
+		Argon2Parallelism:            envOrDefaultInt(prefix+"ARGON2_PARALLELISM", 0),
+		VelocityThreshold:            envOrDefaultFloat(prefix+"VELOCITY_THRESHOLD", 0.0),
+		VelocityWindowMs:             envOrDefaultInt(prefix+"VELOCITY_WINDOW_MS", 0),
+		FetchBatchSize:               envOrDefaultInt(prefix+"FETCH_BATCH_SIZE", 0),
+		AIMDThrottleFrac:             envOrDefaultFloat(prefix+"AIMD_THROTTLE_FRAC", 0.0),
+		AIMDPauseFrac:                envOrDefaultFloat(prefix+"AIMD_PAUSE_FRAC", 0.0),
+		AIMDResumeFrac:               envOrDefaultFloat(prefix+"AIMD_RESUME_FRAC", 0.0),
+		PGShardRWMaxConns:            loadShardRWCaps(prefix),
+		PGMerchantsRWMaxConns:        envOrDefaultInt(prefix+"PG_MERCHANTS_RW_MAX_CONNS", 0),
+		CBMaxFails:                   envOrDefaultInt(prefix+"CB_MAX_FAILS", 0),
+		CBHalfOpenProbes:             envOrDefaultInt(prefix+"CB_HALF_OPEN_PROBES", 0),
+		MaxRequestBytes:              envOrDefaultInt(prefix+"MAX_REQUEST_BYTES", 0),
+		VisibilityTimeoutMs:          envOrDefaultInt(prefix+"VISIBILITY_TIMEOUT_MS", 0),
+		DeliveryMaxAttempts:          envOrDefaultInt(prefix+"DELIVERY_MAX_ATTEMPTS", 0),
+		DeliveryBackoffBaseMs:        envOrDefaultInt(prefix+"DELIVERY_BACKOFF_BASE_MS", 0),
+		DeliveryBackoffCapMs:         envOrDefaultInt(prefix+"DELIVERY_BACKOFF_CAP_MS", 0),
+		SchedulerPollIntervalMs:      envOrDefaultInt(prefix+"SCHEDULER_POLL_INTERVAL_MS", 0),
+		SchedulerBatchSize:           envOrDefaultInt(prefix+"SCHEDULER_BATCH_SIZE", 0),
+		FastLaneGracePeriodMs:        envOrDefaultInt(prefix+"FAST_LANE_GRACE_PERIOD_MS", 0),
+		FastLaneBufferSize:           envOrDefaultInt(prefix+"FAST_LANE_BUFFER_SIZE", 0),
+		FastLaneWorkerPoolSize:       envOrDefaultInt(prefix+"FAST_LANE_WORKER_POOL_SIZE", 0),
+		ConsumerPollTimeoutMs:        envOrDefaultInt(prefix+"CONSUMER_POLL_TIMEOUT_MS", 0),
+		HTTPIdleConnTimeoutMs:        envOrDefaultInt(prefix+"HTTP_IDLE_CONN_TIMEOUT_MS", 0),
+		HTTPResponseHeaderTimeoutMs:  envOrDefaultInt(prefix+"HTTP_RESPONSE_HEADER_TIMEOUT_MS", 0),
+		HTTPTLSHandshakeTimeoutMs:    envOrDefaultInt(prefix+"HTTP_TLS_HANDSHAKE_TIMEOUT_MS", 0),
+		HTTPExpectContinueTimeoutMs:  envOrDefaultInt(prefix+"HTTP_EXPECT_CONTINUE_TIMEOUT_MS", 0),
+		BreakerEvictionIntervalMs:    envOrDefaultInt(prefix+"BREAKER_EVICTION_INTERVAL_MS", 0),
+		BreakerEvictionTTLMs:         envOrDefaultInt(prefix+"BREAKER_EVICTION_TTL_MS", 0),
+		WebhookMaxConcurrency:        envOrDefaultInt(prefix+"WEBHOOK_MAX_CONCURRENCY", 0),
+		RelayPoolIntervalMs:          envOrDefaultInt(prefix+"RELAY_POOL_INTERVAL_MS", 0),
+		RelayStagingKB:               envOrDefaultInt(prefix+"STAGING_KB", 0),
+		RelayBatchMsgCount:           envOrDefaultInt(prefix+"RELAY_BATCH_MSG_COUNT", 0),
+		RelayBatchTimeoutMs:          envOrDefaultInt(prefix+"RELAY_BATCH_TIMEOUT_MS", 0),
+		RelayMaxPayloadBytes:         envOrDefaultInt(prefix+"RELAY_MAX_PAYLOAD_BYTES", 0),
+		RelayBufferSampleIntervalMs:  envOrDefaultInt(prefix+"RELAY_BUFFER_SAMPLE_INTERVAL_MS", 0),
+		RelayBufferMaxThrottleLevel:  envOrDefaultInt(prefix+"RELAY_BUFFER_MAX_THROTTLE_LEVEL", 0),
+		RelayBufferMaxPollIntervalMs: envOrDefaultInt(prefix+"RELAY_BUFFER_MAX_POLL_INTERVAL_MS", 0),
+	}
+}
+
+// LoadGlobalCapacityConfig loads platform-level derived bounds.
+// Per-shard/per-pod RW caps are loaded in LoadCapacityConfig (per-service).
+func LoadGlobalCapacityConfig() *GlobalCapacityConfig {
+	return &GlobalCapacityConfig{
+		PGShardROMaxConns:             envOrDefaultInt("PG_SHARD_RO_MAX_CONNS", 0),
+		PGMerchantsROMaxConns:         envOrDefaultInt("PG_MERCHANTS_RO_MAX_CONNS", 0),
+		RedisMaxMemoryMiB:             envOrDefaultInt("REDIS_MAXMEMORY_MIB", 0),
+		KetamaVNodes:                  envOrDefaultInt("KETAMA_VNODES", 0),
+		KafkaReaderMinBytes:           envOrDefaultInt("KAFKA_READER_MIN_BYTES", 0),
+		KafkaReaderMaxBytes:           envOrDefaultInt("KAFKA_READER_MAX_BYTES", 0),
+		KafkaReaderMaxWaitMs:          envOrDefaultInt("KAFKA_READER_MAX_WAIT_MS", 0),
+		KafkaWriterMaxAttempts:        envOrDefaultInt("KAFKA_WRITER_MAX_ATTEMPTS", 0),
+		ConsumerMaxPendingBytes:       int64(envOrDefaultInt("CONSUMER_MAX_PENDING_BYTES", 0)),
+		ConsumerChannelRefreshMs:      envOrDefaultInt("CONSUMER_CHANNEL_REFRESH_MS", 0),
+		ConsumerDrainTimeoutMs:        envOrDefaultInt("CONSUMER_DRAIN_TIMEOUT_MS", 0),
+		ConsumerCommitFlushTimeoutMs:  envOrDefaultInt("CONSUMER_COMMIT_FLUSH_TIMEOUT_MS", 0),
+		ConsumerCommitFlushIntervalMs: envOrDefaultInt("CONSUMER_COMMIT_FLUSH_INTERVAL_MS", 0),
+		ConsumerCommitBatchCapacity:   envOrDefaultInt("CONSUMER_COMMIT_BATCH_CAPACITY", 0),
+		ConsumerPartitionChannelSize:  envOrDefaultInt("CONSUMER_PARTITION_CHANNEL_SIZE", 0),
+		ConsumerMinCommitCapFrac:      envOrDefaultFloat("CONSUMER_MIN_COMMIT_CAP_FRAC", 0.0),
+		PGConnMaxIdleTimeMs:           envOrDefaultInt("PG_CONN_MAX_IDLE_TIME_MS", 0),
+		PGConnMaxLifetimeMs:           envOrDefaultInt("PG_CONN_MAX_LIFETIME_MS", 0),
+	}
 }

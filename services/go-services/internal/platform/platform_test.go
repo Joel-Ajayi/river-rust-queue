@@ -7,12 +7,21 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestIDGen_NewTransferID_Unique(t *testing.T) {
-	id1 := platform.NewTransferID()
-	id2 := platform.NewTransferID()
+func TestIDGen_NewDeterministicTransferID_Unique(t *testing.T) {
+	id1 := platform.NewDeterministicTransferID(platform.NewJobID())
+	id2 := platform.NewDeterministicTransferID(platform.NewJobID())
 	assert.NotEqual(t, id1, id2)
 	assert.Contains(t, id1, "transfer_")
 	assert.Greater(t, len(id1), 26)
+}
+
+func TestIDGen_NewDeterministicTransferID_IsStablePerJob(t *testing.T) {
+	jobID := platform.NewJobID()
+	id1 := platform.NewDeterministicTransferID(jobID)
+	id2 := platform.NewDeterministicTransferID(jobID)
+	assert.Equal(t, id1, id2)
+	assert.Contains(t, id1, "transfer_")
+	assert.NotEqual(t, id1, platform.NewDeterministicTransferID(platform.NewJobID()))
 }
 
 func TestIDGen_NewMerchantID_Unique(t *testing.T) {

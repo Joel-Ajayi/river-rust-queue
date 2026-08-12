@@ -1,11 +1,5 @@
 package platform
 
-import (
-	"time"
-
-	"github.com/failsafe-go/failsafe-go/circuitbreaker"
-)
-
 type AggregateType string
 type EventType string
 
@@ -29,16 +23,9 @@ const (
 	ServiceNameLedgerWorker  = "ledger-worker"
 	ServiceNameOutboxRelay   = "outbox-relay"
 	ServiceNameWebhookWorker = "webhook-worker"
+	ServiceNameWebhookEcho   = "webhook-echo"
 	ServiceNameFraudWorker   = "fraud-worker"
 	ServiceNameReconWorker   = "recon-worker"
-
-	// Circuit Breaker Names (legacy Kafka publisher names kept for back-compat)
-	CBNameAPIGatewayKafkaPublisher = "KafkaPublisher"
-	CBNameOutboxKafkaPublisher     = "OutboxKafkaPublisher"
-	CBNameOutboxEventStore         = "OutboxEventStore"
-
-	// Circuit Breaker defaults (shared, see platform.NewDBCircuitBreakers)
-	// (Values removed in favor of service-specific profiles passed dynamically)
 
 	// Infrastructure Components
 	ComponentMerchantDirectory  = "merchant_directory"
@@ -56,21 +43,10 @@ const (
 	ComponentTransferService    = "transfer_service"
 	ComponentWebhookStore       = "webhook_store"
 	ComponentWebhookHandler     = "webhook_handler"
+	ComponentRedis              = "redis"
 
 	ComponentFormatShard  = "%s_%s"
 	ComponentFormatGlobal = "%s_global"
-
-	// Circuit Breaker State Values
-	CBStateClosed   = circuitbreaker.ClosedState
-	CBStateHalfOpen = circuitbreaker.HalfOpenState
-	CBStateOpen     = circuitbreaker.OpenState
-
-	// Resiliency Defaults
-
-	// Kafka Limits
-	KafkaMaxMessageBytes = 1000000 // 1MB
-
-	// Default Timeouts
 
 	// Merchant Statuses
 	MerchantStatusActive = "active"
@@ -136,9 +112,6 @@ const (
 	// Ledger Constants
 	LedgerTransferWalletCount = 2
 
-	// Time Constants
-	MillisecondsPerSecond = 1000
-
 	// JWT Header Keys
 	JWTHeaderKeyID = "kid"
 
@@ -150,10 +123,6 @@ const (
 
 	// Redis Key Formats
 	RedisKeyVelocity = "velocity:wallet:%s"
-
-	// Consumer Backoff Defaults
-	ConsumerBackoffMinDelay = 100 * time.Millisecond
-	ConsumerBackoffMaxDelay = 5 * time.Second
 
 	// Canonical Error Codes (used in ErrorCode field of CanonicalLogLine)
 	ErrorCodeSagaFailed            = "saga_failed"

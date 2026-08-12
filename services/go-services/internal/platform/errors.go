@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"syscall"
 
+	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/segmentio/kafka-go"
@@ -100,39 +101,111 @@ func isPoisonError(err error) bool {
 	return errors.As(err, &jsonTypeErr)
 }
 
-// isInfrastructureError determines if an error represents a fatal
-// infrastructure failure that should trigger a deep sleep or circuit breaker rather than a fast retry.
+// infrastructure failure that should trigger a long backoff,
+// deep sleep, or circuit breaker rather than an immediate retry.
 func isInfrastructureError(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	// 1. PostgreSQL Connection Errors (08xxx)
+	// Caller cancelled the operation.
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	// PostgreSQL infrastructure/resource failures.
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
-		// pgerrcode.IsConnectionException handles all 08xxx classes (08000, 08003, 08006, etc)
 		if pgerrcode.IsConnectionException(pgErr.Code) {
 			return true
 		}
-	}
 
-	// 2. Network connection refused / reset
-	var sysErr *net.OpError
-	if errors.As(err, &sysErr) {
-		if errors.Is(sysErr.Err, syscall.ECONNREFUSED) || errors.Is(sysErr.Err, syscall.ECONNRESET) {
+		switch pgErr.Code {
+		case pgerrcode.CannotConnectNow, // 57P03
+			pgerrcode.InsufficientResources, // 53000
+			pgerrcode.DiskFull,              // 53100
+			pgerrcode.OutOfMemory,           // 53200
+			pgerrcode.TooManyConnections:    // 53300
 			return true
 		}
 	}
 
-	// 3. Kafka Connection Refused
+	// Network failures.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if errors.Is(opErr.Err, syscall.ECONNREFUSED) {
+			return true
+		}
+	}
+
+	// Kafka infrastructure failures.
 	var kErr kafka.Error
 	if errors.As(err, &kErr) {
-		if kErr == kafka.BrokerNotAvailable {
+		if !kErr.Temporary() {
 			return true
 		}
 	}
 
-	// 4. Unexpected EOF (Connection Dropped)
+	// Circuit breaker already open.
+	if errors.Is(err, circuitbreaker.ErrOpen) {
+		return true
+	}
+
+	return false
+}
+
+// isTransientError determines whether an error is expected to resolve
+// quickly and should be retried with the normal retry policy.
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Caller cancelled the operation.
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	// Request deadline exceeded.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	// PostgreSQL concurrency failures.
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case pgerrcode.DeadlockDetected, // 40P01
+			pgerrcode.SerializationFailure: // 40001
+			return true
+		default:
+			return false
+		}
+	}
+
+	// Kafka transient cluster state.
+	var kErr kafka.Error
+	if errors.As(err, &kErr) {
+		if kErr.Temporary() {
+			return true
+		}
+	}
+
+	// Generic network timeouts.
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	// Connection reset / dropped connection.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if errors.Is(opErr.Err, syscall.ECONNRESET) {
+			return true
+		}
+	}
+
+	// Dropped stream.
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
@@ -140,67 +213,12 @@ func isInfrastructureError(err error) bool {
 	return false
 }
 
-// isTransientError determines if an error is transient and should be retried
-func isTransientError(err error) bool {
-	if err == nil {
-		return false
-	}
+// ErrConsumerPanic is wrapped when a worker goroutine panics during message processing.
+var ErrConsumerPanic = errors.New("consumer panic")
 
-	// 1. PostgreSQL Structural Error Inspection (pgx/v5)
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		switch pgErr.Code {
-		case pgerrcode.DeadlockDetected, // 40P01: Concurrent transaction deadlock lock victim
-			pgerrcode.SerializationFailure,  // 40001: SSI isolation failure (safe to replay transaction)
-			pgerrcode.InsufficientResources, // 53000: DB out of memory/disk space (temporary spike)
-			pgerrcode.TooManyConnections:    // 53300: Connection pool limit hit on Postgres
-			return true
-		// We explicitly DO NOT include 08000, 08003, 08006 (Connection drops)
-		default:
-			return false
-		}
-	}
-
-	// 2. Kafka Network & State Failures (segmentio/kafka-go)
-	var kErr kafka.Error
-	if errors.As(err, &kErr) {
-		if kErr.Temporary() || kErr.Timeout() {
-			return true
-		}
-		switch kErr {
-		case kafka.RequestTimedOut,
-			kafka.LeaderNotAvailable,
-			kafka.NotLeaderForPartition,
-			kafka.NetworkException:
-			return true
-		}
-	}
-
-	// 3. Robust Network and Socket Level Timeouts
-	var netErr net.Error
-	if errors.As(err, &netErr) && (netErr.Timeout()) {
-		// Differentiate between a transient network timeout and a hard dial failure (Connection Refused).
-		// We explicitly do NOT want to retry dial failures or reset connections.
-		var sysErr *net.OpError
-		if errors.As(err, &sysErr) {
-			if errors.Is(sysErr.Err, syscall.ECONNREFUSED) || errors.Is(sysErr.Err, syscall.ECONNRESET) {
-				return false // Fail fast!
-			}
-		}
-		return true
-	}
-
-	// 4. Go Context Deadlines
-	// A context timeout (e.g., http client request timeout) is highly transient.
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-
-	return false
-}
-
-// ErrUnmarshalFailed is a sentinel for protobuf/JSON unmarshal failures
-var ErrUnmarshalFailed = errors.New("unmarshal failed")
+// ErrConsumerFetchDeadline is returned when the fetcher exhausts its retry
+// deadline (derived from SessionMs) without a successful FetchMessage.
+var ErrConsumerFetchDeadline = errors.New("consumer fetch deadline exceeded")
 
 // HttpError wraps an HTTP error with status code
 type HttpError struct {
@@ -229,7 +247,7 @@ type AppError struct {
 	Message string
 	Status  int
 	Field   string
-	Err     error // wrapped error for errors.Is/As traversal
+	Err     error
 }
 
 func (e *AppError) Error() string {

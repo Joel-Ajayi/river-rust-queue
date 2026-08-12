@@ -11,17 +11,17 @@ import (
 
 const (
 	// Business Metrics
-	MetricBusinessGTV                = "rrq_business_gtv_total"
-	MetricBusinessTransfers          = "rrq_business_transfers_total"
-	MetricBusinessDeclines           = "rrq_business_declines_total"
-	MetricBusinessSagaDuration       = "rrq_business_saga_duration_seconds"
-	MetricBusinessSagaInitiated      = "rrq_business_saga_initiated_total"
-	MetricBusinessSagaCompleted      = "rrq_business_saga_completed_total"
-	MetricBusinessRefunds            = "rrq_business_refunds_total"
-	MetricBusinessDisputes           = "rrq_business_disputes_total"
-	MetricBusinessWalletsCreated     = "rrq_business_wallets_created_total"
-	MetricBusinessDeposits           = "rrq_business_deposits_total"
-	MetricBusinessDepositsAmount     = "rrq_business_deposits_amount_total"
+	MetricBusinessGTV            = "rrq_business_gtv_total"
+	MetricBusinessTransfers      = "rrq_business_transfers_total"
+	MetricBusinessDeclines       = "rrq_business_declines_total"
+	MetricBusinessSagaDuration   = "rrq_business_saga_duration_seconds"
+	MetricBusinessSagaInitiated  = "rrq_business_saga_initiated_total"
+	MetricBusinessSagaCompleted  = "rrq_business_saga_completed_total"
+	MetricBusinessRefunds        = "rrq_business_refunds_total"
+	MetricBusinessDisputes       = "rrq_business_disputes_total"
+	MetricBusinessWalletsCreated = "rrq_business_wallets_created_total"
+	MetricBusinessDeposits       = "rrq_business_deposits_total"
+	MetricBusinessDepositsAmount = "rrq_business_deposits_amount_total"
 
 	// Business Metric Labels
 	MetricLabelCurrency      = "currency"
@@ -32,17 +32,17 @@ const (
 )
 
 var (
-	businessGTVTotal          metric.Int64Counter
-	businessTransfersTotal    metric.Int64Counter
-	businessDeclinesTotal     metric.Int64Counter
-	businessSagaDuration      metric.Float64Histogram
-	businessSagaInitiated     metric.Int64Counter
-	businessSagaCompleted     metric.Int64Counter
-	businessRefundsTotal      metric.Int64Counter
-	businessDisputesTotal     metric.Int64Counter
-	businessWalletsCreated    metric.Int64Counter
-	businessDepositsTotal     metric.Int64Counter
-	businessDepositsAmount    metric.Int64Counter
+	businessGTVTotal       metric.Int64Counter
+	businessTransfersTotal metric.Int64Counter
+	businessDeclinesTotal  metric.Int64Counter
+	businessSagaDuration   metric.Float64Histogram
+	businessSagaInitiated  metric.Int64Counter
+	businessSagaCompleted  metric.Int64Counter
+	businessRefundsTotal   metric.Int64Counter
+	businessDisputesTotal  metric.Int64Counter
+	businessWalletsCreated metric.Int64Counter
+	businessDepositsTotal  metric.Int64Counter
+	businessDepositsAmount metric.Int64Counter
 
 	businessOnce sync.Once
 )

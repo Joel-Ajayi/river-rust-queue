@@ -48,9 +48,11 @@ func NewEventID() string {
 	return fmt.Sprintf("%s_%s", AggregateTypeEvent, generateULID())
 }
 
-// NewTransferID generates a UUID v7 for Transfers.
-func NewTransferID() string {
-	id, _ := uuid.NewV7()
+// NewDeterministicTransferID derives a stable Transfer ID from the Job ID so
+// that Kafka redeliveries of the same job resolve to the same transfer.
+func NewDeterministicTransferID(jobID string) string {
+	namespace := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8") // OID namespace
+	id := uuid.NewSHA1(namespace, []byte(jobID))
 	return fmt.Sprintf("%s_%s", AggregateTypeTransfer, id.String())
 }
 
@@ -63,6 +65,14 @@ func NewMerchantID() string {
 // NewDeliveryID generates a prefixed ULID for Webhook Deliveries.
 func NewDeliveryID() string {
 	return fmt.Sprintf("%s_%s", AggregateTypeDelivery, generateULID())
+}
+
+// NewDeterministicDeliveryID generates a UUIDv5 based on the Event ID and Merchant ID to ensure idempotency.
+func NewDeterministicDeliveryID(eventID, merchantID string) string {
+	// Use a fixed namespace for webhooks
+	namespace := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8") // OID namespace
+	id := uuid.NewSHA1(namespace, []byte(eventID+merchantID))
+	return fmt.Sprintf("%s_%s", AggregateTypeDelivery, id.String())
 }
 
 // Validate merchant id

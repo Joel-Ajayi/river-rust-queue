@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,10 +26,6 @@ func (c *CircuitBreaker) Execute(fn func() (any, error)) (any, error) {
 	return failsafe.With[any](c.cb).Get(fn)
 }
 
-func (c *CircuitBreaker) ExecuteVoid(fn func() error) error {
-	return failsafe.With[any](c.cb).Run(fn)
-}
-
 func (c *CircuitBreaker) State() circuitbreaker.State {
 	return c.cb.State()
 }
@@ -47,6 +44,7 @@ const (
 	CBNameShardRWPrefix   = "shard-rw-"
 	CBNameShardROPrefix   = "shard-ro-"
 	CBNameKafkaEgress     = "kafka-egress"
+	CBNameRedis           = "redis"
 )
 
 // CBGauge values for breaker state metrics: 0=closed, 1=half-open, 2=open.
@@ -116,12 +114,19 @@ func dbIsSuccessfulPolicy(isTerminal IsTerminalFunc) func(error) bool {
 		if err == nil {
 			return true
 		}
+
 		if isTerminal != nil && isTerminal(err) {
 			return true
 		}
 
-		// Timeouts (Go context) are signs of overload -> FAIL
+		// Caller went away, request aborted, etc. No info on DB health -> FAIL
+		if errors.Is(err, context.Canceled) {
+			return true
+		}
+
+		// Timeouts are signs of overload -> FAIL
 		if errors.Is(err, context.DeadlineExceeded) {
+			// Usually means the DB or network was too slow.
 			return false
 		}
 
@@ -133,17 +138,32 @@ func dbIsSuccessfulPolicy(isTerminal IsTerminalFunc) func(error) bool {
 
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
-			switch pgErr.Code {
-			case pgerrcode.DeadlockDetected, pgerrcode.SerializationFailure:
-				// The DB successfully processed the query and protected ACID guarantees.
-				// This is a healthy response.
-				return true
-			case pgerrcode.InsufficientResources, pgerrcode.TooManyConnections:
-				// DB is overloaded/exhausted -> FAIL
+			switch {
+			case strings.HasPrefix(pgErr.Code, "08"):
+				// Connection exception
 				return false
+
+			case pgErr.Code == pgerrcode.TooManyConnections:
+				return false
+
+			case pgErr.Code == pgerrcode.InsufficientResources:
+				return false
+
+			case pgErr.Code == pgerrcode.CannotConnectNow:
+				return false
+
+			case pgErr.Code == pgerrcode.OutOfMemory:
+				return false
+
+			case pgErr.Code == pgerrcode.DiskFull:
+				return false
+
+			case pgErr.Code == pgerrcode.SerializationFailure,
+				pgErr.Code == pgerrcode.DeadlockDetected:
+				return true
+
 			default:
-				// For other PG structural errors (e.g., syntax error),
-				// they are application faults, but the DB is healthy.
+				// All query/data/application errors are healthy DB responses.
 				return true
 			}
 		}
@@ -160,8 +180,14 @@ func kafkaEgressIsSuccessful(err error) bool {
 		return true
 	}
 
-	// If it's a context timeout, Kafka is overloaded -> FAIL
+	// Caller went away, request aborted, etc. No info on DB health -> FAIL
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+
+	// Timeouts are signs of overload -> FAIL
 	if errors.Is(err, context.DeadlineExceeded) {
+		// Usually means the DB or network was too slow.
 		return false
 	}
 
@@ -182,10 +208,6 @@ type WebhookResilience struct {
 
 func (w *WebhookResilience) Execute(fn func() (any, error)) (any, error) {
 	return w.executor.Get(fn)
-}
-
-func (w *WebhookResilience) ExecuteVoid(fn func() error) error {
-	return w.executor.Run(fn)
 }
 
 func (w *WebhookResilience) IsOpen() bool {
@@ -312,7 +334,9 @@ func (r *DBCircuitBreakers) ShardRW(shardID string) *CircuitBreaker {
 	if ok {
 		return cb
 	}
-	// Should not happen - all shards pre-created at startup
+	// Lazy-create path: emit the initial state metric so the breaker is
+	// visible on the dashboard from creation (see issue 37). This should
+	// only happen for shards added after startup.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if cb, ok := r.shardsRW[shardID]; ok {
@@ -320,6 +344,7 @@ func (r *DBCircuitBreakers) ShardRW(shardID string) *CircuitBreaker {
 	}
 	cb = r.newDBBreaker(CBNameShardRWPrefix + shardID)
 	r.shardsRW[shardID] = cb
+	RecordCircuitBreakerState(context.Background(), CBNameShardRWPrefix+shardID, 0)
 	return cb
 }
 
@@ -342,27 +367,56 @@ func (r *DBCircuitBreakers) ShardRO(shardID string) *CircuitBreaker {
 	return cb
 }
 
-// KafkaCircuitBreaker wraps the single Kafka egress breaker for outbox-relay.
-type KafkaCircuitBreaker struct {
+// redisIsSuccessful: velocity counters are pure infrastructure — there are no
+// business errors to excuse.
+func redisIsSuccessful(err error) bool {
+	if err == nil {
+		return true
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return false
+	}
+
+	return false
+}
+
+// RedisCircuitBreaker wraps the single Redis breaker shared by all velocity calls.
+type RedisCircuitBreaker struct {
 	cb *CircuitBreaker
 }
 
-// NewKafkaCircuitBreaker returns the singleton Kafka egress breaker.
-func NewKafkaCircuitBreaker(name string, cbConfig CircuitBreakerConfig, logger *zap.Logger) *KafkaCircuitBreaker {
+// NewRedisCircuitBreaker returns the singleton Redis breaker.
+func NewRedisCircuitBreaker(name string, cbConfig CircuitBreakerConfig, logger *zap.Logger) *RedisCircuitBreaker {
 	if name == "" {
-		name = CBNameKafkaEgress
+		name = CBNameRedis
 	}
 	cbConfig.Name = name
 	cbConfig.Logger = logger
-	cbConfig.IsSuccessful = kafkaEgressIsSuccessful
+	cbConfig.IsSuccessful = redisIsSuccessful
 	cbConfig.OnStateChange = recordBreakerStateChange
 
 	RecordCircuitBreakerState(context.Background(), name, CBGaugeClosed)
 
-	return &KafkaCircuitBreaker{
+	return &RedisCircuitBreaker{
 		cb: newCircuitBreaker(cbConfig),
 	}
 }
 
+// Execute runs fn guarded by the Redis breaker. While the breaker is open,
+// calls fail fast without touching the Redis client.
+func (r *RedisCircuitBreaker) Execute(fn func() (any, error)) (any, error) {
+	return r.cb.Execute(fn)
+}
+
 // Breaker returns the underlying failsafe-go circuitbreaker instance.
-func (k *KafkaCircuitBreaker) Breaker() *CircuitBreaker { return k.cb }
+func (r *RedisCircuitBreaker) Breaker() *CircuitBreaker { return r.cb }

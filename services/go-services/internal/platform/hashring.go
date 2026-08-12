@@ -8,8 +8,7 @@ import (
 )
 
 const (
-	// HashRingDefaultVNodes is the number of virtual nodes per shard on the ring.
-	HashRingDefaultVNodes  = 150
+	// hashRingVNodeSeparator separates shard IDs from virtual-node indices on the ring.
 	hashRingVNodeSeparator = "#"
 )
 
@@ -22,10 +21,11 @@ type HashRing struct {
 	vNodes   int
 }
 
-// NewHashRing creates a consistent hash ring from the given shard IDs.
+// NewHashRing creates a consistent hash ring from the given shard IDs
+// with vNodes virtual nodes per shard (engine-derived KETAMA_VNODES; default 160).
 func NewHashRing(shardIDs []string, vNodes int) *HashRing {
 	if vNodes <= 0 {
-		vNodes = HashRingDefaultVNodes
+		vNodes = 160
 	}
 
 	r := &HashRing{
