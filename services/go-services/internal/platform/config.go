@@ -113,7 +113,6 @@ type CapacityConfig struct {
 	FastLaneGracePeriodMs       int
 	FastLaneBufferSize          int
 	FastLaneWorkerPoolSize      int
-	ConsumerPollTimeoutMs       int
 	HTTPIdleConnTimeoutMs       int
 	HTTPResponseHeaderTimeoutMs int
 	HTTPTLSHandshakeTimeoutMs   int
@@ -326,7 +325,6 @@ func LoadCapacityConfig(prefix string) *CapacityConfig {
 		FastLaneGracePeriodMs:        envOrDefaultInt(prefix+"FAST_LANE_GRACE_PERIOD_MS", 0),
 		FastLaneBufferSize:           envOrDefaultInt(prefix+"FAST_LANE_BUFFER_SIZE", 0),
 		FastLaneWorkerPoolSize:       envOrDefaultInt(prefix+"FAST_LANE_WORKER_POOL_SIZE", 0),
-		ConsumerPollTimeoutMs:        envOrDefaultInt(prefix+"CONSUMER_POLL_TIMEOUT_MS", 0),
 		HTTPIdleConnTimeoutMs:        envOrDefaultInt(prefix+"HTTP_IDLE_CONN_TIMEOUT_MS", 0),
 		HTTPResponseHeaderTimeoutMs:  envOrDefaultInt(prefix+"HTTP_RESPONSE_HEADER_TIMEOUT_MS", 0),
 		HTTPTLSHandshakeTimeoutMs:    envOrDefaultInt(prefix+"HTTP_TLS_HANDSHAKE_TIMEOUT_MS", 0),

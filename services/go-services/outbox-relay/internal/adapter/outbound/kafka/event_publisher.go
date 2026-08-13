@@ -66,10 +66,10 @@ func (p *EventPublisher) PublishBatch(ctx context.Context, shardID string, event
 		key := []byte(domain.DeriveKafkaKey(e))
 
 		// Stamp each message with the event ID as a header so consumers can
-		// dedup across producer retries. Combined with the partition key above
-		// (which routes by AggregateID), a retry of the same event will land
+		// dedup across producer retries. A retry of the same event will land
 		// in the same partition and consumers can detect the duplicate via
-		// the event_id header (see issue 38).
+		// the event_id header.
+
 		headers := []kafka.Header{
 			{Key: "event_id", Value: []byte(e.ID)},
 			{Key: "event_type", Value: []byte(e.EventType)},

@@ -69,9 +69,7 @@ func (m *ConsumerManager) Shutdown() {
 func (m *ConsumerManager) Consume(ctx context.Context) error {
 	cfg := platform_consumer.NewConsumerConfigFromCapacity(m.cfg)
 
-	// Shared semaphore for both pipelines (job + xshard). Both pipelines
-	// get the same cfg (same WorkerPoolSize), but we want total concurrency
-	// bounded by WorkerPoolSize across all topics, not per-pipeline (Issue 8).
+	// Shared semaphore for both pipelines (job + xshard)
 	sharedSem := make(chan struct{}, cfg.WorkerPoolSize)
 
 	jobReaderAdapter := &readerAdapter{reader: m.jobReader}
@@ -101,7 +99,6 @@ func (m *ConsumerManager) Consume(ctx context.Context) error {
 	}()
 
 	for _, r := range m.xshardReaders {
-		r := r
 		xshardAdapter := &readerAdapter{reader: r}
 		xsPipeline := platform_consumer.NewConsumerPipeline(
 			xshardAdapter, m.xshardMessageHandler(sagaHandler, dlqStore, directory, pools),

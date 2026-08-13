@@ -40,6 +40,10 @@ const (
 	MetricAdminDLQReplayedTotal       = "rrq.admin.dlq.replayed.total"
 	MetricBulkheadRejectionsTotal     = "rrq.bulkhead.rejections.total"
 	MetricBulkheadInFlight            = "rrq.bulkhead.in.flight"
+	MetricPGPoolAcquiredConns         = "rrq.pg.pool.acquired.conns"
+	MetricPGPoolIdleConns             = "rrq.pg.pool.idle.conns"
+	MetricPGPoolMaxConns              = "rrq.pg.pool.max.conns"
+	MetricPGPoolEmptyAcquireCount     = "rrq.pg.pool.empty.acquire.count"
 
 	// label
 	MetricLabelCircuitBreaker = "circuit.breaker"
@@ -85,6 +89,11 @@ var (
 	adminDLQReplayedTotal         metric.Int64Counter
 	bulkheadRejectionsTotal       metric.Int64Counter
 	bulkheadInFlight              metric.Int64UpDownCounter
+
+	pgPoolAcquiredConns           metric.Int64Gauge
+	pgPoolIdleConns               metric.Int64Gauge
+	pgPoolMaxConns                metric.Int64Gauge
+	pgPoolEmptyAcquireCount       metric.Int64Counter
 
 	metricsOnce sync.Once
 )
@@ -294,6 +303,38 @@ func init() {
 		if err != nil {
 			panic("failed to initialize bulkhead in flight metric: " + err.Error())
 		}
+
+		pgPoolAcquiredConns, err = meter.Int64Gauge(
+			MetricPGPoolAcquiredConns,
+			metric.WithDescription("Number of currently acquired connections in the PG pool"),
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		pgPoolIdleConns, err = meter.Int64Gauge(
+			MetricPGPoolIdleConns,
+			metric.WithDescription("Number of currently idle connections in the PG pool"),
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		pgPoolMaxConns, err = meter.Int64Gauge(
+			MetricPGPoolMaxConns,
+			metric.WithDescription("Maximum number of connections allowed in the PG pool"),
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		pgPoolEmptyAcquireCount, err = meter.Int64Counter(
+			MetricPGPoolEmptyAcquireCount,
+			metric.WithDescription("Cumulative count of successful acquires that waited for a connection to be released or established"),
+		)
+		if err != nil {
+			panic(err)
+		}
 	})
 }
 
@@ -488,4 +529,23 @@ func RecordConsumerCommitWithPartition(ctx context.Context, topic map[string]str
 			attribute.Int(MetricLabelPartition, partition),
 		))
 	}
+}
+
+// RecordPGPoolStats records the current pgxpool statistics.
+func RecordPGPoolStats(ctx context.Context, serviceName string, acquired, idle, maxConns int32, emptyAcquireCount int64) {
+	attrs := metric.WithAttributes(attribute.String(MetricLabelService, serviceName))
+	pgPoolAcquiredConns.Record(ctx, int64(acquired), attrs)
+	pgPoolIdleConns.Record(ctx, int64(idle), attrs)
+	pgPoolMaxConns.Record(ctx, int64(maxConns), attrs)
+	// For counter, we would ideally add the delta, but we can't easily do that with an async observer.
+	// Wait, we can use Int64ObservableCounter if we register a callback, or just record the delta manually.
+	// Actually, since we're using a synchronous Int64Counter, we should use Add for the delta, not absolute count.
+	// We'll track the previous count in postgres.go.
+}
+
+// AddPGPoolEmptyAcquireCount adds to the cumulative count of empty acquires.
+func AddPGPoolEmptyAcquireCount(ctx context.Context, serviceName string, delta int64) {
+	pgPoolEmptyAcquireCount.Add(ctx, delta, metric.WithAttributes(
+		attribute.String(MetricLabelService, serviceName),
+	))
 }

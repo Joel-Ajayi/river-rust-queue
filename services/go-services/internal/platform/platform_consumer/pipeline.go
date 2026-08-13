@@ -40,7 +40,7 @@ func NewConsumerPipeline(reader ConsumerReader, handler MessageHandler, cfg Cons
 
 // SetSharedSemaphore replaces the worker pool's internal semaphore with the
 // given one, allowing multiple pipelines on the same service to share a single
-// concurrency budget (Issue 8). Must be called before Run/Consume.
+// concurrency budget
 func (p *ConsumerPipeline) SetSharedSemaphore(sem chan struct{}) {
 	p.workerPool.SetSemaphore(sem)
 }

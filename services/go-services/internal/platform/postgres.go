@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -32,9 +33,13 @@ type ShardPools struct {
 }
 
 const (
-	DBHostRWSuffix      = "-rw"
-	DBHostROSuffix      = "-ro"
-	DefaultShardLetters = "ABCDE"
+	DBHostRWSuffix        = "-rw"
+	DBHostROSuffix        = "-ro"
+	DefaultShardLetters   = "ABCDE"
+	PGPoolMonitorInterval = 5 * time.Second
+	PGPoolNameMerchants   = "merchants"
+	PGPoolNameMerchantsRO = "merchants-ro"
+	PGPoolNameROSuffix    = "-ro"
 )
 
 func createPool(ctx context.Context, uri string, maxConns int32, maxIdleTime, maxLifetime time.Duration) (*pgxpool.Pool, error) {
@@ -49,6 +54,34 @@ func createPool(ctx context.Context, uri string, maxConns int32, maxIdleTime, ma
 	// pgx-native calls); span_metrics derives DB RED metrics from these spans.
 	config.ConnConfig.Tracer = pgxQueryTracer{}
 	return pgxpool.NewWithConfig(ctx, config)
+}
+
+func startPoolMonitor(ctx context.Context, poolName string, pool *pgxpool.Pool) {
+	serviceName := os.Getenv("OTEL_SERVICE_NAME")
+	if serviceName == "" {
+		serviceName = "unknown"
+	}
+	go func() {
+		ticker := time.NewTicker(PGPoolMonitorInterval)
+		defer ticker.Stop()
+		var lastEmptyAcquireCount int64
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				stat := pool.Stat()
+				RecordPGPoolStats(ctx, serviceName, stat.AcquiredConns(), stat.IdleConns(), stat.MaxConns(), stat.EmptyAcquireCount())
+
+				emptyAcquireCount := stat.EmptyAcquireCount()
+				if emptyAcquireCount > lastEmptyAcquireCount {
+					AddPGPoolEmptyAcquireCount(ctx, serviceName, emptyAcquireCount-lastEmptyAcquireCount)
+					lastEmptyAcquireCount = emptyAcquireCount
+				}
+			}
+		}
+	}()
 }
 
 // NewShardPools creates pools for the global merchants DB and each shard.
@@ -68,15 +101,13 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 	merchantsMaxConns := int32(cfg.Capacity.PGMerchantsRWMaxConns)
 	if merchantsMaxConns <= 0 {
 		merchantsMaxConns = int32(cfg.Capacity.DBPoolSize)
-		if merchantsMaxConns <= 0 {
-			merchantsMaxConns = 4
-		}
 	}
 
 	pool, err := createPool(ctx, cfg.MerchantsDBURI, merchantsMaxConns, maxIdleTime, maxLifetime)
 	if err != nil {
 		return nil, err
 	}
+	startPoolMonitor(ctx, PGPoolNameMerchants, pool)
 	sp.merchants = pool
 
 	roURI := cfg.MerchantsDBURI
@@ -97,6 +128,7 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 			sp.Close()
 			return nil, err
 		}
+		startPoolMonitor(ctx, PGPoolNameMerchantsRO, roPool)
 		sp.roMerchants = roPool
 	}
 	pgLog.Info("Connected to merchants database", zap.String(LogFieldEvent, LogEventMerchantsDBConnected))
@@ -117,6 +149,7 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 			sp.Close()
 			return nil, err
 		}
+		startPoolMonitor(ctx, shardID, pool)
 		sp.shards[shardID] = pool
 
 		// Read-Only Pool (Zero Downtime Reads pattern).
@@ -136,6 +169,7 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 				sp.Close()
 				return nil, err
 			}
+			startPoolMonitor(ctx, shardID+PGPoolNameROSuffix, roPool)
 			sp.roShards[shardID] = roPool
 		}
 
