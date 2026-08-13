@@ -21,7 +21,6 @@ const (
 	MetricInfraErrorsTotal            = "rrq.infrastructure.errors.total"
 	MetricOutboxLagSeconds            = "rrq.outbox.lag.seconds"
 	MetricOutboxEventsPublishedTotal  = "rrq.outbox.events.published.total"
-	MetricOutboxPublishDuration       = "rrq.outbox.publish.duration.seconds"
 	MetricOutboxPanicsTotal           = "rrq.outbox.panics.total"
 	MetricConsumerPanicsTotal         = "rrq.consumer.panics.total"
 	MetricRedisFailClosed             = "rrq.redis.fail_closed.total"
@@ -30,7 +29,6 @@ const (
 	MetricIdempotencyConflictsTotal   = "rrq.idempotency.conflicts.total"
 	MetricIdempotencyHitsTotal        = "rrq.idempotency.hits.total"
 	MetricWeakAPIKeyAuth              = "rrq.weak.api.key.auth.total"
-	MetricConsumerMsgDuration         = "rrq.consumer.message.duration.seconds"
 	MetricConsumerBackoffDuration     = "rrq.consumer.backoff.duration.seconds"
 	MetricConsumerCommitsTotal        = "rrq.consumer.commits.total"
 	MetricConsumerLagMessages         = "rrq.consumer.lag.messages"
@@ -69,7 +67,6 @@ var (
 	infrastructureErrorsTotal     metric.Int64Counter
 	outboxLagGauge                metric.Float64Gauge
 	outboxEventsPublishedTotal    metric.Int64Counter
-	outboxPublishDuration         metric.Float64Histogram
 	outboxPanicsTotal             metric.Int64Counter
 	consumerPanicsTotal           metric.Int64Counter
 	redisFailClosedTotal          metric.Int64Counter
@@ -77,7 +74,6 @@ var (
 	kafkaProducerBufferFill       metric.Float64Gauge
 	idempotencyConflictsTotal     metric.Int64Counter
 	idempotencyHitsTotal          metric.Int64Counter
-	consumerMsgDuration           metric.Float64Histogram
 	consumerBackoffDuration       metric.Float64Histogram
 	consumerCommitsTotal          metric.Int64Counter
 	consumerLagMessages           metric.Int64Gauge
@@ -154,14 +150,6 @@ func init() {
 			panic("failed to initialize outbox events published metric: " + err.Error())
 		}
 
-		outboxPublishDuration, err = meter.Float64Histogram(
-			MetricOutboxPublishDuration,
-			metric.WithDescription("Duration of outbox relay publish operations"),
-		)
-		if err != nil {
-			panic("failed to initialize outbox publish duration metric: " + err.Error())
-		}
-
 		outboxPanicsTotal, err = meter.Int64Counter(
 			MetricOutboxPanicsTotal,
 			metric.WithDescription("Total number of panics caught in outbox relay loop"),
@@ -216,15 +204,6 @@ func init() {
 		)
 		if err != nil {
 			panic(err)
-		}
-
-		consumerMsgDuration, err = meter.Float64Histogram(
-			MetricConsumerMsgDuration,
-			metric.WithDescription("Duration of consumer message processing"),
-			metric.WithUnit("s"),
-		)
-		if err != nil {
-			panic("failed to initialize consumer message duration metric: " + err.Error())
 		}
 
 		consumerBackoffDuration, err = meter.Float64Histogram(
@@ -368,13 +347,6 @@ func RecordOutboxEventsPublished(ctx context.Context, shardID string, topic stri
 	))
 }
 
-// RecordOutboxPublishDuration records the duration of an outbox publishing operation.
-func RecordOutboxPublishDuration(ctx context.Context, shardID string, duration time.Duration) {
-	outboxPublishDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
-		attribute.String(MetricLabelShard, shardID),
-	))
-}
-
 // RecordOutboxPanic increments the counter for panics recovered in the outbox relay.
 func RecordOutboxPanic(ctx context.Context, shardID string) {
 	outboxPanicsTotal.Add(ctx, 1, metric.WithAttributes(
@@ -432,20 +404,6 @@ func RecordIdempotencyHit(ctx context.Context, merchantID, jobID, shardID string
 		attribute.String(MetricLabelMerchantID, merchantID),
 		attribute.String(MetricLabelJobID, jobID),
 		attribute.String(MetricLabelShard, shardID),
-	))
-}
-
-// RecordMessageProcessingDuration records the duration of message processing with a custom label.
-func RecordMessageProcessingDuration(ctx context.Context, duration time.Duration, label string) {
-	consumerMsgDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
-		attribute.String(MetricLabelHandler, label),
-	))
-}
-
-// RecordConsumerMsgDuration records the duration of consumer message processing.
-func RecordConsumerMsgDuration(ctx context.Context, topic string, duration time.Duration) {
-	consumerMsgDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
-		attribute.String(MetricLabelTopic, topic),
 	))
 }
 

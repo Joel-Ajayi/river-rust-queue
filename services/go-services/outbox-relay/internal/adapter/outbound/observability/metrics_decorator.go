@@ -29,7 +29,6 @@ func (m *metricsPublisherDecorator) PublishBatch(ctx context.Context, shardID st
 		return m.next.PublishBatch(ctx, shardID, events)
 	}
 
-	start := time.Now()
 	res, err := m.next.PublishBatch(ctx, shardID, events)
 	if err != nil {
 		if platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || errors.Is(err, circuitbreaker.ErrOpen) {
@@ -37,8 +36,6 @@ func (m *metricsPublisherDecorator) PublishBatch(ctx context.Context, shardID st
 		}
 		return res, err
 	}
-
-	platform.RecordOutboxPublishDuration(ctx, m.shardID, time.Since(start))
 
 	topicCounts := make(map[string]int)
 	for _, e := range events {

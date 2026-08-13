@@ -155,8 +155,6 @@ func (wp *WorkerPool) partitionLoop(ctx context.Context, pc *PartitionTaskChan) 
 
 // processTask executes a single task with tracing, timeout, and panic recovery.
 func (wp *WorkerPool) processTask(task *ConsumerTask) {
-	start := time.Now()
-
 	spanCtx, span := platform.GetTracer().Start(task.Ctx, platform.SpanProcessMessage)
 	defer span.End()
 	span.SetAttributes(
@@ -230,5 +228,4 @@ func (wp *WorkerPool) processTask(task *ConsumerTask) {
 		Err:       err,
 		Msg:       task.Msg,
 	})
-	platform.RecordConsumerMsgDuration(spanCtx, task.Msg.Topic, time.Since(start))
 }

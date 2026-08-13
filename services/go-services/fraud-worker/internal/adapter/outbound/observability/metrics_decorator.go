@@ -2,7 +2,6 @@ package observability
 
 import (
 	"context"
-	"time"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/fraud-worker/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/fraud-worker/internal/core/port"
@@ -65,11 +64,7 @@ func NewJobHandlerMetrics(next port.JobHandler) port.JobHandler {
 }
 
 func (m *jobHandlerMetrics) ProcessJob(ctx context.Context, payload *eventsv1.JobRequestedPayload, eventID string, occurredAt int64) error {
-	start := time.Now()
 	err := m.next.ProcessJob(ctx, payload, eventID, occurredAt)
-	duration := time.Since(start)
-
-	platform.RecordConsumerMsgDuration(ctx, platform.TopicJobs, duration)
 	if err != nil {
 		if platform.ClassifyError(err, func(error) bool { return false }) == platform.ClassificationInfrastructure {
 			platform.RecordInfrastructureError(ctx, platform.ComponentJobHandler)
