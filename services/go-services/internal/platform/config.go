@@ -61,6 +61,9 @@ type CapacityConfig struct {
 	MaxRetries          int
 	BackoffBaseMs       int
 	BackoffCapMs        int
+	RetryBudgetMinTokens int
+	RetryBudgetMaxTokens int
+	RetryBudgetFraction  float64
 
 	// Memory request (MiB) derived by the capacity engine.
 	PodMemRequestMiB int
@@ -92,10 +95,12 @@ type CapacityConfig struct {
 	AIMDPauseFrac     float64
 	AIMDResumeFrac    float64
 
-	// Per-pod per-shard RW cap (engine-derived, not the DB's hard max_connections).
+	// Per-pod per-shard RW and RO caps (engine-derived, not the DB's hard max_connections).
 	// The DB's hard limit lives in the PG Cluster manifest, not in env vars.
 	PGShardRWMaxConns     map[string]int
+	PGShardROMaxConns     map[string]int
 	PGMerchantsRWMaxConns int
+	PGMerchantsROMaxConns int
 
 	// Circuit breaker probes (engine-derived)
 	CBMaxFails       int
@@ -134,14 +139,7 @@ type CapacityConfig struct {
 }
 
 // Global DB pool bounds derived by the capacity engine.
-// NOTE: per-shard/per-pod RW caps (PGShardRWMaxConns map) live in
-// CapacityConfig (per-service). The values previously here (PG_SHARD_A_MAX_CONNS,
-// PG_MERCHANTS_MAX_CONNS) were server-side PG hard limits, not client-side
-// pool sizes — they belong in the PG Cluster manifest, not in this
-// configmap. See Issue 7 / Phase 1d.
 type GlobalCapacityConfig struct {
-	PGShardROMaxConns             int
-	PGMerchantsROMaxConns         int
 	RedisMaxMemoryMiB             int
 	KetamaVNodes                  int
 	KafkaReaderMinBytes           int
@@ -161,6 +159,9 @@ type GlobalCapacityConfig struct {
 	ConsumerMinCommitCapFrac      float64
 	PGConnMaxIdleTimeMs           int
 	PGConnMaxLifetimeMs           int
+	RetryBudgetMinTokens          int
+	RetryBudgetMaxTokens          int
+	RetryBudgetFraction           float64
 }
 
 // LoadConfig reads configuration from env vars (injected by K8s ConfigMap + Secret).
@@ -277,6 +278,22 @@ func loadShardRWCaps(prefix string) map[string]int {
 	return caps
 }
 
+func loadShardROCaps(prefix string) map[string]int {
+	shardLetters := env("SHARD_LETTERS", DefaultShardLetters)
+	caps := make(map[string]int)
+	for _, letter := range strings.Split(shardLetters, "") {
+		if letter == "" {
+			continue
+		}
+		envName := prefix + "PG_SHARD_" + strings.ToUpper(letter) + "_RO_MAX_CONNS"
+		if v := envOrDefaultInt(envName, 0); v > 0 {
+			shardID := ShardIDPrefix + strings.ToLower(letter)
+			caps[shardID] = v
+		}
+	}
+	return caps
+}
+
 // LoadCapacityConfig loads the capacity engine's derived variables for a specific service.
 func LoadCapacityConfig(prefix string) *CapacityConfig {
 	return &CapacityConfig{
@@ -291,6 +308,9 @@ func LoadCapacityConfig(prefix string) *CapacityConfig {
 		MaxRetries:                   envOrDefaultInt(prefix+"MAX_RETRIES", 0),
 		BackoffBaseMs:                envOrDefaultInt(prefix+"BACKOFF_BASE_MS", 0),
 		BackoffCapMs:                 envOrDefaultInt(prefix+"BACKOFF_CAP_MS", 0),
+		RetryBudgetMinTokens:         envOrDefaultInt(prefix+"RETRY_BUDGET_MIN_TOKENS", 10),
+		RetryBudgetMaxTokens:         envOrDefaultInt(prefix+"RETRY_BUDGET_MAX_TOKENS", 100),
+		RetryBudgetFraction:          envOrDefaultFloat(prefix+"RETRY_BUDGET_FRACTION", 0.10),
 		PodMemRequestMiB:             envOrDefaultInt(prefix+"POD_MEM_REQUEST_MIB", 0),
 		DBPoolSize:                   envOrDefaultInt(prefix+"DB_POOL_SIZE", 0),
 		WorkerPoolSize:               envOrDefaultInt(prefix+"WORKER_POOL_SIZE", 0),
@@ -314,7 +334,9 @@ func LoadCapacityConfig(prefix string) *CapacityConfig {
 		AIMDPauseFrac:                envOrDefaultFloat(prefix+"AIMD_PAUSE_FRAC", 0.0),
 		AIMDResumeFrac:               envOrDefaultFloat(prefix+"AIMD_RESUME_FRAC", 0.0),
 		PGShardRWMaxConns:            loadShardRWCaps(prefix),
+		PGShardROMaxConns:            loadShardROCaps(prefix),
 		PGMerchantsRWMaxConns:        envOrDefaultInt(prefix+"PG_MERCHANTS_RW_MAX_CONNS", 0),
+		PGMerchantsROMaxConns:        envOrDefaultInt(prefix+"PG_MERCHANTS_RO_MAX_CONNS", 0),
 		CBMaxFails:                   envOrDefaultInt(prefix+"CB_MAX_FAILS", 0),
 		CBHalfOpenProbes:             envOrDefaultInt(prefix+"CB_HALF_OPEN_PROBES", 0),
 		MaxRequestBytes:              envOrDefaultInt(prefix+"MAX_REQUEST_BYTES", 0),
@@ -346,11 +368,9 @@ func LoadCapacityConfig(prefix string) *CapacityConfig {
 }
 
 // LoadGlobalCapacityConfig loads platform-level derived bounds.
-// Per-shard/per-pod RW caps are loaded in LoadCapacityConfig (per-service).
+// Per-shard/per-pod RW and RO caps are loaded in LoadCapacityConfig (per-service).
 func LoadGlobalCapacityConfig() *GlobalCapacityConfig {
 	return &GlobalCapacityConfig{
-		PGShardROMaxConns:             envOrDefaultInt("PG_SHARD_RO_MAX_CONNS", 0),
-		PGMerchantsROMaxConns:         envOrDefaultInt("PG_MERCHANTS_RO_MAX_CONNS", 0),
 		RedisMaxMemoryMiB:             envOrDefaultInt("REDIS_MAXMEMORY_MIB", 0),
 		KetamaVNodes:                  envOrDefaultInt("KETAMA_VNODES", 0),
 		KafkaReaderMinBytes:           envOrDefaultInt("KAFKA_READER_MIN_BYTES", 0),
@@ -367,5 +387,8 @@ func LoadGlobalCapacityConfig() *GlobalCapacityConfig {
 		ConsumerMinCommitCapFrac:      envOrDefaultFloat("CONSUMER_MIN_COMMIT_CAP_FRAC", 0.0),
 		PGConnMaxIdleTimeMs:           envOrDefaultInt("PG_CONN_MAX_IDLE_TIME_MS", 0),
 		PGConnMaxLifetimeMs:           envOrDefaultInt("PG_CONN_MAX_LIFETIME_MS", 0),
+		RetryBudgetMinTokens:          envOrDefaultInt("RETRY_BUDGET_MIN_TOKENS", 10),
+		RetryBudgetMaxTokens:          envOrDefaultInt("RETRY_BUDGET_MAX_TOKENS", 100),
+		RetryBudgetFraction:           envOrDefaultFloat("RETRY_BUDGET_FRACTION", 0.10),
 	}
 }

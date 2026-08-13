@@ -113,7 +113,7 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 		roURI = u.String()
 	}
 
-	merchantsROMaxConns := int32(cfg.GlobalCapacity.PGMerchantsROMaxConns)
+	merchantsROMaxConns := int32(cfg.Capacity.PGMerchantsROMaxConns)
 
 	// Skip RO pool creation if the service does not request any RO conns
 	// (avoids keeping idle connections/FDS open for nothing — issue 22).
@@ -150,7 +150,10 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 		// Read-Only Pool (Zero Downtime Reads pattern).
 		// Skipped entirely when the service requests zero RO conns to avoid
 		// idle connections and FDs (see issue 22).
-		shardROMaxConns := int32(cfg.GlobalCapacity.PGShardROMaxConns)
+		shardROMaxConns := int32(0)
+		if cap, ok := cfg.Capacity.PGShardROMaxConns[shardID]; ok && cap > 0 {
+			shardROMaxConns = int32(cap)
+		}
 		if shardROMaxConns > 0 {
 			roURI := uri
 			if u, err := url.Parse(uri); err != nil {

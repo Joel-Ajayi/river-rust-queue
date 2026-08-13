@@ -5,7 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
+	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/port"
@@ -72,7 +72,6 @@ func (p *EventPublisher) PublishBatch(ctx context.Context, shardID string, event
 		// dedup across producer retries. A retry of the same event will land
 		// in the same partition and consumers can detect the duplicate via
 		// the event_id header.
-
 		headers := []kafka.Header{
 			{Key: platform.HeaderEventID, Value: []byte(e.ID)},
 			{Key: platform.HeaderEventType, Value: []byte(e.EventType)},
