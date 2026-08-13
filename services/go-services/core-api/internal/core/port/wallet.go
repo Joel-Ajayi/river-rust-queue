@@ -25,7 +25,6 @@ type WalletDirectory interface {
 type ShardPools interface {
 	ShardPool(shardId string) (*pgxpool.Pool, error)
 	ShardPoolRO(shardId string) (*pgxpool.Pool, error)
-	AllShardPools() map[string]*pgxpool.Pool
 }
 
 // WalletStore is a driven port for wallet persistence and queries on shards.

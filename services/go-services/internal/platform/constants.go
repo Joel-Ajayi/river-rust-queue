@@ -88,6 +88,8 @@ const (
 	DLQSourceOutbox  = "outbox-relay"
 
 	TraceparentHeader = "traceparent"
+	HeaderEventID     = "event_id"
+	HeaderEventType   = "event_type"
 
 	// Shard Types (for business metrics)
 	ShardTypeSame  = "same"

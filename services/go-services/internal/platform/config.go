@@ -17,6 +17,7 @@ const (
 
 // Config holds environment-sourced configuration for an RRQ service.
 type Config struct {
+	ServiceName    string
 	MerchantsDBURI string
 	ShardURIs      map[string]string
 
@@ -165,6 +166,7 @@ type GlobalCapacityConfig struct {
 // LoadConfig reads configuration from env vars (injected by K8s ConfigMap + Secret).
 func LoadConfig(servicePrefix string) *Config {
 	cfg := &Config{
+		ServiceName:    servicePrefix,
 		MerchantsDBURI: os.Getenv("MERCHANTS_DB_URI"),
 		ShardURIs:      make(map[string]string),
 

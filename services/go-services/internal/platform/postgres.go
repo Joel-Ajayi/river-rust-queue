@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +35,7 @@ const (
 	DBHostRWSuffix        = "-rw"
 	DBHostROSuffix        = "-ro"
 	DefaultShardLetters   = "ABCDE"
-	PGPoolMonitorInterval = 5 * time.Second
+	PGPoolMonitorInterval = 5 * time.Second // 5sec
 	PGPoolNameMerchants   = "merchants"
 	PGPoolNameMerchantsRO = "merchants-ro"
 	PGPoolNameROSuffix    = "-ro"
@@ -56,11 +55,7 @@ func createPool(ctx context.Context, uri string, maxConns int32, maxIdleTime, ma
 	return pgxpool.NewWithConfig(ctx, config)
 }
 
-func startPoolMonitor(ctx context.Context, poolName string, pool *pgxpool.Pool) {
-	serviceName := os.Getenv("OTEL_SERVICE_NAME")
-	if serviceName == "" {
-		serviceName = "unknown"
-	}
+func startPoolMonitor(ctx context.Context, serviceName string, poolName string, pool *pgxpool.Pool) {
 	go func() {
 		ticker := time.NewTicker(PGPoolMonitorInterval)
 		defer ticker.Stop()
@@ -72,11 +67,11 @@ func startPoolMonitor(ctx context.Context, poolName string, pool *pgxpool.Pool) 
 				return
 			case <-ticker.C:
 				stat := pool.Stat()
-				RecordPGPoolStats(ctx, serviceName, stat.AcquiredConns(), stat.IdleConns(), stat.MaxConns(), stat.EmptyAcquireCount())
+				RecordPGPoolStats(ctx, poolName, serviceName, stat.AcquiredConns(), stat.IdleConns(), stat.MaxConns(), stat.EmptyAcquireCount())
 
 				emptyAcquireCount := stat.EmptyAcquireCount()
 				if emptyAcquireCount > lastEmptyAcquireCount {
-					AddPGPoolEmptyAcquireCount(ctx, serviceName, emptyAcquireCount-lastEmptyAcquireCount)
+					AddPGPoolEmptyAcquireCount(ctx, poolName, serviceName, emptyAcquireCount-lastEmptyAcquireCount)
 					lastEmptyAcquireCount = emptyAcquireCount
 				}
 			}
@@ -107,7 +102,7 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 	if err != nil {
 		return nil, err
 	}
-	startPoolMonitor(ctx, PGPoolNameMerchants, pool)
+	startPoolMonitor(ctx, cfg.ServiceName, PGPoolNameMerchants, pool)
 	sp.merchants = pool
 
 	roURI := cfg.MerchantsDBURI
@@ -128,7 +123,7 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 			sp.Close()
 			return nil, err
 		}
-		startPoolMonitor(ctx, PGPoolNameMerchantsRO, roPool)
+		startPoolMonitor(ctx, cfg.ServiceName, PGPoolNameMerchantsRO, roPool)
 		sp.roMerchants = roPool
 	}
 	pgLog.Info("Connected to merchants database", zap.String(LogFieldEvent, LogEventMerchantsDBConnected))
@@ -149,7 +144,7 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 			sp.Close()
 			return nil, err
 		}
-		startPoolMonitor(ctx, shardID, pool)
+		startPoolMonitor(ctx, cfg.ServiceName, shardID, pool)
 		sp.shards[shardID] = pool
 
 		// Read-Only Pool (Zero Downtime Reads pattern).
@@ -169,7 +164,7 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 				sp.Close()
 				return nil, err
 			}
-			startPoolMonitor(ctx, shardID+PGPoolNameROSuffix, roPool)
+			startPoolMonitor(ctx, cfg.ServiceName, shardID+PGPoolNameROSuffix, roPool)
 			sp.roShards[shardID] = roPool
 		}
 
@@ -190,16 +185,6 @@ func (sp *ShardPools) MerchantsPool() *pgxpool.Pool   { return sp.merchants }
 func (sp *ShardPools) MerchantsPoolRO() *pgxpool.Pool { return sp.roMerchants }
 func (sp *ShardPools) HashRing() *HashRing            { return sp.hashRing }
 
-func (sp *ShardPools) AllShardPools() map[string]*pgxpool.Pool {
-	sp.mu.RLock()
-	defer sp.mu.RUnlock()
-	res := make(map[string]*pgxpool.Pool, len(sp.shards))
-	for k, v := range sp.shards {
-		res[k] = v
-	}
-	return res
-}
-
 // ShardPool returns the Read-Write pool for the given shard ID.
 func (sp *ShardPools) ShardPool(shardID string) (*pgxpool.Pool, error) {
 	sp.mu.RLock()
@@ -212,8 +197,6 @@ func (sp *ShardPools) ShardPool(shardID string) (*pgxpool.Pool, error) {
 }
 
 // ShardPoolRO returns the Read-Only pool for the given shard ID.
-// Returns ErrUnknownShard if the service has no RO pool configured
-// (use_ro_pool == false in the service config).
 func (sp *ShardPools) ShardPoolRO(shardID string) (*pgxpool.Pool, error) {
 	sp.mu.RLock()
 	defer sp.mu.RUnlock()

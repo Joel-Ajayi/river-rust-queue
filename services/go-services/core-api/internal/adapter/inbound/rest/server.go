@@ -10,6 +10,7 @@ import (
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/port"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 	"golang.org/x/sync/semaphore"
 )
@@ -67,8 +68,10 @@ func NewServer(
 	mux := http.NewServeMux()
 	s.RegisterRoutes(mux)
 
+	tracedMux := otelhttp.NewHandler(mux, platform.ServiceNameCoreAPI)
+
 	timeoutMsg := `{"error":"gateway_timeout"}`
-	timeoutHandler := http.TimeoutHandler(mux, time.Duration(cfg.Capacity.ServerTimeoutMs)*time.Millisecond, timeoutMsg)
+	timeoutHandler := http.TimeoutHandler(tracedMux, time.Duration(cfg.Capacity.ServerTimeoutMs)*time.Millisecond, timeoutMsg)
 
 	s.httpSrv = &http.Server{
 		Addr:              ":" + strconv.Itoa(cfg.HTTPPort),

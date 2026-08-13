@@ -102,12 +102,6 @@ func (c *CommitCoordinator) commit(ctx context.Context, ps *partitionState) {
 			zap.Int64(platform.LogFieldOffset, toCommit[len(toCommit)-1].Offset),
 			zap.Int(platform.LogFieldCount, len(toCommit)),
 		)
-	} else {
-		topics := make(map[string]struct{})
-		for _, msg := range toCommit {
-			topics[msg.Topic] = struct{}{}
-		}
-		platform.RecordConsumerCommitWithPartition(ctx, topics, ps.partition)
 	}
 
 	// Reset slice, retaining capacity
