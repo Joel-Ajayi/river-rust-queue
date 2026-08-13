@@ -30,8 +30,6 @@ const (
 	MetricIdempotencyHitsTotal        = "rrq.idempotency.hits.total"
 	MetricWeakAPIKeyAuth              = "rrq.weak.api.key.auth.total"
 	MetricConsumerBackoffDuration     = "rrq.consumer.backoff.duration.seconds"
-	MetricConsumerCommitsTotal        = "rrq.consumer.commits.total"
-	MetricConsumerLagMessages         = "rrq.consumer.lag.messages"
 	MetricCommitCoordinatorQueueDepth = "rrq.commit.coordinator.queue.depth"
 	MetricTaskChannelFillRatio        = "rrq.task.channel.fill.ratio"
 	MetricLedgerImbalanceTotal        = "rrq.ledger.imbalance.total"
@@ -50,6 +48,7 @@ const (
 	MetricLabelService        = "service"
 	MetricLabelComponent      = "component"
 	MetricLabelShard          = "shard"
+	MetricLabelDBPool         = "db.pool"
 	MetricLabelTopic          = "topic"
 	MetricLabelMerchantID     = "merchant.id"
 	MetricLabelJobID          = "job.id"
@@ -79,8 +78,6 @@ var (
 	idempotencyConflictsTotal     metric.Int64Counter
 	idempotencyHitsTotal          metric.Int64Counter
 	consumerBackoffDuration       metric.Float64Histogram
-	consumerCommitsTotal          metric.Int64Counter
-	consumerLagMessages           metric.Int64Gauge
 	commitCoordinatorQueueDepth   metric.Int64Gauge
 	taskChannelFillRatio          metric.Float64Gauge
 	ledgerImbalanceTotal          metric.Int64Gauge
@@ -90,10 +87,10 @@ var (
 	bulkheadRejectionsTotal       metric.Int64Counter
 	bulkheadInFlight              metric.Int64UpDownCounter
 
-	pgPoolAcquiredConns           metric.Int64Gauge
-	pgPoolIdleConns               metric.Int64Gauge
-	pgPoolMaxConns                metric.Int64Gauge
-	pgPoolEmptyAcquireCount       metric.Int64Counter
+	pgPoolAcquiredConns     metric.Int64Gauge
+	pgPoolIdleConns         metric.Int64Gauge
+	pgPoolMaxConns          metric.Int64Gauge
+	pgPoolEmptyAcquireCount metric.Int64Counter
 
 	metricsOnce sync.Once
 )
@@ -222,22 +219,6 @@ func init() {
 		)
 		if err != nil {
 			panic("failed to initialize consumer backoff duration metric: " + err.Error())
-		}
-
-		consumerCommitsTotal, err = meter.Int64Counter(
-			MetricConsumerCommitsTotal,
-			metric.WithDescription("Total number of consumer offset commits"),
-		)
-		if err != nil {
-			panic("failed to initialize consumer commits metric: " + err.Error())
-		}
-
-		consumerLagMessages, err = meter.Int64Gauge(
-			MetricConsumerLagMessages,
-			metric.WithDescription("Consumer lag in messages per partition"),
-		)
-		if err != nil {
-			panic("failed to initialize consumer lag metric: " + err.Error())
 		}
 
 		commitCoordinatorQueueDepth, err = meter.Int64Gauge(
@@ -455,13 +436,6 @@ func RecordConsumerBackoffDuration(ctx context.Context, topic string, duration t
 	))
 }
 
-// RecordConsumerCommit records a successful offset commit.
-func RecordConsumerCommit(ctx context.Context, topic string) {
-	consumerCommitsTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelTopic, topic),
-	))
-}
-
 // RecordLedgerImbalance records the absolute ledger imbalance sum.
 func RecordLedgerImbalance(ctx context.Context, value int64) {
 	ledgerImbalanceTotal.Record(ctx, value)
@@ -497,14 +471,6 @@ func AddBulkheadInFlight(ctx context.Context, delta int64) {
 	bulkheadInFlight.Add(ctx, delta)
 }
 
-// RecordConsumerLag records the number of messages behind the consumer per partition.
-func RecordConsumerLag(ctx context.Context, topic string, partition int, lag int64) {
-	consumerLagMessages.Record(ctx, lag, metric.WithAttributes(
-		attribute.String(MetricLabelTopic, topic),
-		attribute.Int(MetricLabelPartition, partition),
-	))
-}
-
 // RecordCommitCoordinatorQueueDepth records the number of messages waiting in a partition's FIFO.
 func RecordCommitCoordinatorQueueDepth(ctx context.Context, topic string, partition int, depth int64) {
 	commitCoordinatorQueueDepth.Record(ctx, depth, metric.WithAttributes(
@@ -521,31 +487,21 @@ func RecordTaskChannelFillRatio(ctx context.Context, topic string, partition int
 	))
 }
 
-// RecordConsumerCommitWithPartition records a successful offset commit with partition info.
-func RecordConsumerCommitWithPartition(ctx context.Context, topic map[string]struct{}, partition int) {
-	for t := range topic {
-		consumerCommitsTotal.Add(ctx, 1, metric.WithAttributes(
-			attribute.String(MetricLabelTopic, t),
-			attribute.Int(MetricLabelPartition, partition),
-		))
-	}
-}
-
 // RecordPGPoolStats records the current pgxpool statistics.
-func RecordPGPoolStats(ctx context.Context, serviceName string, acquired, idle, maxConns int32, emptyAcquireCount int64) {
-	attrs := metric.WithAttributes(attribute.String(MetricLabelService, serviceName))
+func RecordPGPoolStats(ctx context.Context, poolName string, serviceName string, acquired, idle, maxConns int32, emptyAcquireCount int64) {
+	attrs := metric.WithAttributes(
+		attribute.String(MetricLabelService, serviceName),
+		attribute.String(MetricLabelDBPool, poolName),
+	)
 	pgPoolAcquiredConns.Record(ctx, int64(acquired), attrs)
 	pgPoolIdleConns.Record(ctx, int64(idle), attrs)
 	pgPoolMaxConns.Record(ctx, int64(maxConns), attrs)
-	// For counter, we would ideally add the delta, but we can't easily do that with an async observer.
-	// Wait, we can use Int64ObservableCounter if we register a callback, or just record the delta manually.
-	// Actually, since we're using a synchronous Int64Counter, we should use Add for the delta, not absolute count.
-	// We'll track the previous count in postgres.go.
 }
 
 // AddPGPoolEmptyAcquireCount adds to the cumulative count of empty acquires.
-func AddPGPoolEmptyAcquireCount(ctx context.Context, serviceName string, delta int64) {
+func AddPGPoolEmptyAcquireCount(ctx context.Context, poolName string, serviceName string, delta int64) {
 	pgPoolEmptyAcquireCount.Add(ctx, delta, metric.WithAttributes(
 		attribute.String(MetricLabelService, serviceName),
+		attribute.String(MetricLabelDBPool, poolName),
 	))
 }
