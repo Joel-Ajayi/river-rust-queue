@@ -63,6 +63,11 @@ func main() {
 		MaxRetries: cfg.Capacity.MaxRetries,
 		BaseDelay:  time.Duration(cfg.Capacity.BackoffBaseMs) * time.Millisecond,
 		MaxDelay:   time.Duration(cfg.Capacity.BackoffCapMs) * time.Millisecond,
+		Budget: platform.NewRetryBudget(
+			int64(cfg.Capacity.RetryBudgetMinTokens),
+			int64(cfg.Capacity.RetryBudgetMaxTokens),
+			cfg.Capacity.RetryBudgetFraction,
+		),
 	}
 	publishTimeout := time.Duration(cfg.Capacity.RequestTimeoutMs) * time.Millisecond
 	baseEventPublisher := resilience.NewEventPublisherRetry(baseKafkaPublisher, publishRetryCfg, publishTimeout)

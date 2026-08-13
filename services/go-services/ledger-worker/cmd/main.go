@@ -79,8 +79,14 @@ func main() {
 	consumerManager := kafka.NewConsumerManager(logger, jobReader, xshardReaders, jobHandler, sagaHandler, dlqStore, merchantDir, pools, cfg)
 
 	retryCfg := platform.RetryConfig{
-		BaseDelay: time.Duration(cfg.Capacity.BackoffBaseMs) * time.Millisecond,
-		MaxDelay:  time.Duration(cfg.Capacity.BackoffCapMs) * time.Millisecond,
+		MaxRetries: cfg.Capacity.MaxRetries,
+		BaseDelay:  time.Duration(cfg.Capacity.BackoffBaseMs) * time.Millisecond,
+		MaxDelay:   time.Duration(cfg.Capacity.BackoffCapMs) * time.Millisecond,
+		Budget: platform.NewRetryBudget(
+			int64(cfg.Capacity.RetryBudgetMinTokens),
+			int64(cfg.Capacity.RetryBudgetMaxTokens),
+			cfg.Capacity.RetryBudgetFraction,
+		),
 	}
 	resilientConsumer := resilience.NewConsumerResilience(consumerManager, retryCfg, logger)
 	logger.Info(platform.LogEventServerStarted)

@@ -25,6 +25,7 @@ type ConsumerManager struct {
 	merchantDir port.MerchantDirectory
 	pools       *platform.ShardPools
 	cfg         *platform.Config
+	retryBudget *platform.RetryBudget
 }
 
 func NewConsumerManager(
@@ -36,6 +37,11 @@ func NewConsumerManager(
 	pools *platform.ShardPools,
 	cfg *platform.Config,
 ) *ConsumerManager {
+	budget := platform.NewRetryBudget(
+		int64(cfg.Capacity.RetryBudgetMinTokens),
+		int64(cfg.Capacity.RetryBudgetMaxTokens),
+		cfg.Capacity.RetryBudgetFraction,
+	)
 	return &ConsumerManager{
 		logger:      logger,
 		reader:      reader,
@@ -44,6 +50,7 @@ func NewConsumerManager(
 		merchantDir: merchantDir,
 		pools:       pools,
 		cfg:         cfg,
+		retryBudget: budget,
 	}
 }
 
@@ -87,6 +94,7 @@ func (m *ConsumerManager) messageHandler() platform_consumer.MessageHandler {
 			MaxRetries: int(m.cfg.Capacity.MaxRetries),
 			BaseDelay:  time.Duration(m.cfg.Capacity.BackoffBaseMs) * time.Millisecond,
 			MaxDelay:   time.Duration(m.cfg.Capacity.BackoffCapMs) * time.Millisecond,
+			Budget:     m.retryBudget,
 		}
 
 		start := time.Now()

@@ -78,9 +78,15 @@ func main() {
 		FastLaneBufferSize:    cfg.Capacity.FastLaneBufferSize,
 		MaxConcurrency:        cfg.Capacity.WebhookMaxConcurrency,
 	})
+	sharedBudget := platform.NewRetryBudget(
+		int64(cfg.Capacity.RetryBudgetMinTokens),
+		int64(cfg.Capacity.RetryBudgetMaxTokens),
+		cfg.Capacity.RetryBudgetFraction,
+	)
 	appRetryCfg := platform.RetryConfig{
 		BaseDelay: time.Duration(cfg.Capacity.BackoffBaseMs) * time.Millisecond,
 		MaxDelay:  time.Duration(cfg.Capacity.BackoffCapMs) * time.Millisecond,
+		Budget:    sharedBudget,
 	}
 	decoratedService := resilience.NewWebhookAppResilience(
 		observability.NewWebhookAppTraces(observability.NewWebhookAppMetrics(service)),
@@ -96,6 +102,7 @@ func main() {
 		MaxRetries: int(cfg.Capacity.MaxRetries),
 		BaseDelay:  time.Duration(cfg.Capacity.BackoffBaseMs) * time.Millisecond,
 		MaxDelay:   time.Duration(cfg.Capacity.BackoffCapMs) * time.Millisecond,
+		Budget:     sharedBudget,
 	}
 
 	handler := kafka.WebhookHandler(decoratedService, consumerRetryCfg, logger)
