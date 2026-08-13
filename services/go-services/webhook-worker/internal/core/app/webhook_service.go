@@ -16,6 +16,8 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/core/port"
 	"github.com/failsafe-go/failsafe-go/circuitbreaker"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
@@ -127,7 +129,16 @@ func (s *WebhookService) executeFastLaneJob(ctx context.Context, job FastLaneJob
 }
 
 func (s *WebhookService) processFastLaneJob(ctx context.Context, job FastLaneJob) {
-	// tracedCtx := platform.InjectTraceIntoContext(ctx, &msg)
+	// Extract traceparent from payload and inject into context if present
+	var env eventsv1.EventEnvelope
+	if err := proto.Unmarshal(job.Delivery.Payload, &env); err == nil && env.Traceparent != "" {
+		carrier := propagation.MapCarrier{
+			platform.TraceparentHeader: env.Traceparent,
+		}
+		propagator := otel.GetTextMapPropagator()
+		ctx = propagator.Extract(ctx, carrier)
+	}
+
 	merchant := job.Merchant
 	var err error
 
