@@ -45,6 +45,9 @@ func createPool(ctx context.Context, uri string, maxConns int32, maxIdleTime, ma
 	config.MaxConns = maxConns
 	config.MaxConnIdleTime = maxIdleTime
 	config.MaxConnLifetime = maxLifetime
+	// Manually trace every query (eBPF auto-instrumentation cannot observe
+	// pgx-native calls); span_metrics derives DB RED metrics from these spans.
+	config.ConnConfig.Tracer = pgxQueryTracer{}
 	return pgxpool.NewWithConfig(ctx, config)
 }
 
