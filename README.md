@@ -78,19 +78,20 @@ Apply the root Argo CD Application to your production Kubernetes cluster:
 kubectl apply -f https://raw.githubusercontent.com/Joel-Ajayi/rrq-gitops/main/apps/root-app.yaml
 ```
 
-#### Step 2: Configure Production DNS & LoadBalancer Hostnames
-After Argo CD provisions Envoy Gateway, obtain the external LoadBalancer IP address:
-```bash
-kubectl get svc -n envoy-gateway-system
-```
-Point wildcard DNS A records (`*.rrq.yotstack.tech`) to the LoadBalancer IP. Production services automatically resolve to:
-- **API Core Gateway**: `https://api.rrq.yotstack.tech/v1/transfers`
-- **Executive Dashboard**: `https://cluster.rrq.yotstack.tech`
-- **User Journeys Dashboard**: `https://growth.rrq.yotstack.tech`
-- **Service Health RED Dashboard**: `https://metrics.rrq.yotstack.tech`
-- **Middleware USE Dashboard**: `https://logs.rrq.yotstack.tech`
-- **Infrastructure USE Dashboard**: `https://traces.rrq.yotstack.tech`
-- **Prometheus UI**: `https://prometheus.rrq.yotstack.tech`
+#### Step 2: Configure Your Production Domain & Ingress Hostnames
+1. Update your domain hostnames in `rrq-gitops/rrq/overlays/prod/services/gateway.yaml` replacing `<your-domain.com>` with your actual registered domain.
+2. Retrieve the external IP address of the provisioned Envoy Gateway LoadBalancer:
+   ```bash
+   kubectl get svc -n envoy-gateway-system
+   ```
+3. Point your DNS wildcard A record (`*.<your-domain.com>`) to the LoadBalancer IP address. Production endpoints will automatically be routed and secured via Let's Encrypt TLS:
+   - **API Core Gateway**: `https://api.<your-domain.com>/v1/transfers`
+   - **Executive Dashboard**: `https://cluster.<your-domain.com>`
+   - **User Journeys Dashboard**: `https://growth.<your-domain.com>`
+   - **Service Health RED Dashboard**: `https://metrics.<your-domain.com>`
+   - **Middleware USE Dashboard**: `https://logs.<your-domain.com>`
+   - **Infrastructure USE Dashboard**: `https://traces.<your-domain.com>`
+   - **Prometheus UI**: `https://prometheus.<your-domain.com>`
 
 #### Step 3: Automated Continuous Deployment (CD Pipeline)
 - Pushing commits to `main` on this repository triggers **App CI** to lint code, run tests, and build Docker images tagged with the Git commit SHA.
@@ -122,7 +123,7 @@ make bootstrap-dev
 In local Kind development, Envoy Gateway routes traffic on local host ports `8080` (HTTP) and `8443` (HTTPS):
 - **API Core Ingress**: `http://localhost:8080/v1/transfers`
 - **Ops Redirect Routes**: `http://localhost:8080/executive`, `/journeys`, `/services`, `/middleware`, `/infrastructure`
-- *(Optional)* Add `127.0.0.1 api.rrq.dev` to `/etc/hosts` for domain resolution testing.
+- *(Optional)* Add `127.0.0.1 api.rrq.dev` to `/etc/hosts` for local domain resolution testing.
 
 #### Step 2: Launch Live Hot-Reloading Loop
 Return to this repository and launch Skaffold:
