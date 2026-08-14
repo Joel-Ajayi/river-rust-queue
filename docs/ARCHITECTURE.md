@@ -8,40 +8,39 @@ This document provides the canonical architectural specification for **River Rus
 
 RRQ is a closed-loop ledger engine designed for high-throughput transfer processing ($5,000$ to $10,000$ TPS target). In a closed-loop model, value enters when an operator funds a wallet and moves exclusively between wallets inside the system. By eliminating external bank settlement legs from the core path, RRQ executes transfers as single, serializable database transactions rather than complex distributed sagas.
 
-```
-+-----------------------------------------------------------------------------------+
-|                                  KONG GATEWAY                                     |
-|                       (TLS, Rate Limiting, Path Routing)                          |
-+----------------------------------------+------------------------------------------+
-                                         |
-                                         v
-+-----------------------------------------------------------------------------------+
-|                                  API GATEWAY                                      |
-|            (JWT Validation, Tenant Isolation, Idempotency Claim)                  |
-+----------------------------------------+------------------------------------------+
-                                         |
-                                         v
-+-----------------------------------------------------------------------------------+
-|                           POSTGRES SHARD PRIMARY (HA)                             |
-|          (SERIALIZABLE Transaction: INSERT jobs + INSERT events outbox)           |
-+----------------------------------------+------------------------------------------+
-                                         |
-                                         v
-+-----------------------------------------------------------------------------------+
-|                                 OUTBOX RELAY                                      |
-|                   (Polls outbox events -> Publishes to Kafka)                     |
-+-------------------+-----------------------------------+---------------------------+
-                    |                                   |
-                    v                                   v
-+-------------------+-------------------+   +-----------+---------------------------+
-|          KAFKA TOPIC: jobs            |   |          KAFKA TOPIC: notify          |
-+---------+-------------------+---------+   +-------------------+-----------------------+
-          |                   |                                 |
-          v                   v                                 v
-+---------+---------+ +-------+---------+           +-----------+-----------------------+
-|   LEDGER WORKER   | |  FRAUD WORKER   |           |      WEBHOOK WORKER           |
-| (Double-Entry Tx) | |(Velocity Guard) |           |(HMAC Deliveries & Breakers)   |
-+-------------------+ +-----------------+           +---------------------------------------+
+```mermaid
+graph TD
+  kong["Kong Gateway<br/>(TLS · Rate Limiting · Path Routing)"]
+  gateway["API Gateway<br/>(JWT Validation · Tenant Isolation · Idempotency Claim)"]
+
+  kong --> gateway
+
+  subgraph Database Shard Tier
+    postgres[("Postgres Shard Primary HA<br/>(SERIALIZABLE Tx: INSERT jobs + INSERT events outbox)")]
+  end
+
+  gateway --> postgres
+
+  relay["Outbox Relay<br/>(Polls outbox events -> Publishes to Kafka)"]
+  relay --> postgres
+
+  subgraph Messaging Backbone
+    jobsTopic{{"Kafka Topic: jobs"}}
+    notifyTopic{{"Kafka Topic: notify"}}
+  end
+
+  relay --> jobsTopic
+  relay --> notifyTopic
+
+  subgraph Async Worker Compute Tier
+    ledgerWorker["Ledger Worker<br/>(Double-Entry Postings)"]
+    fraudWorker["Fraud Worker<br/>(Velocity Guard)"]
+    webhookWorker["Webhook Worker<br/>(HMAC Deliveries & Breakers)"]
+  end
+
+  jobsTopic --> ledgerWorker
+  jobsTopic --> fraudWorker
+  notifyTopic --> webhookWorker
 ```
 
 ---
