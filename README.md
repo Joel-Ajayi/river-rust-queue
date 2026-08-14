@@ -19,15 +19,94 @@ RRQ is designed as a **closed-loop ledger core**: money moves exclusively betwee
 
 ---
 
-## Tech Stack
+## Architecture Overview
 
-- **Languages:** Go 1.26+ (`pgx/v5`, `kafka-go`, OpenTelemetry), Rust.
-- **Contracts:** Protocol Buffers (Protobuf).
-- **Databases:** PostgreSQL 17 (Sharded via CloudNativePG operator with 3-instance HA).
-- **Messaging:** Kafka (Managed by Strimzi, driving Transactional Outbox pattern).
-- **Caching & Rate Limiting:** Redis.
-- **Edge Proxy:** Kong Gateway & Envoy Gateway.
-- **GitOps & Deployment:** Argo CD, Kustomize, KEDA, Skaffold.
+```mermaid
+graph TD
+  merchant["Merchant Client"]
+  kong["Kong / Envoy Gateway<br/>(TLS · Edge Auth · Rate Limiting)"]
+  gateway["API Gateway<br/>(JWT Claim · Idempotency Anchor)"]
+
+  merchant -->|HTTPS POST /v1/transfers| kong
+  kong -->|Validated Ingress| gateway
+
+  subgraph Database Shard Cluster
+    shardA[("Postgres Shard A<br/>(SERIALIZABLE Tx)")]
+    shardB[("Postgres Shard B<br/>(SERIALIZABLE Tx)")]
+  end
+
+  gateway -->|"INSERT jobs + outbox event"| shardA
+  gateway --> shardB
+
+  relay["Outbox Relay"]
+  relay -->|"Poll outbox events"| shardA
+  relay --> shardB
+
+  subgraph Event Messaging Backbone
+    jobsTopic{{"Kafka Topic: jobs"}}
+    notifyTopic{{"Kafka Topic: notify"}}
+  end
+
+  relay -->|job.requested| jobsTopic
+  relay -->|transfer.completed| notifyTopic
+
+  subgraph Async Worker Fleet
+    ledgerWorker["Ledger Worker<br/>(Double-Entry Postings)"]
+    fraudWorker["Fraud Worker<br/>(Velocity Check)"]
+    webhookWorker["Webhook Worker<br/>(HMAC Delivery & Breakers)"]
+  end
+
+  jobsTopic --> ledgerWorker
+  jobsTopic --> fraudWorker
+  notifyTopic --> webhookWorker
+
+  ledgerWorker -->|"Post debit/credit legs"| shardA
+  ledgerWorker --> shardB
+```
+
+### End-to-End Transaction Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant M as Merchant Client
+    participant API as API Gateway
+    participant DB as Postgres Shard Primary
+    participant RL as Outbox Relay
+    participant K as Kafka Backbone
+    participant LW as Ledger Worker
+    participant WW as Webhook Worker
+
+    M->>API: POST /v1/transfers (Idempotency-Key)
+    rect rgb(240, 240, 240)
+        note over API,DB: Atomic Local Transaction
+        API->>DB: BEGIN SERIALIZABLE
+        API->>DB: INSERT INTO jobs ON CONFLICT DO NOTHING
+        API->>DB: INSERT INTO events (outbox job.requested)
+        API->>DB: COMMIT
+    end
+    API-->>M: HTTP 202 Accepted (job_id)
+
+    RL->>DB: Poll unpublished outbox events
+    RL->>K: Produce job.requested → jobs topic
+
+    LW->>K: Consume job.requested
+    rect rgb(240, 240, 240)
+        note over LW,DB: Single Double-Entry Transaction
+        LW->>DB: BEGIN SERIALIZABLE
+        LW->>DB: SELECT wallets FOR UPDATE (ordered)
+        LW->>DB: INSERT INTO ledger_entries (debit + credit)
+        LW->>DB: UPDATE jobs (status = 'completed')
+        LW->>DB: INSERT INTO events (outbox transfer.completed)
+        LW->>DB: COMMIT
+    end
+    LW->>K: Commit message offset
+
+    RL->>K: Produce transfer.completed → notify topic
+    WW->>K: Consume notify topic
+    WW->>M: POST signed HMAC webhook
+    WW->>DB: Record delivery status
+```
 
 ---
 
@@ -83,6 +162,18 @@ Execute unit and integration tests:
 cd services/go-services
 go test ./...
 ```
+
+---
+
+## Tech Stack
+
+- **Languages:** Go 1.26+ (`pgx/v5`, `kafka-go`, OpenTelemetry), Rust.
+- **Contracts:** Protocol Buffers (Protobuf).
+- **Databases:** PostgreSQL 17 (Sharded via CloudNativePG operator with 3-instance HA).
+- **Messaging:** Kafka (Managed by Strimzi, driving Transactional Outbox pattern).
+- **Caching & Rate Limiting:** Redis.
+- **Edge Proxy:** Kong Gateway & Envoy Gateway.
+- **GitOps & Deployment:** Argo CD, Kustomize, KEDA, Skaffold.
 
 ---
 
