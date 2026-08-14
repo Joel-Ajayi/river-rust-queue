@@ -86,7 +86,7 @@ kubectl apply -f https://raw.githubusercontent.com/Joel-Ajayi/rrq-gitops/main/ap
    ```
 3. Point your DNS wildcard A record (`*.<your-domain.com>`) to the LoadBalancer IP address. Production endpoints will automatically be routed and secured via Let's Encrypt TLS:
    - **API Core Gateway**: `https://api.<your-domain.com>/v1/transfers`
-   - **Executive Dashboard**: `https://cluster.<your-domain.com>`
+   - **Portainer Cluster UI**: `https://cluster.<your-domain.com>`
    - **User Journeys Dashboard**: `https://growth.<your-domain.com>`
    - **Service Health RED Dashboard**: `https://metrics.<your-domain.com>`
    - **Middleware USE Dashboard**: `https://logs.<your-domain.com>`
@@ -122,6 +122,7 @@ make bootstrap-dev
 #### Local Ingress & Hostnames
 In local Kind development, Envoy Gateway routes traffic on local host ports `8080` (HTTP) and `8443` (HTTPS):
 - **API Core Ingress**: `http://localhost:8080/v1/transfers`
+- **Portainer Cluster Management**: `http://cluster.127.0.0.1.nip.io:8080`
 - **Ops Redirect Routes**: `http://localhost:8080/executive`, `/journeys`, `/services`, `/middleware`, `/infrastructure`
 - *(Optional)* Add `127.0.0.1 api.rrq.dev` to `/etc/hosts` for local domain resolution testing.
 
