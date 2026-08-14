@@ -64,50 +64,6 @@ graph TD
   ledgerWorker --> shardB
 ```
 
-### End-to-End Transaction Flow
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant M as Merchant Client
-    participant API as API Gateway
-    participant DB as Postgres Shard Primary
-    participant RL as Outbox Relay
-    participant K as Kafka Backbone
-    participant LW as Ledger Worker
-    participant WW as Webhook Worker
-
-    M->>API: POST /v1/transfers (Idempotency-Key)
-    rect rgb(240, 240, 240)
-        note over API,DB: Atomic Local Transaction
-        API->>DB: BEGIN SERIALIZABLE
-        API->>DB: INSERT INTO jobs ON CONFLICT DO NOTHING
-        API->>DB: INSERT INTO events (outbox job.requested)
-        API->>DB: COMMIT
-    end
-    API-->>M: HTTP 202 Accepted (job_id)
-
-    RL->>DB: Poll unpublished outbox events
-    RL->>K: Produce job.requested → jobs topic
-
-    LW->>K: Consume job.requested
-    rect rgb(240, 240, 240)
-        note over LW,DB: Single Double-Entry Transaction
-        LW->>DB: BEGIN SERIALIZABLE
-        LW->>DB: SELECT wallets FOR UPDATE (ordered)
-        LW->>DB: INSERT INTO ledger_entries (debit + credit)
-        LW->>DB: UPDATE jobs (status = 'completed')
-        LW->>DB: INSERT INTO events (outbox transfer.completed)
-        LW->>DB: COMMIT
-    end
-    LW->>K: Commit message offset
-
-    RL->>K: Produce transfer.completed → notify topic
-    WW->>K: Consume notify topic
-    WW->>M: POST signed HMAC webhook
-    WW->>DB: Record delivery status
-```
-
 ---
 
 ## Deployment & Development
@@ -116,17 +72,30 @@ sequenceDiagram
 
 RRQ uses a pull-based declarative GitOps pipeline managed by **Argo CD** via the [`rrq-gitops`](https://github.com/Joel-Ajayi/rrq-gitops) repository.
 
-1. **Apply Root App-of-Apps Manifest**:
-   Apply the root Argo CD Application to your production Kubernetes cluster:
-   ```bash
-   kubectl apply -f https://raw.githubusercontent.com/Joel-Ajayi/rrq-gitops/main/apps/root-app.yaml
-   ```
-2. **Automated Operator & Service Provisioning**:
-   Argo CD automatically discovers and reconciles all infrastructure operators (CloudNativePG, Strimzi KRaft Kafka, KEDA, Envoy Gateway, OTel Operator) and RRQ microservices declared in `rrq/overlays/prod/` across sync waves `-2` through `2`.
-3. **Continuous Deployment (CD Pipeline)**:
-   - Pushing commits to `main` on this repository triggers **App CI** to lint code, run tests, and build Docker images tagged with the Git commit SHA.
-   - The `gitops-promote` job automatically updates `rrq/overlays/prod/kustomization.yaml` in `rrq-gitops` with the new commit SHA tags.
-   - Argo CD detects the repository change and executes a zero-downtime rolling update on live cluster deployments.
+#### Step 1: Apply Root App-of-Apps Manifest
+Apply the root Argo CD Application to your production Kubernetes cluster:
+```bash
+kubectl apply -f https://raw.githubusercontent.com/Joel-Ajayi/rrq-gitops/main/apps/root-app.yaml
+```
+
+#### Step 2: Configure Production DNS & LoadBalancer Hostnames
+After Argo CD provisions Envoy Gateway, obtain the external LoadBalancer IP address:
+```bash
+kubectl get svc -n envoy-gateway-system
+```
+Point wildcard DNS A records (`*.rrq.yotstack.tech`) to the LoadBalancer IP. Production services automatically resolve to:
+- **API Core Gateway**: `https://api.rrq.yotstack.tech/v1/transfers`
+- **Executive Dashboard**: `https://cluster.rrq.yotstack.tech`
+- **User Journeys Dashboard**: `https://growth.rrq.yotstack.tech`
+- **Service Health RED Dashboard**: `https://metrics.rrq.yotstack.tech`
+- **Middleware USE Dashboard**: `https://logs.rrq.yotstack.tech`
+- **Infrastructure USE Dashboard**: `https://traces.rrq.yotstack.tech`
+- **Prometheus UI**: `https://prometheus.rrq.yotstack.tech`
+
+#### Step 3: Automated Continuous Deployment (CD Pipeline)
+- Pushing commits to `main` on this repository triggers **App CI** to lint code, run tests, and build Docker images tagged with the Git commit SHA.
+- The `gitops-promote` job automatically updates `rrq/overlays/prod/kustomization.yaml` in `rrq-gitops` with the new commit SHA tags.
+- Argo CD detects the repository change and executes a zero-downtime rolling update on live cluster deployments.
 
 ---
 
@@ -136,7 +105,7 @@ For local development and testing, run the local cluster stack using Kind and Sk
 
 #### Prerequisites
 - **Docker Engine**
-- **Kubernetes Cluster** (`kind` or `minikube`)
+- **Kind** (`v0.31.0+`)
 - **Skaffold** & **Go 1.26+**
 
 #### Step 1: Bootstrap Platform Infrastructure
@@ -148,6 +117,12 @@ make cluster-up
 make argocd
 make bootstrap-dev
 ```
+
+#### Local Ingress & Hostnames
+In local Kind development, Envoy Gateway routes traffic on local host ports `8080` (HTTP) and `8443` (HTTPS):
+- **API Core Ingress**: `http://localhost:8080/v1/transfers`
+- **Ops Redirect Routes**: `http://localhost:8080/executive`, `/journeys`, `/services`, `/middleware`, `/infrastructure`
+- *(Optional)* Add `127.0.0.1 api.rrq.dev` to `/etc/hosts` for domain resolution testing.
 
 #### Step 2: Launch Live Hot-Reloading Loop
 Return to this repository and launch Skaffold:
