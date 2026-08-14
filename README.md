@@ -31,40 +31,54 @@ RRQ is designed as a **closed-loop ledger core**: money moves exclusively betwee
 
 ---
 
-## Local Development Quickstart
+## Deployment & Development
 
-### Prerequisites
+### 1. Production Kubernetes Deployment (GitOps)
 
-Ensure you have the following installed:
-- **Docker**
+RRQ uses a pull-based declarative GitOps pipeline managed by **Argo CD** via the [`rrq-gitops`](https://github.com/Joel-Ajayi/rrq-gitops) repository.
+
+1. **Apply Root App-of-Apps Manifest**:
+   Apply the root Argo CD Application to your production Kubernetes cluster:
+   ```bash
+   kubectl apply -f https://raw.githubusercontent.com/Joel-Ajayi/rrq-gitops/main/apps/root-app.yaml
+   ```
+2. **Automated Operator & Service Provisioning**:
+   Argo CD automatically discovers and reconciles all infrastructure operators (CloudNativePG, Strimzi KRaft Kafka, KEDA, Envoy Gateway, OTel Operator) and RRQ microservices declared in `rrq/overlays/prod/` across sync waves `-2` through `2`.
+3. **Continuous Deployment (CD Pipeline)**:
+   - Pushing commits to `main` on this repository triggers **App CI** to lint code, run tests, and build Docker images tagged with the Git commit SHA.
+   - The `gitops-promote` job automatically updates `rrq/overlays/prod/kustomization.yaml` in `rrq-gitops` with the new commit SHA tags.
+   - Argo CD detects the repository change and executes a zero-downtime rolling update on live cluster deployments.
+
+---
+
+### 2. Local Development Quickstart
+
+For local development and testing, run the local cluster stack using Kind and Skaffold:
+
+#### Prerequisites
+- **Docker Engine**
 - **Kubernetes Cluster** (`kind` or `minikube`)
 - **Skaffold** & **Go 1.26+**
 
-> **Note:** Clone the GitOps sibling repository (`rrq-gitops`) to `../rrq-gitops` prior to running local development loops:
-> ```bash
-> git clone https://github.com/Joel-Ajayi/rrq-gitops.git ../rrq-gitops
-> ```
-
-### 1. Bootstrap Platform Infrastructure
-
+#### Step 1: Bootstrap Platform Infrastructure
+Clone the GitOps sibling repository to `../rrq-gitops` and provision the local infrastructure:
 ```bash
+git clone https://github.com/Joel-Ajayi/rrq-gitops.git ../rrq-gitops
 cd ../rrq-gitops
+make cluster-up
+make argocd
 make bootstrap-dev
 ```
 
-### 2. Launch Local Application Loop
-
-Return to this repository and launch live hot-reloading:
-
+#### Step 2: Launch Live Hot-Reloading Loop
+Return to this repository and launch Skaffold:
 ```bash
 cd ../river-rust-queue
 make dev
 ```
 
-### 3. Run Automated Tests
-
-Execute the full unit and integration test suite:
-
+#### Step 3: Run Automated Test Suite
+Execute unit and integration tests:
 ```bash
 cd services/go-services
 go test ./...
