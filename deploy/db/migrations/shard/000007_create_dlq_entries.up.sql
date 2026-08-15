@@ -1,4 +1,5 @@
--- dlq_entries: terminal failures awaiting human attention.
+-- dlq_entries: terminal failures awaiting human attention. source_topic/original_key
+-- let the replay worker republish to the correct topic with deterministic partitioning.
 CREATE TABLE dlq_entries (
     id                TEXT PRIMARY KEY,
     source            TEXT NOT NULL CHECK (source IN ('ledger', 'webhook', 'fraud', 'outbox-relay')),
@@ -17,6 +18,8 @@ CREATE TABLE dlq_entries (
     resolution_note   TEXT,
     trace_id          TEXT,
     span_id           TEXT,
+    source_topic      TEXT,
+    original_key      TEXT,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

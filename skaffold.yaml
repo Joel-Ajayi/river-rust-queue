@@ -38,12 +38,6 @@ build:
         dockerfile: Dockerfile
         buildArgs:
           SERVICE: fraud-worker
-    - image: rrq/recon-worker-go
-      context: services/go-services
-      docker:
-        dockerfile: Dockerfile
-        buildArgs:
-          SERVICE: recon-worker
     - image: rrq/webhook-echo-go
       context: services/go-services
       docker:

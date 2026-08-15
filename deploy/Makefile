@@ -19,13 +19,11 @@ load: build ## Build and load images into kind
 	@kind get clusters 2>/dev/null | grep -qx "$(KIND)" || { echo "kind cluster '$(KIND)' not running"; exit 1; }
 	kind load docker-image --name $(KIND) \
 	  $(REGISTRY)/core-api-go:$(TAG) \
-	  $(REGISTRY)/api-gateway-go:$(TAG) \
 	  $(REGISTRY)/webhook-echo-go:$(TAG) \
 	  $(REGISTRY)/ledger-worker-go:$(TAG) \
 	  $(REGISTRY)/webhook-worker-go:$(TAG) \
 	  $(REGISTRY)/fraud-worker-go:$(TAG) \
 	  $(REGISTRY)/outbox-relay-go:$(TAG) \
-	  $(REGISTRY)/recon-worker-go:$(TAG) \
 	  $(REGISTRY)/migrate:$(TAG)
 
 # ===========================================================================
@@ -49,7 +47,7 @@ reset: ## Drop and recreate all databases (dev only)
 
 .PHONY: migrate
 migrate: ## Run database migrations
-	kubectl -n rrq apply -f ../rrq-gitops/rrq/base/migrations
+	kubectl -n rrq apply -k ../rrq-gitops/base/workloads/migrations
 
 # ===========================================================================
 # Help

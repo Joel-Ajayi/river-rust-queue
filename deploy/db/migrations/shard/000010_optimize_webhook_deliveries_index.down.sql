@@ -1,1 +1,0 @@
-DROP INDEX IF EXISTS idx_webhook_deliveries_status_retry_asc;

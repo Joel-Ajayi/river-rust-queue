@@ -14,8 +14,8 @@ group "default" {
     "ledger-worker-go",
     "webhook-worker-go",
     "fraud-worker-go",
-    "recon-worker-go",
-    "migrate"
+    "migrate",
+    "seed-performance"
   ]
 }
 
@@ -44,6 +44,12 @@ target "migrate" {
   tags = ["${REGISTRY}/migrate:${TAG}"]
 }
 
+target "seed-performance" {
+  context = "deploy/db/seed"
+  dockerfile = "Dockerfile"
+  tags = ["${REGISTRY}/seed-performance:${TAG}"]
+}
+
 // ---- Go Workers ----
 
 target "outbox-relay-go" {
@@ -70,10 +76,5 @@ target "fraud-worker-go" {
   tags = ["${REGISTRY}/fraud-worker-go:${TAG}"]
 }
 
-target "recon-worker-go" {
-  inherits = ["base-go"]
-  args = { SERVICE = "recon-worker" }
-  tags = ["${REGISTRY}/recon-worker-go:${TAG}"]
-}
 
 

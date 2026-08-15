@@ -4,8 +4,8 @@ CREATE TABLE wallets (
     id             TEXT PRIMARY KEY,
     merchant_id    TEXT NOT NULL,
     currency       TEXT NOT NULL,
-    wallet_type    TEXT NOT NULL DEFAULT 'merchant_operational'
-                   CHECK (wallet_type IN ('merchant_operational', 'customer', 'system')),
+    wallet_type    TEXT NOT NULL DEFAULT 'customer'
+                   CHECK (wallet_type IN ('customer', 'system', 'system_fiat_vault')),
     external_ref   TEXT,
     status         TEXT NOT NULL DEFAULT 'active'
                    CHECK (status IN ('active', 'frozen', 'closed')),

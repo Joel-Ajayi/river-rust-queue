@@ -14,6 +14,8 @@ CREATE TABLE webhook_deliveries (
     last_status     INT,
     status          TEXT NOT NULL DEFAULT 'pending'
                     CHECK (status IN ('pending', 'delivered', 'dlq')),
+    error_classification TEXT
+                    CHECK (error_classification IN ('poison', 'transient', 'terminal', 'infrastructure')),
     delivered_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -22,3 +24,6 @@ CREATE TABLE webhook_deliveries (
 CREATE INDEX webhook_deliveries_pending_idx ON webhook_deliveries (status, next_retry_at)
     WHERE status = 'pending';
 CREATE INDEX webhook_deliveries_merchant_idx ON webhook_deliveries (merchant_id, created_at);
+-- DLQ'd webhook deliveries, classified.
+CREATE INDEX webhook_deliveries_dlq_idx ON webhook_deliveries (status, error_classification)
+    WHERE status = 'dlq';

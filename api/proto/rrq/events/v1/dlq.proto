@@ -31,7 +31,9 @@ message DLQEntry {
   google.protobuf.Timestamp replayed_at = 14;
   string resolved_by = 15;
   google.protobuf.Timestamp resolved_at = 16;
-  string resolution_note = 17;
+   string resolution_note = 17;
+  string source_topic = 18;   // Replay target Kafka topic (the topic the message was consumed from).
+  string original_key = 19;   // Replay partitioning key (the original Kafka message key).
 }
 
 enum DLQStatus {

@@ -118,7 +118,7 @@ jobs:
       - name: Update Image Tags
         run: |
           export TAG="${{ github.sha }}"
-          cd rrq-gitops/rrq/overlays/prod
+          cd rrq-gitops/overlays/prod/workloads
           yq -i '.images[].newTag = strenv(TAG)' kustomization.yaml
 
       - name: Commit and Push

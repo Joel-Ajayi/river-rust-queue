@@ -1,9 +1,11 @@
 -- transfers: one atomic money movement, created in the same txn as its ledger legs.
+-- No FK on from_wallet/to_wallet: a cross-shard transfer references a wallet that
+-- lives on the remote shard (there is no row here).
 CREATE TABLE transfers (
     id              TEXT PRIMARY KEY,
     job_id          TEXT NOT NULL REFERENCES jobs(id),
-    from_wallet     TEXT NOT NULL REFERENCES wallets(id),
-    to_wallet       TEXT NOT NULL REFERENCES wallets(id),
+    from_wallet     TEXT NOT NULL,
+    to_wallet       TEXT NOT NULL,
     amount          BIGINT NOT NULL CHECK (amount > 0),
     currency        TEXT NOT NULL,
     status          TEXT NOT NULL CHECK (status IN ('completed', 'failed')),

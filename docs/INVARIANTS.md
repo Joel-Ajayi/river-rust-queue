@@ -30,7 +30,7 @@ This document establishes the nine core engineering invariants (`I1`–`I9`) gua
   1. **Intra-Shard Transfers**: Both legs are inserted inside a single `SERIALIZABLE` PostgreSQL transaction. If either leg fails or the worker crashes, the entire transaction rolls back.
   2. **Cross-Shard Sagas**: The 2-phase clearing protocol debits the source wallet and credits a source-shard clearing account in Phase 1, followed by debiting the destination clearing account and crediting the destination wallet in Phase 2.
   3. **Redelivery Safety**: `UNIQUE (transfer_id, leg)` constraint on `ledger_entries` prevents duplicate leg postings on Kafka message redeliveries.
-* **Verification**: Re-derived balance sums (`SUM(amount)`) are checked nightly by `recon-worker`. Integration tests simulate worker crashes during leg insertion to confirm zero value drift.
+* **Verification**: Integration tests simulate worker crashes during leg insertion to confirm zero value drift.
 
 ---
 
