@@ -12,6 +12,7 @@ var (
 	ErrJobNotFound           = errors.New("job not found")
 	ErrMsgTokenExpired       = errors.New("token is expired")
 	ErrMissingIdempotencyKey = errors.New("missing idempotency key")
+	ErrMissingDLQID          = errors.New("dlq_id is required")
 
 	// Validation Errors
 	ErrInvalidFromWallet = errors.New("from_wallet is required")
@@ -25,6 +26,7 @@ var (
 	ErrInvalidBody             = errors.New("invalid json payload")
 	ErrMissingAuthContext      = errors.New("missing authentication context")
 	ErrMissingConsumerIdentity = errors.New("missing or invalid consumer identity header")
+	ErrAdminForbidden          = errors.New("endpoint is restricted to the platform administrator")
 
 	ErrMsgBulkheadExhausted = errors.New("service unavailable - connection pool exhausted")
 	ErrMsgPayloadTooLarge   = errors.New("payload too large")
@@ -32,6 +34,8 @@ var (
 	ErrMsgQueryParamRequired = errors.New("query parameter is required")
 	ErrMsgInValidJobID       = errors.New("job id is invalid")
 	ErrMsgRequestBodyLarge   = errors.New("http: request body too large")
+	ErrInvalidTier           = errors.New("tier must be one of: standard, premium")
+	ErrPremiumRequiresAdmin  = errors.New("premium tier is reserved for the platform administrator")
 )
 
 // IsTerminalError returns true if the error is a business logic error
@@ -52,5 +56,6 @@ func IsTerminalError(err error) bool {
 		errors.Is(err, ErrMissingIdempotencyKey) ||
 		errors.Is(err, ErrInvalidBody) ||
 		errors.Is(err, ErrMissingAuthContext) ||
-		errors.Is(err, ErrMissingConsumerIdentity)
+		errors.Is(err, ErrMissingConsumerIdentity) ||
+		errors.Is(err, ErrAdminForbidden)
 }

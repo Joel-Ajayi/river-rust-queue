@@ -67,6 +67,14 @@ func (s *Server) handleCreateMerchant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Registration is self-service: only standard merchants can be created
+	// this way. The premium tier belongs exclusively to the seeded platform
+	// merchant, so the system always has exactly one premium merchant.
+	if req.Tier == platform.MerchantTierPremium {
+		writeError(w, platform.ErrForbidden(domain.ErrPremiumRequiresAdmin))
+		return
+	}
+
 	merchantID, apiKeyPlain, shardID, err := s.merchants.CreateMerchant(
 		r.Context(),
 		req.Name,

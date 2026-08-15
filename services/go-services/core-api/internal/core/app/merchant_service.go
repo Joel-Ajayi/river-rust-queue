@@ -28,6 +28,12 @@ func (s *MerchantService) CreateMerchant(ctx context.Context, name, webhookURL, 
 	if name == "" {
 		return "", "", "", domain.ErrInvalidBody
 	}
+	if tier == "" {
+		tier = platform.MerchantTierStandard
+	}
+	if tier != platform.MerchantTierStandard && tier != platform.MerchantTierPremium {
+		return "", "", "", domain.ErrInvalidTier
+	}
 
 	merchantID := platform.NewMerchantID()
 	shardID := s.hashRing.ShardFor(merchantID)
@@ -50,7 +56,7 @@ func (s *MerchantService) CreateMerchant(ctx context.Context, name, webhookURL, 
 		merchantID,
 		name,
 		apiKeyHash,
-		platform.MerchantTierStandard,
+		tier,
 		platform.MerchantStatusActive,
 		shardID,
 		webhookURL,

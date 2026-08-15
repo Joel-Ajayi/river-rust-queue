@@ -21,6 +21,11 @@ const (
 	HeaderMerchantID     = "X-Merchant-Id"
 	HeaderMerchantTier   = "X-Merchant-Tier"
 
+	// HeaderEdgeOrigin is stamped by the Envoy gateway's admin route so the
+	// admin API can reject direct access that bypasses the gateway.
+	HeaderEdgeOrigin      = "X-RRQ-Edge"
+	HeaderEdgeOriginValue = "envoy"
+
 	// Query Params & Path Vars
 	ParamWalletID = "wallet_id"
 	ParamJobID    = "id"
@@ -30,4 +35,12 @@ const (
 	ParamToWallet   = "to_wallet"
 	ParamAmount     = "amount"
 	ParamCurrency   = "currency"
+
+	// Admin DLQ Params & Path Vars
+	ParamShardID = "shard_id"
+	ParamSource  = "source"
+	ParamStatus  = "status"
+	ParamLimit   = "limit"
+	ParamOffset  = "offset"
+	ParamDLQID   = "dlq_id"
 )

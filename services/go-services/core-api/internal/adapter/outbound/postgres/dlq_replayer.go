@@ -5,117 +5,154 @@ import (
 	"fmt"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 	"go.uber.org/zap"
 )
 
-const (
-	// DefaultDLQBatchLimit is the default batch size limit for DLQ replay queries.
-	DefaultDLQBatchLimit = 100
-
-	// querySelectOpenDLQEntries fetches open DLQ items from dlq_entries.
-	querySelectOpenDLQEntries = `
-		SELECT id, source, original_payload, attempt_count
-		FROM dlq_entries
-		WHERE status = $1 AND ($2 = '' OR source = $2)
-		ORDER BY created_at ASC
-		LIMIT $3`
-
-	// queryUpdateDLQStatus marks replayed DLQ items in dlq_entries.
-	queryUpdateDLQStatus = `
-		UPDATE dlq_entries
-		SET status = $1, replayed_at = NOW()
-		WHERE id = $2`
-)
-
 type dlqReplayer struct {
-	pools  *platform.ShardPools
-	writer *kafka.Writer
-	logger *zap.Logger
+	cfg     *platform.Config
+	pools   *platform.ShardPools
+	writers map[string]*kafka.Writer
+	logger  *zap.Logger
 }
 
 // NewDLQReplayer creates a Postgres-backed DLQReplayer adapter.
-func NewDLQReplayer(pools *platform.ShardPools, writer *kafka.Writer, logger *zap.Logger) *dlqReplayer {
+func NewDLQReplayer(cfg *platform.Config, pools *platform.ShardPools, logger *zap.Logger) *dlqReplayer {
 	return &dlqReplayer{
-		pools:  pools,
-		writer: writer,
-		logger: logger,
+		cfg:     cfg,
+		pools:   pools,
+		writers: make(map[string]*kafka.Writer),
+		logger:  logger,
 	}
 }
 
-// ReplayDLQ queries open DLQ entries from the specified shard and republishes them to Kafka.
-func (r *dlqReplayer) ReplayDLQ(ctx context.Context, shardID string, source string, limit int) (int, error) {
+// selectPool always returns the global merchants DB where all DLQ entries now reside.
+func (r *dlqReplayer) selectPool() (*pgxpool.Pool, error) {
+	pool := r.pools.MerchantsPool()
+	if pool == nil {
+		return nil, platform.ErrMerchantsPoolNotInitialized
+	}
+	return pool, nil
+}
+
+// ReplayDLQ republishes open DLQ entries to their original Kafka topics (global
+// merchants DB for webhook, shard DB otherwise), via source_topic or fallback.
+func (r *dlqReplayer) ReplayDLQ(ctx context.Context, source string, limit int) (int, error) {
 	if limit <= 0 {
-		limit = DefaultDLQBatchLimit
+		limit = platform.DefaultDLQBatchLimit
 	}
 
-	pool, err := r.pools.ShardPool(shardID)
+	pool, err := r.selectPool()
 	if err != nil {
-		return 0, fmt.Errorf("shard pool not found for %s: %w", shardID, err)
+		return 0, err
 	}
 
-	rows, err := pool.Query(ctx, querySelectOpenDLQEntries, platform.DLQStatusOpen, source, limit)
+	items, err := platform.ReadDLQEntries(ctx, pool, source, limit)
 	if err != nil {
 		return 0, fmt.Errorf("failed to query dlq_entries: %w", err)
-	}
-	defer rows.Close()
-
-	type dlqItem struct {
-		id      string
-		source  string
-		payload []byte
-	}
-	var items []dlqItem
-
-	for rows.Next() {
-		var item dlqItem
-		var attempts int
-		if err := rows.Scan(&item.id, &item.source, &item.payload, &attempts); err != nil {
-			return 0, fmt.Errorf("failed to scan dlq_entries row: %w", err)
-		}
-		items = append(items, item)
 	}
 
 	replayedCount := 0
 	log := platform.LoggerWithTrace(ctx, r.logger)
 
-	for _, item := range items {
-		msg := kafka.Message{
-			Key:   []byte(item.id),
-			Value: item.payload,
+	for _, e := range items {
+		t := platform.DLQReplayTarget{
+			ID:              e.GetId(),
+			Source:          e.GetSource(),
+			SourceTopic:     e.GetSourceTopic(),
+			OriginalKey:     e.GetOriginalKey(),
+			OriginalPayload: e.GetOriginalPayload(),
 		}
-
-		if r.writer != nil {
-			if err := r.writer.WriteMessages(ctx, msg); err != nil {
-				if log != nil {
-					log.Error(platform.LogEventDLQReplayFailed,
-						zap.String(platform.LogFieldDLQID, item.id),
-						zap.Error(err),
-					)
-				}
-				continue
-			}
-		}
-
-		_, err := pool.Exec(ctx, queryUpdateDLQStatus, platform.DLQStatusReplayed, item.id)
-		if err != nil {
-			if log != nil {
-				log.Error(platform.LogEventDLQUpdateFailed,
-					zap.String(platform.LogFieldDLQID, item.id),
-					zap.Error(err),
-				)
-			}
+		if err := r.replayEntry(ctx, pool, t); err != nil {
+			log.Error(platform.LogEventDLQReplayFailed,
+				zap.String(platform.LogFieldDLQID, t.ID),
+				zap.Error(err),
+			)
 			continue
 		}
 		replayedCount++
 	}
 
-	if log != nil {
-		log.Info(platform.LogEventDLQReplayCompleted,
-			zap.String(platform.LogFieldShardID, shardID),
-			zap.Int(platform.LogFieldCount, replayedCount),
-		)
-	}
+	log.Info(platform.LogEventDLQReplayCompleted,
+		zap.String(platform.LogFieldSource, source),
+		zap.Int(platform.LogFieldCount, replayedCount),
+	)
 
 	return replayedCount, nil
+}
+
+// ReplayDLQEntry republishes a single open DLQ entry by id and marks it replayed.
+// Publish + mark are not atomic; at-least-once, safe under idempotent consumers.
+func (r *dlqReplayer) ReplayDLQEntry(ctx context.Context, source string, id string) (platform.DLQEntrySummary, error) {
+	pool, err := r.selectPool()
+	if err != nil {
+		return platform.DLQEntrySummary{}, err
+	}
+
+	target, err := platform.GetDLQReplayTarget(ctx, pool, id)
+	if err != nil {
+		return platform.DLQEntrySummary{}, err
+	}
+
+	if err := r.replayEntry(ctx, pool, target); err != nil {
+		return platform.DLQEntrySummary{}, fmt.Errorf("replay dlq %s: %w", id, err)
+	}
+
+	return platform.DLQEntrySummary{
+		ID:          target.ID,
+		Source:      target.Source,
+		SourceTopic: target.SourceTopic,
+		OriginalKey: target.OriginalKey,
+		Status:      platform.DLQStatusReplayed,
+	}, nil
+}
+
+// ListDLQEntries returns operator-facing summaries for open DLQ entries,
+// newest-first. Scoped to one pool (shard or global) — pass shard_id accordingly.
+func (r *dlqReplayer) ListDLQEntries(ctx context.Context, source string, status string, limit int, offset int) ([]platform.DLQEntrySummary, error) {
+	if limit <= 0 {
+		limit = platform.DefaultDLQBatchLimit
+	}
+
+	pool, err := r.selectPool()
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := platform.ListDLQEntries(ctx, pool, source, status, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list dlq_entries: %w", err)
+	}
+	return entries, nil
+}
+
+// replayEntry republishes one DLQ entry to its topic/key and marks it replayed.
+func (r *dlqReplayer) replayEntry(ctx context.Context, pool *pgxpool.Pool, t platform.DLQReplayTarget) error {
+	topic := platform.ResolveReplayTopic(t.Source, t.SourceTopic)
+	writer := r.writerFor(topic)
+
+	key := t.OriginalKey
+	if key == "" {
+		key = t.ID
+	}
+
+	msg := kafka.Message{Key: []byte(key), Value: t.OriginalPayload}
+	if err := writer.WriteMessages(ctx, msg); err != nil {
+		return fmt.Errorf("publish dlq %s to %s: %w", t.ID, topic, err)
+	}
+	if err := platform.MarkDLQReplayedByID(ctx, pool, t.ID); err != nil {
+		return fmt.Errorf("mark replayed dlq %s: %w", t.ID, err)
+	}
+	return nil
+}
+
+// writerFor lazily creates one Kafka writer per target topic.
+func (r *dlqReplayer) writerFor(topic string) *kafka.Writer {
+	if w, ok := r.writers[topic]; ok {
+		return w
+	}
+	w := platform.NewKafkaWriter(r.cfg, r.cfg.KafkaBrokers, topic, 0, 0, r.logger)
+	r.writers[topic] = w
+	return w
 }

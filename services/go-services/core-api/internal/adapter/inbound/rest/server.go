@@ -132,6 +132,8 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET "+platform.APIBalancesPath, s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleGetBalance)))))
 
 	mux.Handle("POST "+platform.APIMerchantsPath, s.withLogging(s.withBulkhead(http.HandlerFunc(s.handleCreateMerchant))))
-	mux.Handle("POST "+platform.APIAdminDLQReplayPath, s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleAdminDLQReplay)))))
+	mux.Handle("POST "+platform.APIAdminDLQReplayPath, s.withLogging(s.withBulkhead(s.requirePlatformAdmin(http.HandlerFunc(s.handleAdminDLQReplay)))))
+	mux.Handle("GET "+platform.APIAdminDLQListPath, s.withLogging(s.withBulkhead(s.requirePlatformAdmin(http.HandlerFunc(s.handleAdminDLQList)))))
+	mux.Handle("POST "+platform.APIAdminDLQReplayOnePath, s.withLogging(s.withBulkhead(s.requirePlatformAdmin(http.HandlerFunc(s.handleAdminDLQReplayOne)))))
 	mux.Handle("POST "+platform.APIWalletsPath, s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleCreateWallet)))))
 }

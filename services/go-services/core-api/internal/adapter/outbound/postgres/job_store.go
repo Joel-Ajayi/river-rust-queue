@@ -6,7 +6,6 @@ import (
 	"time"
 
 	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
@@ -102,7 +101,7 @@ func (s *JobStore) ClaimAndRecord(ctx context.Context, shardId string, job domai
 		},
 	}
 
-	payload, err := proto.Marshal(envelope)
+	payload, err := platform.MarshalEnvelope(envelope)
 	if err != nil {
 		return domain.SubmitResult{}, err
 	}

@@ -82,7 +82,7 @@ func main() {
 	jobStore = observability.NewJobStoreTraces(jobStore) // trace decorator
 
 	// Core use-cases
-	dlqReplayer := postgres.NewDLQReplayer(pools, nil, log)
+	dlqReplayer := postgres.NewDLQReplayer(cfg, pools, log)
 	adminSvc := app.NewAdminService(dlqReplayer)
 	jobSvc := app.NewJobService(merchantDir, jobStore)
 	merchantSvc := app.NewMerchantService(merchantStore, pools.HashRing())
