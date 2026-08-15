@@ -21,7 +21,13 @@ RRQ is designed as a **closed-loop ledger core**: money moves exclusively betwee
 
 ## Architecture Overview
 
+<style>
+  .diagram-container svg { min-width: 1000px !important; }
+</style>
+<div class="diagram-container" style="overflow: auto; max-height: 80vh;">
+
 ```mermaid
+%%{init: {"flowchart": {"useMaxWidth": true, "nodeSpacing": 30, "rankSpacing": 40}}}%%
 graph TD
   merchant["Merchant Client"]
   kong["Kong / Envoy Gateway<br/>(TLS · Edge Auth · Rate Limiting)"]
@@ -64,6 +70,7 @@ graph TD
   ledgerWorker --> shardB
 ```
 
+</div>
 ---
 
 ## Deployment & Development

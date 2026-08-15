@@ -8,7 +8,13 @@ This document provides the canonical architectural specification for **River Rus
 
 RRQ is a closed-loop ledger engine designed for high-throughput transfer processing ($5,000$ to $10,000$ TPS target). In a closed-loop model, value enters when an operator funds a wallet and moves exclusively between wallets inside the system. By eliminating external bank settlement legs from the core path, RRQ executes transfers as single, serializable database transactions rather than complex distributed sagas.
 
+<style>
+  .diagram-container svg { min-width: 1000px !important; }
+</style>
+<div class="diagram-container" style="overflow: auto; max-height: 80vh;">
+
 ```mermaid
+%%{init: {"flowchart": {"useMaxWidth": true, "nodeSpacing": 30, "rankSpacing": 40}}}%%
 graph TD
   kong["Kong Gateway<br/>(TLS · Rate Limiting · Path Routing)"]
   gateway["API Gateway<br/>(JWT Validation · Tenant Isolation · Idempotency Claim)"]
@@ -43,6 +49,7 @@ graph TD
   notifyTopic --> webhookWorker
 ```
 
+</div>
 ---
 
 ## 2. Service Architecture
@@ -122,13 +129,6 @@ graph TD
   4. Order-insensitive execution (does not block ledger processing).
 
 ---
-
-### 2.6 Reconciliation Worker (`recon-worker`)
-* **Role**: Nightly batch audit engine.
-* **Responsibilities**:
-  1. Re-derives wallet balances by re-summing `ledger_entries` postings.
-  2. Compares derived balances against the balance cache.
-  3. Emits alerts (`ReconDiscrepancyDetected`) if any variance or conservation breach is detected.
 
 ---
 
