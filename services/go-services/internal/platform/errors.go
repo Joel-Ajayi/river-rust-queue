@@ -266,6 +266,7 @@ const (
 	ErrCodeInvalidAPIKey         = "INVALID_API_KEY"
 	ErrCodeMerchantFrozen        = "MERCHANT_FROZEN"
 	ErrCodeForeignWallet         = "FOREIGN_WALLET"
+	ErrCodeForbidden             = "FORBIDDEN"
 	ErrCodeNotFound              = "NOT_FOUND"
 	ErrCodeMissingIdempotencyKey = "MISSING_IDEMPOTENCY_KEY"
 	ErrCodeInvalidBody           = "INVALID_BODY"
@@ -293,6 +294,10 @@ func ErrMerchantFrozen(err error) *AppError {
 
 func ErrForeignWallet(err error) *AppError {
 	return &AppError{Code: ErrCodeForeignWallet, Message: err.Error(), Status: http.StatusForbidden, Err: err}
+}
+
+func ErrForbidden(err error) *AppError {
+	return &AppError{Code: ErrCodeForbidden, Message: err.Error(), Status: http.StatusForbidden, Err: err}
 }
 
 func ErrNotFound(err error) *AppError {

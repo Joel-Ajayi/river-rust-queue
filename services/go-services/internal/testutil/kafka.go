@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/segmentio/kafka-go"
 	tc_kafka "github.com/testcontainers/testcontainers-go/modules/kafka"
 )
@@ -35,7 +36,7 @@ func StartKafka(t *testing.T) (*tc_kafka.KafkaContainer, []string) {
 	}
 	defer conn.Close()
 
-	for _, topic := range []string{"rrq.jobs", "rrq.notify"} {
+	for _, topic := range []string{platform.TopicJobs, platform.TopicNotify} {
 		err = conn.CreateTopics(kafka.TopicConfig{
 			Topic:             topic,
 			NumPartitions:     1,

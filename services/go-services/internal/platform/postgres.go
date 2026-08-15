@@ -17,8 +17,9 @@ var (
 	ErrUnknownShard       = errors.New("unknown shard")
 	ErrCBMerchantsOpen    = errors.New("merchants circuit breaker is open")
 	ErrCBRWOpen           = errors.New("shard RW circuit breaker is open")
-	ErrCBROpen            = errors.New("shard RO circuit breaker is open")
-	ErrReconciliationHeld = errors.New("reconciliation lock is already held by another runner")
+	ErrCBROpen                     = errors.New("shard RO circuit breaker is open")
+	ErrReconciliationHeld          = errors.New("reconciliation lock is already held by another runner")
+	ErrMerchantsPoolNotInitialized = errors.New("merchants pool is not initialized")
 )
 
 // ShardPools manages pgx connection pools keyed by shard ID.

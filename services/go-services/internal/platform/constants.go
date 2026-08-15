@@ -5,18 +5,22 @@ type EventType string
 
 const (
 	// Paths
-	APIVersionV1          = "/v1"
-	APIVersionV2          = "/v2"
-	APIPathPrefix         = APIVersionV1
-	APIJobPathPrefix      = APIPathPrefix + "/jobs/"
-	APITransfersPath      = APIPathPrefix + "/transfers"
-	APIBalancesPath       = APIPathPrefix + "/balances"
-	APIAuthTokenPath      = APIPathPrefix + "/auth/token"
-	APIMerchantsPath      = APIPathPrefix + "/merchants"
-	APIWalletsPath        = APIPathPrefix + "/wallets"
-	APIAdminDLQReplayPath = APIPathPrefix + "/admin/dlq/replay"
-	APIHealthPath         = "/health"
-	APIReadyPath          = "/ready"
+	APIVersionV1             = "/v1"
+	APIVersionV2             = "/v2"
+	APIPathPrefix            = APIVersionV1
+	APIJobPathPrefix         = APIPathPrefix + "/jobs/"
+	APITransfersPath         = APIPathPrefix + "/transfers"
+	APIBalancesPath          = APIPathPrefix + "/balances"
+	APIAuthTokenPath         = APIPathPrefix + "/auth/token"
+	APIMerchantsPath         = APIPathPrefix + "/merchants"
+	APIWalletsPath           = APIPathPrefix + "/wallets"
+	APIAdminDLQReplayPath    = APIPathPrefix + "/admin/dlq/replay"
+	APIAdminDLQListPath      = APIPathPrefix + "/admin/dlq"
+	APIAdminDLQReplayOnePath = APIPathPrefix + "/admin/dlq/replay-one"
+
+	DefaultDLQBatchLimit = 100
+	APIHealthPath        = "/health"
+	APIReadyPath         = "/ready"
 
 	// Service Names
 	ServiceNameCoreAPI       = "core-api"
@@ -25,7 +29,6 @@ const (
 	ServiceNameWebhookWorker = "webhook-worker"
 	ServiceNameWebhookEcho   = "webhook-echo"
 	ServiceNameFraudWorker   = "fraud-worker"
-	ServiceNameReconWorker   = "recon-worker"
 
 	// Infrastructure Components
 	ComponentMerchantDirectory  = "merchant_directory"
@@ -86,6 +89,16 @@ const (
 	DLQSourceWebhook = "webhook"
 	DLQSourceFraud   = "fraud"
 	DLQSourceOutbox  = "outbox-relay"
+
+	// DLQ entry id prefix used by hashDLQID.
+	DLQIDPrefix = "dq_"
+
+	// DLQOriginSep is the separator joining message-identity fields that seed the
+	// deterministic DLQ id (see DeterministicDLQID / DLQEntryOrigin / KafkaOrigin).
+	DLQOriginSep = "|"
+
+	// DLQErrorPrefix is the namespace prefix for all DLQ error messages.
+	DLQErrorPrefix = "dlq:"
 
 	TraceparentHeader = "traceparent"
 	HeaderEventID     = "event_id"

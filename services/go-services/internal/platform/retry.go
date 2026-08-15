@@ -91,6 +91,16 @@ type RetryConfig struct {
 	Budget     *RetryBudget
 }
 
+// DLQRetryConfig builds the per-service retry budget for durable DLQ writes from
+// CapacityConfig, centralizing the DLQ-persistence retry policy in one place.
+func DLQRetryConfig(c CapacityConfig) RetryConfig {
+	return RetryConfig{
+		MaxRetries: c.DLQMaxRetries,
+		BaseDelay:  time.Duration(c.DLQBaseDelayMs) * time.Millisecond,
+		MaxDelay:   time.Duration(c.DLQCapDelayMs) * time.Millisecond,
+	}
+}
+
 // NewRetryPolicy builds a failsafe-go RetryPolicy using exponential backoff and Full Jitter.
 func NewRetryPolicy[T any](cfg RetryConfig, isFailure func(error) bool) retrypolicy.RetryPolicy[T] {
 	builder := retrypolicy.NewBuilder[T]().

@@ -65,7 +65,6 @@ func TestServiceNames_NotEmpty(t *testing.T) {
 	assert.NotEmpty(t, platform.ServiceNameOutboxRelay)
 	assert.NotEmpty(t, platform.ServiceNameWebhookWorker)
 	assert.NotEmpty(t, platform.ServiceNameFraudWorker)
-	assert.NotEmpty(t, platform.ServiceNameReconWorker)
 }
 
 func TestShardTypes_NotEqual(t *testing.T) {

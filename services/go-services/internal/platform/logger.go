@@ -20,6 +20,7 @@ const (
 	LogFieldStatus     = "status_code"
 	LogFieldShardID    = "shard_id"
 	LogFieldTopic      = "topic"
+	LogFieldSource     = "source"
 	LogFieldGroup      = "group"
 	LogFieldAddr       = "addr"
 	LogFieldPath       = "path"
