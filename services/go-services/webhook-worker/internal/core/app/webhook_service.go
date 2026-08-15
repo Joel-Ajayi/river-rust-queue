@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform/pii"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/core/domain"
@@ -19,7 +18,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 )
 
 type FastLaneJob struct {
@@ -130,8 +128,7 @@ func (s *WebhookService) executeFastLaneJob(ctx context.Context, job FastLaneJob
 
 func (s *WebhookService) processFastLaneJob(ctx context.Context, job FastLaneJob) {
 	// Extract traceparent from payload and inject into context if present
-	var env eventsv1.EventEnvelope
-	if err := proto.Unmarshal(job.Delivery.Payload, &env); err == nil && env.Traceparent != "" {
+	if env, err := platform.UnmarshalEnvelope(job.Delivery.Payload); err == nil && env.Traceparent != "" {
 		carrier := propagation.MapCarrier{
 			platform.TraceparentHeader: env.Traceparent,
 		}
@@ -188,11 +185,18 @@ func (s *WebhookService) processFastLaneJob(ctx context.Context, job FastLaneJob
 
 // HandleMessage processes a fresh message from Kafka.
 // Delivery is attempted once. If it fails, it is scheduled for retry in Postgres.
-func (s *WebhookService) HandleMessage(ctx context.Context, merchantID string, payload []byte) error {
-	var env eventsv1.EventEnvelope
-	if err := proto.Unmarshal(payload, &env); err != nil {
-		s.repo.RouteToGlobalDLQ(ctx, payload, err.Error())
-		platform.LoggerWithTrace(ctx, s.logger).Error(domain.LogEventFailedUnmarshal, zap.Error(err))
+func (s *WebhookService) HandleMessage(ctx context.Context, merchantID string, topic string, key string, payload []byte) error {
+	env, err := platform.UnmarshalEnvelope(payload)
+	if err != nil {
+		if dlqErr := s.repo.RouteToGlobalDLQ(ctx, payload, topic, key, err.Error()); dlqErr != nil {
+			platform.LoggerWithTrace(ctx, s.logger).Error(domain.LogEventFailedUnmarshal,
+				zap.String(platform.LogFieldTopic, topic),
+				zap.String(platform.LogFieldKey, key),
+				zap.Error(err),
+				zap.Error(dlqErr),
+			)
+			return nil
+		}
 		return nil
 	}
 	eventID := env.EventId
@@ -202,9 +206,18 @@ func (s *WebhookService) HandleMessage(ctx context.Context, merchantID string, p
 		return err
 	}
 	if merchant == nil {
-		err = s.repo.RouteToGlobalDLQ(ctx, payload, domain.ErrorMerchantLookupFailed)
-		if err != nil {
-			return err
+		// If the DLQ write keeps failing, the canonical log is the sink of
+		// last resort: the message is recorded and committed rather than
+		// blocking the partition indefinitely.
+		if err = s.repo.RouteToGlobalDLQ(ctx, payload, topic, key, domain.ErrorMerchantLookupFailed); err != nil {
+			platform.LogCanonicalEvent(ctx, s.logger, platform.ServiceNameWebhookWorker, platform.CanonicalLogLine{
+				Event:        platform.EventWebhookFailed,
+				Status:       platform.StatusDLQ,
+				MerchantID:   merchantID,
+				TransferID:   eventID,
+				ErrorMessage: fmt.Sprintf("%v: %v", domain.ErrorMerchantLookupFailed, err),
+			})
+			return nil
 		}
 		platform.LoggerWithTrace(ctx, s.logger).Warn(
 			domain.LogEventMerchantLookup,
@@ -215,9 +228,15 @@ func (s *WebhookService) HandleMessage(ctx context.Context, merchantID string, p
 	}
 
 	if merchant.Status != domain.StatusActive {
-		err = s.repo.RouteToGlobalDLQ(ctx, payload, domain.ErrorMerchantInactive)
-		if err != nil {
-			return err
+		if err = s.repo.RouteToGlobalDLQ(ctx, payload, topic, key, domain.ErrorMerchantInactive); err != nil {
+			platform.LogCanonicalEvent(ctx, s.logger, platform.ServiceNameWebhookWorker, platform.CanonicalLogLine{
+				Event:        platform.EventWebhookFailed,
+				Status:       platform.StatusDLQ,
+				MerchantID:   merchantID,
+				TransferID:   eventID,
+				ErrorMessage: fmt.Sprintf("%v: %v", domain.ErrorMerchantInactive, err),
+			})
+			return nil
 		}
 		platform.LoggerWithTrace(ctx, s.logger).Warn(
 			domain.LogEventMerchantInactive,
@@ -450,6 +469,6 @@ func (s *WebhookService) getRetrySemaphore(merchantID string) chan struct{} {
 }
 
 // RouteToGlobalDLQ allows the consumer to write poison pills (e.g. panics) directly to the global DLQ
-func (s *WebhookService) RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error {
-	return s.repo.RouteToGlobalDLQ(ctx, payload, errorMsg)
+func (s *WebhookService) RouteToGlobalDLQ(ctx context.Context, payload []byte, topic string, key string, errorMsg string) error {
+	return s.repo.RouteToGlobalDLQ(ctx, payload, topic, key, errorMsg)
 }

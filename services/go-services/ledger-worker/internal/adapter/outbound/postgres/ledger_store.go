@@ -8,7 +8,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
@@ -227,8 +226,7 @@ func (s *LedgerStore) PostTransfer(ctx context.Context, shardID string, transfer
 			},
 		},
 	}
-	marshaler := protojson.MarshalOptions{EmitUnpopulated: true}
-	payloadBytes, err := marshaler.Marshal(envelope)
+	payloadBytes, err := platform.MarshalEnvelope(envelope)
 	if err != nil {
 		return err
 	}
@@ -303,8 +301,7 @@ func (s *LedgerStore) FailTransfer(ctx context.Context, shardID string, transfer
 			},
 		},
 	}
-	marshaler := protojson.MarshalOptions{EmitUnpopulated: true}
-	payloadBytes, err := marshaler.Marshal(envelope)
+	payloadBytes, err := platform.MarshalEnvelope(envelope)
 	if err != nil {
 		return err
 	}

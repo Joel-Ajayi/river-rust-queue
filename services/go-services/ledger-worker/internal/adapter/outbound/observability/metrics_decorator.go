@@ -87,8 +87,8 @@ func NewDLQStoreMetrics(next port.DLQStore) port.DLQStore {
 	return &dlqStoreMetrics{next: next}
 }
 
-func (m *dlqStoreMetrics) WriteDLQEntry(ctx context.Context, shardID string, entry domain.DLQEntry) error {
-	err := m.next.WriteDLQEntry(ctx, shardID, entry)
+func (m *dlqStoreMetrics) WriteDLQEntry(ctx context.Context, entry *eventsv1.DLQEntry) error {
+	err := m.next.WriteDLQEntry(ctx, entry)
 	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
 		platform.RecordInfrastructureError(ctx, platform.ComponentDLQStore)
 	}
@@ -114,7 +114,6 @@ func (m *merchantDirMetrics) ShardFor(ctx context.Context, merchantID string) (s
 }
 
 // -- Job Handler Decorator --
-
 type jobHandlerMetrics struct {
 	next port.JobHandler
 }
@@ -132,7 +131,6 @@ func (m *jobHandlerMetrics) ProcessJob(ctx context.Context, payload *eventsv1.Jo
 }
 
 // -- Saga Handler Decorator --
-
 type sagaHandlerMetrics struct {
 	next port.SagaHandler
 }

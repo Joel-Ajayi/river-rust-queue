@@ -20,7 +20,7 @@ func NewWebhookAppTraces(next port.WebhookApp) port.WebhookApp {
 	return &webhookAppTraces{next: next}
 }
 
-func (t *webhookAppTraces) HandleMessage(ctx context.Context, merchantID string, payload []byte) error {
+func (t *webhookAppTraces) HandleMessage(ctx context.Context, merchantID string, topic string, key string, payload []byte) error {
 	spanCtx, span := platform.GetTracer().Start(ctx, platform.SpanHandleWebhookMessage)
 	defer span.End()
 
@@ -28,7 +28,7 @@ func (t *webhookAppTraces) HandleMessage(ctx context.Context, merchantID string,
 		attribute.String(platform.MetricLabelMerchantID, merchantID),
 	)
 
-	err := t.next.HandleMessage(spanCtx, merchantID, payload)
+	err := t.next.HandleMessage(spanCtx, merchantID, topic, key, payload)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -56,11 +56,11 @@ func (t *webhookAppTraces) RetryScheduler(ctx context.Context) error {
 	return err
 }
 
-func (t *webhookAppTraces) RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error {
+func (t *webhookAppTraces) RouteToGlobalDLQ(ctx context.Context, payload []byte, topic string, key string, errorMsg string) error {
 	spanCtx, span := platform.GetTracer().Start(ctx, "RouteToGlobalDLQ")
 	defer span.End()
 
-	err := t.next.RouteToGlobalDLQ(spanCtx, payload, errorMsg)
+	err := t.next.RouteToGlobalDLQ(spanCtx, payload, topic, key, errorMsg)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())

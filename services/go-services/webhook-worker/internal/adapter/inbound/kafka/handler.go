@@ -32,17 +32,17 @@ func WebhookHandler(app port.WebhookApp, retryCfg platform.RetryConfig, logger *
 				if r := recover(); r != nil {
 					platform.LoggerWithTrace(ctx, logger).Error(platform.LogEventPanicRecoveredDLQ,
 						zap.Any(platform.LogFieldPanic, r))
-					app.RouteToGlobalDLQ(ctx, msg.Value,
+					app.RouteToGlobalDLQ(ctx, msg.Value, msg.Topic, string(msg.Key),
 						fmt.Sprintf("%v: %v", domain.ErrPanic, r))
 				}
 			}()
 
-			if procErr := app.HandleMessage(ctx, merchantID, msg.Value); procErr != nil {
+			if procErr := app.HandleMessage(ctx, merchantID, msg.Topic, string(msg.Key), msg.Value); procErr != nil {
 				classification := platform.ClassifyError(procErr, domain.IsTerminalError)
 
 				switch classification {
 				case platform.ClassificationTerminal, platform.ClassificationPoison:
-					if dlqErr := app.RouteToGlobalDLQ(ctx, msg.Value, procErr.Error()); dlqErr != nil {
+					if dlqErr := app.RouteToGlobalDLQ(ctx, msg.Value, msg.Topic, string(msg.Key), procErr.Error()); dlqErr != nil {
 						platform.LoggerWithTrace(ctx, logger).Error(platform.LogEventDLQWriteFailed, zap.Error(dlqErr))
 					}
 					platform.LogCanonicalEvent(ctx, logger, platform.ServiceNameWebhookWorker, platform.CanonicalLogLine{
@@ -87,7 +87,7 @@ func WebhookHandler(app port.WebhookApp, retryCfg platform.RetryConfig, logger *
 				zap.Int(platform.LogFieldRetryCount, attemptCount),
 				zap.Error(err),
 			)
-			if dlqErr := app.RouteToGlobalDLQ(ctx, msg.Value, err.Error()); dlqErr != nil {
+			if dlqErr := app.RouteToGlobalDLQ(ctx, msg.Value, msg.Topic, string(msg.Key), err.Error()); dlqErr != nil {
 				platform.LoggerWithTrace(ctx, logger).Error(platform.LogEventDLQWriteFailed, zap.Error(dlqErr))
 				return err // Return original error to halt partition only if DLQ write fails
 			}

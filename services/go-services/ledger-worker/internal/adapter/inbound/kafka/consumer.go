@@ -7,16 +7,13 @@ import (
 	"sync"
 	"time"
 
-	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
-	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform/pii"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform/platform_consumer"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/ledger-worker/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/ledger-worker/internal/core/port"
 	"github.com/failsafe-go/failsafe-go"
 	"github.com/segmentio/kafka-go"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 )
 
 type ConsumerManager struct {
@@ -87,7 +84,7 @@ func (m *ConsumerManager) Consume(ctx context.Context) error {
 	pools := m.pools
 
 	cfg.OnPanicDLQ = func(ctx context.Context, msg kafka.Message, reason error) error {
-		return m.routeToDLQ(ctx, msg, reason, dlqStore, directory, pools)
+		return m.routeToDLQ(ctx, msg, reason, dlqStore)
 	}
 
 	jobPipeline := platform_consumer.NewConsumerPipeline(
@@ -139,9 +136,9 @@ func (a *readerAdapter) CommitMessages(ctx context.Context, msgs ...kafka.Messag
 
 func (m *ConsumerManager) jobMessageHandler(_ *kafka.Reader, jobHandler port.JobHandler, _ port.SagaHandler, dlqStore port.DLQStore, directory port.MerchantDirectory, pools *platform.ShardPools) platform_consumer.MessageHandler {
 	return func(ctx context.Context, msg kafka.Message) error {
-		var envelope eventsv1.EventEnvelope
-		if err := proto.Unmarshal(msg.Value, &envelope); err != nil {
-			if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrUnmarshal, err), dlqStore, directory, pools); dlqErr != nil {
+		envelope, err := platform.UnmarshalEnvelope(msg.Value)
+		if err != nil {
+			if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrUnmarshal, err), dlqStore); dlqErr != nil {
 				platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventPoisonDLQWriteFailed, zap.Error(dlqErr))
 			}
 			return nil
@@ -159,9 +156,9 @@ func (m *ConsumerManager) jobMessageHandler(_ *kafka.Reader, jobHandler port.Job
 
 func (m *ConsumerManager) xshardMessageHandler(sagaHandler port.SagaHandler, dlqStore port.DLQStore, directory port.MerchantDirectory, pools *platform.ShardPools) platform_consumer.MessageHandler {
 	return func(ctx context.Context, msg kafka.Message) error {
-		var envelope eventsv1.EventEnvelope
-		if err := proto.Unmarshal(msg.Value, &envelope); err != nil {
-			if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrUnmarshal, err), dlqStore, directory, pools); dlqErr != nil {
+		envelope, err := platform.UnmarshalEnvelope(msg.Value)
+		if err != nil {
+			if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrUnmarshal, err), dlqStore); dlqErr != nil {
 				platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventPoisonDLQWriteFailed, zap.Error(dlqErr))
 			}
 			return nil
@@ -203,7 +200,7 @@ func (m *ConsumerManager) processWithRetry(ctx context.Context, msg kafka.Messag
 			classification := platform.ClassifyError(err, isTerminal)
 
 			if classification == platform.ClassificationPoison || classification == platform.ClassificationTerminal {
-				if dlqErr := m.routeToDLQ(ctx, msg, err, dlqStore, directory, pools); dlqErr != nil {
+				if dlqErr := m.routeToDLQ(ctx, msg, err, dlqStore); dlqErr != nil {
 					logger.Error(platform.LogEventDLQWriteFailed, zap.Error(dlqErr))
 				}
 				platform.RecordDLQIngestion(ctx, platform.ServiceNameLedgerWorker)
@@ -247,7 +244,7 @@ func (m *ConsumerManager) processWithRetry(ctx context.Context, msg kafka.Messag
 			zap.Int(platform.LogFieldRetryCount, attemptCount),
 			zap.Error(err),
 		)
-		if dlqErr := m.routeToDLQ(ctx, msg, err, dlqStore, directory, pools); dlqErr != nil {
+		if dlqErr := m.routeToDLQ(ctx, msg, err, dlqStore); dlqErr != nil {
 			logger.Error(platform.LogEventDLQWriteFailed, zap.Error(dlqErr))
 			return err // Return original error to halt partition only if DLQ write fails
 		}
@@ -258,58 +255,29 @@ func (m *ConsumerManager) processWithRetry(ctx context.Context, msg kafka.Messag
 	return nil
 }
 
-func (m *ConsumerManager) routeToDLQ(ctx context.Context, msg kafka.Message, reasonErr error, dlqStore port.DLQStore, directory port.MerchantDirectory, pools *platform.ShardPools) error {
+func (m *ConsumerManager) routeToDLQ(ctx context.Context, msg kafka.Message, reasonErr error, dlqStore port.DLQStore) error {
 	classification := platform.ClassifyError(reasonErr, domain.IsTerminalError)
-
 	traceID, spanID := platform.ExtractTraceFromMessageHeaders(&msg)
 
-	shardID := pools.GetAvailableShardIDs()[0]
-	var envelope eventsv1.EventEnvelope
-	if err := proto.Unmarshal(msg.Value, &envelope); err == nil {
-		switch {
-		case envelope.GetJobRequested() != nil:
-			merchantID := envelope.GetJobRequested().MerchantId
-			if s, err := directory.ShardFor(ctx, merchantID); err == nil {
-				shardID = s
-			}
-		case envelope.GetXshardTransferRequested() != nil:
-			shardID = envelope.GetXshardTransferRequested().SrcShard
-		case envelope.GetXshardTransferSettled() != nil:
-			shardID = envelope.GetXshardTransferSettled().DstShard
-		case envelope.GetXshardTransferFailed() != nil:
-			shardID = envelope.GetXshardTransferFailed().SrcShard
-		}
-	}
+	entry := platform.NewDLQEntry(
+		platform.DLQSourceLedger, msg.Topic, string(msg.Key), msg.Value,
+		fmt.Sprintf("%s"+platform.DLQOriginSep+"%d"+platform.DLQOriginSep+"%d", msg.Topic, msg.Partition, msg.Offset),
+		fmt.Sprintf("[%s] %s", classification, reasonErr.Error()),
+		classification, msg.Time, time.Now(), traceID, spanID,
+	)
 
-	maskedPayload := pii.Mask(msg.Value)
-	entry := domain.DLQEntry{
-		ID:                  platform.NewEventID(),
-		Source:              domain.DLQSourceLedger,
-		OriginalPayload:     maskedPayload,
-		ErrorMessage:        fmt.Sprintf("[%s] %s", classification, reasonErr.Error()),
-		ErrorClassification: string(classification),
-		AttemptCount:        0,
-		FirstFailedAt:       msg.Time,
-		LastFailedAt:        time.Now(),
-		Status:              domain.DLQStatusOpen,
-		TraceID:             traceID,
-		SpanID:              spanID,
-	}
-
-	dlqRetryCfg := platform.RetryConfig{
-		MaxRetries: m.cfg.Capacity.DLQMaxRetries,
-		BaseDelay:  time.Duration(m.cfg.Capacity.DLQBaseDelayMs) * time.Millisecond,
-		MaxDelay:   time.Duration(m.cfg.Capacity.DLQCapDelayMs) * time.Millisecond,
-	}
-
-	err := platform.ExecuteWithJitter(ctx, dlqRetryCfg, func(exec failsafe.Execution[any]) error {
-		return dlqStore.WriteDLQEntry(ctx, shardID, entry)
-	})
-	if err != nil {
-		platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventDLQWriteExhausted, zap.Error(err), zap.String(platform.LogFieldTopic, msg.Topic), zap.ByteString(platform.LogFieldKey, msg.Key))
+	// Retry of the DLQ write itself lives in platform.WriteDLQEntryWithRetry
+	// (per-service budget, error-classified). Propagate its error so the
+	// source message is not acked and the broker redelivers it (no data loss).
+	if err := dlqStore.WriteDLQEntry(ctx, entry); err != nil {
+		platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventDLQWriteExhausted,
+			zap.Error(err),
+			zap.String(platform.LogFieldDLQID, entry.GetId()),
+			zap.String(platform.LogFieldTopic, msg.Topic),
+			zap.ByteString(platform.LogFieldKey, msg.Key),
+		)
 		return err
 	}
 
-	platform.RecordDLQIngestion(ctx, platform.ServiceNameLedgerWorker)
 	return nil
 }

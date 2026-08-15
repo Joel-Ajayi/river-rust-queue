@@ -80,8 +80,8 @@ func (m *metricsStoreDecorator) GetOldestUnpublishedEventAge(ctx context.Context
 	return dur, err
 }
 
-func (m *metricsStoreDecorator) RouteToDLQ(ctx context.Context, shardID string, event domain.Event, reason string) error {
-	err := m.next.RouteToDLQ(ctx, shardID, event, reason)
+func (m *metricsStoreDecorator) RouteToDLQ(ctx context.Context, event domain.Event, reason string) error {
+	err := m.next.RouteToDLQ(ctx, event, reason)
 	if err != nil && (platform.ClassifyError(err, nil) == platform.ClassificationInfrastructure || platform.ClassifyError(err, nil) == platform.ClassificationTransient || errors.Is(err, circuitbreaker.ErrOpen)) {
 		platform.RecordInfrastructureError(ctx, platform.ComponentEventStore)
 	}

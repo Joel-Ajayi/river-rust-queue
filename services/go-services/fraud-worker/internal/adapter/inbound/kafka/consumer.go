@@ -7,14 +7,11 @@ import (
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/fraud-worker/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/fraud-worker/internal/core/port"
-	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
-	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform/pii"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform/platform_consumer"
 	"github.com/failsafe-go/failsafe-go"
 	"github.com/segmentio/kafka-go"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 )
 
 type ConsumerManager struct {
@@ -80,8 +77,8 @@ func (a *readerAdapter) CommitMessages(ctx context.Context, msgs ...kafka.Messag
 
 func (m *ConsumerManager) messageHandler() platform_consumer.MessageHandler {
 	return func(ctx context.Context, msg kafka.Message) error {
-		var envelope eventsv1.EventEnvelope
-		if err := proto.Unmarshal(msg.Value, &envelope); err != nil {
+		envelope, err := platform.UnmarshalEnvelope(msg.Value)
+		if err != nil {
 			if dlqErr := m.routeToDLQ(ctx, msg, fmt.Errorf("%w: %w", domain.ErrUnmarshal, err)); dlqErr != nil {
 				m.logger.Error(platform.LogEventDLQWriteFailed, zap.Error(dlqErr))
 			}
@@ -101,7 +98,7 @@ func (m *ConsumerManager) messageHandler() platform_consumer.MessageHandler {
 		logger := platform.LoggerWithTrace(ctx, m.logger)
 
 		payload := envelope.GetJobRequested()
-		err := platform.ExecuteWithJitter(ctx, retryCfg, func(exec failsafe.Execution[any]) error {
+		err = platform.ExecuteWithJitter(ctx, retryCfg, func(exec failsafe.Execution[any]) error {
 			attemptCount++
 
 			if ctx.Err() != nil {
@@ -167,7 +164,6 @@ func (m *ConsumerManager) messageHandler() platform_consumer.MessageHandler {
 				logger.Error(platform.LogEventDLQWriteFailed, zap.Error(dlqErr))
 				return err // Return original error to halt partition only if DLQ write fails
 			}
-			platform.RecordDLQIngestion(ctx, platform.ServiceNameFraudWorker)
 			return nil
 		}
 		return nil
@@ -187,43 +183,22 @@ func (m *ConsumerManager) routeToDLQ(ctx context.Context, msg kafka.Message, rea
 
 	traceID, spanID := platform.ExtractTraceFromMessageHeaders(&msg)
 
-	shardID := m.pools.GetAvailableShardIDs()[0]
-	var envelope eventsv1.EventEnvelope
-	if err := proto.Unmarshal(msg.Value, &envelope); err == nil {
-		payload := envelope.GetJobRequested()
-		if payload != nil {
-			if s, err := m.merchantDir.ShardFor(ctx, payload.MerchantId); err == nil {
-				shardID = s
-			}
-		}
-	}
+	entry := platform.NewDLQEntry(
+		platform.DLQSourceFraud, msg.Topic, string(msg.Key), msg.Value,
+		fmt.Sprintf("%s"+platform.DLQOriginSep+"%d"+platform.DLQOriginSep+"%d", msg.Topic, msg.Partition, msg.Offset),
+		fmt.Sprintf("%s: %s", classification, reasonErr.Error()),
+		classification, msg.Time, time.Now(), traceID, spanID,
+	)
 
-	maskedPayload := pii.Mask(msg.Value)
-	entry := domain.DLQEntry{
-		ID:                  platform.NewEventID(),
-		Source:              platform.DLQSourceFraud,
-		OriginalPayload:     maskedPayload,
-		ErrorMessage:        string(classification) + ": " + reasonErr.Error(),
-		ErrorClassification: string(classification),
-		AttemptCount:        0,
-		FirstFailedAt:       msg.Time,
-		LastFailedAt:        time.Now(),
-		Status:              platform.DLQStatusOpen,
-		TraceID:             traceID,
-		SpanID:              spanID,
-	}
-
-	dlqRetryCfg := platform.RetryConfig{
-		MaxRetries: m.cfg.Capacity.DLQMaxRetries,
-		BaseDelay:  time.Duration(m.cfg.Capacity.DLQBaseDelayMs) * time.Millisecond,
-		MaxDelay:   time.Duration(m.cfg.Capacity.DLQCapDelayMs) * time.Millisecond,
-	}
-
-	err := platform.ExecuteWithJitter(ctx, dlqRetryCfg, func(exec failsafe.Execution[any]) error {
-		return m.dlqStore.WriteDLQEntry(ctx, shardID, entry)
-	})
-	if err != nil {
-		platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventDLQWriteExhausted, zap.Error(err), zap.String(platform.LogFieldTopic, msg.Topic), zap.ByteString(platform.LogFieldKey, msg.Key))
+	// Retry of the DLQ write itself lives in platform.WriteDLQEntryWithRetry
+	// (per-service budget, error-classified).
+	if err := m.dlqStore.WriteDLQEntry(ctx, entry); err != nil {
+		platform.LoggerWithTrace(ctx, m.logger).Error(platform.LogEventDLQWriteExhausted,
+			zap.Error(err),
+			zap.String(platform.LogFieldDLQID, entry.GetId()),
+			zap.String(platform.LogFieldTopic, msg.Topic),
+			zap.ByteString(platform.LogFieldKey, msg.Key),
+		)
 		return err
 	}
 

@@ -56,7 +56,9 @@ func main() {
 	merchantDir := observability.NewMerchantDirectoryMetrics(resilience.NewMerchantDirectoryResilience(postgres.NewMerchantDirectory(pools, logger), cbs))
 	ledgerStore := observability.NewLedgerStoreMetrics(resilience.NewLedgerStoreResilience(postgres.NewLedgerStore(pools, logger), cbs))
 	xshardStore := observability.NewCrossShardStoreMetrics(resilience.NewCrossShardStoreResilience(postgres.NewCrossShardStore(pools, logger), cbs))
-	dlqStore := observability.NewDLQStoreMetrics(resilience.NewDLQStoreResilience(postgres.NewDLQStore(pools, logger), cbs))
+	dlqRetryCfg := platform.DLQRetryConfig(*cfg.Capacity)
+	dlqStore := observability.NewDLQStoreMetrics(resilience.NewDLQStoreResilience(
+		postgres.NewDLQStore(pools, logger, dlqRetryCfg, platform.ServiceNameLedgerWorker), cbs))
 
 	jobService := app.NewJobService(logger, ledgerStore, xshardStore, merchantDir)
 	jobHandler := observability.NewJobHandlerTraces(observability.NewJobHandlerMetrics(jobService))

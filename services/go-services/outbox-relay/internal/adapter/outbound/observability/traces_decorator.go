@@ -30,14 +30,13 @@ func (t *eventStoreTraces) GetOldestUnpublishedEventAge(ctx context.Context, sha
 	return t.next.GetOldestUnpublishedEventAge(ctx, shardID)
 }
 
-func (t *eventStoreTraces) RouteToDLQ(ctx context.Context, shardID string, event domain.Event, reason string) error {
+func (t *eventStoreTraces) RouteToDLQ(ctx context.Context, event domain.Event, reason string) error {
 	ctx, span := platform.GetTracer().Start(ctx, "outbox.store.route_dlq",
 		trace.WithAttributes(
-			attribute.String(platform.MetricLabelShard, shardID),
 			attribute.String(platform.MetricLabelJobID, event.AggregateID)))
 	defer span.End()
 
-	if err := t.next.RouteToDLQ(ctx, shardID, event, reason); err != nil {
+	if err := t.next.RouteToDLQ(ctx, event, reason); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		span.SetAttributes(

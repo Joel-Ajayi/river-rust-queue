@@ -5,12 +5,10 @@ import (
 	"sync"
 	"sync/atomic"
 
-	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/port"
 	"github.com/segmentio/kafka-go"
-	"google.golang.org/protobuf/proto"
 )
 
 type EventPublisher struct {
@@ -78,11 +76,10 @@ func (p *EventPublisher) PublishBatch(ctx context.Context, shardID string, event
 		}
 
 		// Extract Traceparent from protobuf envelope
-		var envelope eventsv1.EventEnvelope
-		if err := proto.Unmarshal(valueBytes, &envelope); err == nil && envelope.Traceparent != "" {
+		if env, err := platform.UnmarshalEnvelope(valueBytes); err == nil && env.Traceparent != "" {
 			headers = append(headers, kafka.Header{
 				Key:   platform.TraceparentHeader,
-				Value: []byte(envelope.Traceparent),
+				Value: []byte(env.Traceparent),
 			})
 		}
 

@@ -10,7 +10,6 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -88,8 +87,7 @@ func (r *WalletRepository) FreezeWallet(ctx context.Context, shardID string, wal
 		},
 	}
 
-	marshaler := protojson.MarshalOptions{EmitUnpopulated: true}
-	payloadBytes, err := marshaler.Marshal(envelope)
+	payloadBytes, err := platform.MarshalEnvelope(envelope)
 	if err != nil {
 		return err
 	}

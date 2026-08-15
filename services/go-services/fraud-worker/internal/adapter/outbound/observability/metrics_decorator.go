@@ -3,7 +3,6 @@ package observability
 import (
 	"context"
 
-	"github.com/Joel-Ajayi/river-rust-queue/go-services/fraud-worker/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/fraud-worker/internal/core/port"
 	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
@@ -99,8 +98,8 @@ func NewDLQStoreMetrics(next port.DLQStore) port.DLQStore {
 	return &dlqStoreMetrics{next: next}
 }
 
-func (m *dlqStoreMetrics) WriteDLQEntry(ctx context.Context, shardID string, entry domain.DLQEntry) error {
-	err := m.next.WriteDLQEntry(ctx, shardID, entry)
+func (m *dlqStoreMetrics) WriteDLQEntry(ctx context.Context, entry *eventsv1.DLQEntry) error {
+	err := m.next.WriteDLQEntry(ctx, entry)
 	if err != nil {
 		if platform.ClassifyError(err, func(error) bool { return false }) == platform.ClassificationInfrastructure {
 			platform.RecordInfrastructureError(ctx, platform.ComponentDLQStore)

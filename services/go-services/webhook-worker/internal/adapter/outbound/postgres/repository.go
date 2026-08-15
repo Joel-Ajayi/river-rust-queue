@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"go.uber.org/zap"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/core/domain"
@@ -13,11 +14,13 @@ import (
 )
 
 type Repository struct {
-	pools *platform.ShardPools
+	pools       *platform.ShardPools
+	logger      *zap.Logger
+	dlqRetryCfg platform.RetryConfig
 }
 
-func NewRepository(pools *platform.ShardPools) *Repository {
-	return &Repository{pools: pools}
+func NewRepository(pools *platform.ShardPools, logger *zap.Logger, dlqRetryCfg platform.RetryConfig) *Repository {
+	return &Repository{pools: pools, logger: logger, dlqRetryCfg: dlqRetryCfg}
 }
 
 // GetMerchantConfig retrieves merchant webhook config from the global `merchants` table.
@@ -212,11 +215,25 @@ func (r *Repository) FailDeliveryAndRouteToDLQ(ctx context.Context, shardID stri
 
 	traceID, spanID := extractTraceAndSpanID(ctx)
 
-	_, err = tx.Exec(ctx, `
-		INSERT INTO dlq_entries (id, source, original_payload, error_message, error_classification, attempt_count, first_failed_at, last_failed_at, status, trace_id, span_id)
-		VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), NULLIF($10, ''))
-	`, domain.EventSourceWebhook, d.Payload, errorMsg, string(platform.ClassificationTerminal), d.AttemptCount, firstFailedAt, lastFailedAt, domain.StatusOpen, traceID, spanID)
-	if err != nil {
+	// origin: stable per-delivery identity (SourceEventID when present, else the
+	// delivery row id) so a redelivery of the same failed delivery upserts
+	// (ON CONFLICT) instead of duplicating a dlq_entries row.
+	origin := d.SourceEventID
+	if origin == "" {
+		origin = d.ID
+	}
+
+	entry := platform.NewDLQEntry(
+		platform.DLQSourceWebhook, "notify", "", d.Payload, origin, errorMsg,
+		platform.ClassificationTerminal, firstFailedAt, lastFailedAt, traceID, spanID,
+	)
+	
+	merchantsPool := r.pools.MerchantsPool()
+	if merchantsPool == nil {
+		return platform.ErrMerchantsPoolNotInitialized
+	}
+
+	if err := platform.WriteDLQEntryWithRetry(ctx, r.logger, merchantsPool, entry, r.dlqRetryCfg, platform.ServiceNameWebhookWorker); err != nil {
 		return err
 	}
 
@@ -297,23 +314,21 @@ func extractTraceAndSpanID(ctx context.Context) (string, string) {
 	return "", ""
 }
 
-func (r *Repository) RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error {
-	pool := r.pools.MerchantsPool() // Use global DB pool
+func (r *Repository) RouteToGlobalDLQ(ctx context.Context, payload []byte, topic string, key string, errorMsg string) error {
+	pool := r.pools.MerchantsPool() // global DB pool (webhook deliveries are global)
 
 	traceID, spanID := extractTraceAndSpanID(ctx)
+	now := time.Now()
 
-	_, err := pool.Exec(ctx, `
-		INSERT INTO dlq_entries (
-			id, source, original_payload, error_message, error_classification, 
-			attempt_count, first_failed_at, last_failed_at, status, trace_id, span_id
-		) VALUES (
-			gen_random_uuid()::text, $1, $2, $3, $4, 
-			$5, NOW(), NOW(), $6, NULLIF($7, ''), NULLIF($8, '')
-		)
-	`, domain.EventSourceWebhook, payload, errorMsg, string(platform.ClassificationTerminal), 1, domain.StatusOpen, traceID, spanID)
+	entry := platform.NewDLQEntry(
+		platform.DLQSourceWebhook, topic, key, payload,
+		platform.DLQEntryOrigin(payload, topic, key), // stable: envelope event_id, else topic|key
+		errorMsg,
+		platform.ClassificationTerminal, now, now, traceID, spanID,
+	)
 
-	if err == nil {
-		platform.RecordDLQIngestion(ctx, platform.ServiceNameWebhookWorker)
-	}
-	return err
+	// Retry the DLQ write with the per-service budget. On exhaustion the error
+	// is propagated so the caller does NOT ack the source message (no data loss);
+	// ExecuteWithJitter only retries Transient/Infrastructure and honors ctx.
+	return platform.WriteDLQEntryWithRetry(ctx, r.logger, pool, entry, r.dlqRetryCfg, platform.ServiceNameWebhookWorker)
 }

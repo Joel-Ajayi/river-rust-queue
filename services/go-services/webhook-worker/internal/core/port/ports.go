@@ -21,13 +21,13 @@ type Repository interface {
 	ScheduleRetry(ctx context.Context, shardID string, delivery *domain.WebhookDelivery, failEventPayload []byte, eventID string) error
 	FetchPendingRetries(ctx context.Context, shardID string, limit int) ([]*domain.WebhookDelivery, error)
 	GetAvailableShardIDs() []string
-	RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error
+	RouteToGlobalDLQ(ctx context.Context, payload []byte, topic string, key string, errorMsg string) error
 }
 
 type WebhookApp interface {
-	HandleMessage(ctx context.Context, merchantID string, payload []byte) error
+	HandleMessage(ctx context.Context, merchantID string, topic string, key string, payload []byte) error
 	RetryScheduler(ctx context.Context) error
-	RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error
+	RouteToGlobalDLQ(ctx context.Context, payload []byte, topic string, key string, errorMsg string) error
 }
 
 type HTTPClient interface {

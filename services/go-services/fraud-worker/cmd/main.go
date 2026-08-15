@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -60,7 +61,9 @@ func main() {
 
 	walletRepo := observability.NewWalletRepositoryMetrics(resilience.NewWalletRepositoryResilience(postgres.NewWalletRepository(pools, logger), cbs))
 	merchantDir := observability.NewMerchantDirectoryMetrics(resilience.NewMerchantDirectoryResilience(postgres.NewMerchantDirectory(pools, logger), cbs))
-	dlqStore := observability.NewDLQStoreMetrics(resilience.NewDLQStoreResilience(postgres.NewDLQStore(pools, logger), cbs))
+	dlqRetryCfg := platform.DLQRetryConfig(*cfg.Capacity)
+	dlqStore := observability.NewDLQStoreMetrics(resilience.NewDLQStoreResilience(
+		postgres.NewDLQStore(pools, logger, dlqRetryCfg, platform.ServiceNameFraudWorker), cbs))
 
 	redisBreaker := platform.NewRedisCircuitBreaker(
 		platform.CBNameRedis,
@@ -75,15 +78,15 @@ func main() {
 		logger,
 	)
 	redisStore := observability.NewRedisStoreMetrics(resilience.NewRedisStoreResilience(redis.NewRedisStore(redisClient), redisBreaker))
-
 	velocityThreshold := int(cfg.Capacity.VelocityThreshold)
+	velocityWindowMs := cfg.Capacity.VelocityWindowMs
 
 	rules := []domain.VelocityRule{
 		{
 			Name:      domain.DefaultVelocityRuleName,
-			WindowMs:  domain.DefaultVelocityThreshold,
+			WindowMs:  velocityWindowMs,
 			Threshold: velocityThreshold,
-			Reason:    domain.DefaultVelocityReason,
+			Reason:    fmt.Sprintf("more than %d transfers from a wallet within %dms", velocityThreshold, velocityWindowMs),
 		},
 	}
 

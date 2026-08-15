@@ -74,10 +74,10 @@ func (r *repositoryResilience) GetAvailableShardIDs() []string {
 	return r.next.GetAvailableShardIDs()
 }
 
-func (r *repositoryResilience) RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error {
+func (r *repositoryResilience) RouteToGlobalDLQ(ctx context.Context, payload []byte, topic string, key string, errorMsg string) error {
 	// Write to global DLQ using the merchants circuit breaker
 	_, err := r.cbs.Merchants().Execute(func() (interface{}, error) {
-		return nil, r.next.RouteToGlobalDLQ(ctx, payload, errorMsg)
+		return nil, r.next.RouteToGlobalDLQ(ctx, payload, topic, key, errorMsg)
 	})
 	return err
 }

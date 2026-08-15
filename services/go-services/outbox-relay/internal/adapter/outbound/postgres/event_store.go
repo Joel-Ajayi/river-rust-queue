@@ -5,31 +5,33 @@ import (
 	"errors"
 	"time"
 
-	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/port"
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 )
 
 type EventStore struct {
-	pools *platform.ShardPools
+	pools       *platform.ShardPools
+	logger      *zap.Logger
+	dlqRetryCfg platform.RetryConfig
+	component   string
 }
 
 var _ port.EventStore = (*EventStore)(nil)
 
-func NewEventStore(pools *platform.ShardPools, _ *zap.Logger) *EventStore {
+func NewEventStore(pools *platform.ShardPools, logger *zap.Logger, dlqRetryCfg platform.RetryConfig, component string) *EventStore {
 	return &EventStore{
-		pools: pools,
+		pools:       pools,
+		logger:      logger,
+		dlqRetryCfg: dlqRetryCfg,
+		component:   component,
 	}
 }
 
-// ProcessUnpublishedEvents processes unpublished events with At-Least-Once Delivery pattern
-// 1. Get unpublished events and lock rows with "for update skip locked"
-// 2. Publish events
-// 3. Mark as published
+// ProcessUnpublishedEvents publishes unpublished events with At-Least-Once
+// delivery: lock rows (FOR UPDATE SKIP LOCKED), publish, then mark published.
 func (e *EventStore) ProcessUnpublishedEvents(ctx context.Context, shardID string, limit int, publisher func(ctx context.Context, events []domain.Event) error) error {
 	pool, err := e.pools.ShardPool(shardID)
 	if err != nil {
@@ -122,33 +124,29 @@ func (e *EventStore) GetOldestUnpublishedEventAge(ctx context.Context, shardID s
 	return time.Since(occurredAt), nil
 }
 
-func (e *EventStore) RouteToDLQ(ctx context.Context, shardID string, event domain.Event, errorMsg string) error {
-	pool, err := e.pools.ShardPool(shardID)
-	if err != nil {
-		return err
+// RouteToDLQ writes an un-publishable event to the global merchants DLQ.
+func (e *EventStore) RouteToDLQ(ctx context.Context, event domain.Event, errorMsg string) error {
+	pool := e.pools.MerchantsPool()
+	if pool == nil {
+		return platform.ErrMerchantsPoolNotInitialized
 	}
 
 	var traceID, spanID string
-	var envelope eventsv1.EventEnvelope
-	if err := proto.Unmarshal(event.Payload, &envelope); err == nil && envelope.Traceparent != "" {
-		traceID, spanID = platform.ExtractTraceFromParentString(envelope.Traceparent)
+	if env, err := platform.UnmarshalEnvelope(event.Payload); err == nil && env.Traceparent != "" {
+		traceID, spanID = platform.ExtractTraceFromParentString(env.Traceparent)
 	}
 
-	_, err = pool.Exec(ctx, `
-		INSERT INTO dlq_entries (id, source, original_payload, error_message, error_classification, attempt_count, first_failed_at, last_failed_at, status, created_at, trace_id, span_id)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), $7, NOW(), NULLIF($8, ''), NULLIF($9, ''))
-		ON CONFLICT (id) DO UPDATE SET
-			error_message = EXCLUDED.error_message,
-			error_classification = EXCLUDED.error_classification,
-			attempt_count = EXCLUDED.attempt_count + 1,
-			last_failed_at = EXCLUDED.last_failed_at,
-			status = EXCLUDED.status
-	`, event.ID, platform.ServiceNameOutboxRelay, event.Payload, errorMsg, string(platform.ClassificationPoison), 0, platform.DLQStatusOpen, traceID, spanID)
+	now := time.Now()
+	entry := platform.NewDLQEntry(
+		platform.ServiceNameOutboxRelay, event.PublishTopic, domain.DeriveKafkaKey(event), event.Payload,
+		event.ID, // deterministic origin: stable envelope event_id -> idempotent upsert across retries
+		errorMsg,
+		platform.ClassificationPoison, now, now, traceID, spanID,
+	)
 
-	if err != nil {
+	if err := platform.WriteDLQEntryWithRetry(ctx, e.logger, pool, entry, e.dlqRetryCfg, e.component); err != nil {
 		return err
 	}
 
-	platform.RecordDLQIngestion(ctx, platform.ServiceNameOutboxRelay)
 	return nil
 }

@@ -35,6 +35,6 @@ func (c *eventStoreCB) GetOldestUnpublishedEventAge(ctx context.Context, shardID
 	return c.next.GetOldestUnpublishedEventAge(ctx, shardID)
 }
 
-func (c *eventStoreCB) RouteToDLQ(ctx context.Context, shardID string, event domain.Event, reason string) error {
-	return c.next.RouteToDLQ(ctx, shardID, event, reason)
+func (c *eventStoreCB) RouteToDLQ(ctx context.Context, event domain.Event, reason string) error {
+	return c.next.RouteToDLQ(ctx, event, reason)
 }

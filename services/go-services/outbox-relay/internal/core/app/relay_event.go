@@ -2,14 +2,11 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
-	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 )
 
 // processEvents runs the full batch pipeline: validate, group by key, fan-out sequentially per key, collect results.
@@ -22,7 +19,7 @@ func (s *RelayService) processEvents(ctx context.Context, events []domain.Event)
 			platform.LoggerWithTrace(ctx, s.log).Error(platform.LogEventPanicRecoveredDLQ, zap.Any(platform.LogFieldPanic, r))
 			var dlqFailed bool
 			for _, e := range events {
-				if dlqErr := s.store.RouteToDLQ(ctx, shardID, e, fmt.Sprintf("%v: %v", domain.ReasonPanic, r)); dlqErr != nil {
+				if dlqErr := s.store.RouteToDLQ(ctx, e, fmt.Sprintf("%v: %v", domain.ReasonPanic, r)); dlqErr != nil {
 					s.log.Error("Failed to write to DLQ during panic recovery", zap.Error(dlqErr))
 					dlqFailed = true
 				}
@@ -69,15 +66,13 @@ func (s *RelayService) processEvents(ctx context.Context, events []domain.Event)
 
 // validateEvent checks payload integrity; returns false to route to DLQ.
 func (s *RelayService) validateEvent(ctx context.Context, shardID string, e domain.Event) (bool, error) {
-	if !json.Valid(e.Payload) {
-		return false, s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonCorruptedPayload)
-	}
 	if len(e.Payload) > s.maxPayloadSize {
-		return false, s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonMessageTooLarge)
+		return false, s.store.RouteToDLQ(ctx, e, domain.ReasonMessageTooLarge)
 	}
-	var envelope eventsv1.EventEnvelope
-	if err := proto.Unmarshal(e.Payload, &envelope); err != nil {
-		return false, s.store.RouteToDLQ(ctx, shardID, e, domain.ReasonInvalidSchema)
+	// Accept both canonical JSON (protojson) and legacy binary protobuf
+	// payloads. A payload that decodes under neither encoding is unroutable.
+	if _, err := platform.UnmarshalEnvelope(e.Payload); err != nil {
+		return false, s.store.RouteToDLQ(ctx, e, domain.ReasonInvalidSchema)
 	}
 	return true, nil
 }

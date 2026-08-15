@@ -71,8 +71,8 @@ func (r *repositoryMetrics) GetAvailableShardIDs() []string {
 	return r.next.GetAvailableShardIDs()
 }
 
-func (m *repositoryMetrics) RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error {
-	err := m.next.RouteToGlobalDLQ(ctx, payload, errorMsg)
+func (m *repositoryMetrics) RouteToGlobalDLQ(ctx context.Context, payload []byte, topic string, key string, errorMsg string) error {
+	err := m.next.RouteToGlobalDLQ(ctx, payload, topic, key, errorMsg)
 	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
 		platform.RecordInfrastructureError(ctx, platform.ComponentDLQStore)
 	}
@@ -89,8 +89,8 @@ func NewWebhookAppMetrics(next port.WebhookApp) port.WebhookApp {
 	return &webhookAppMetrics{next: next}
 }
 
-func (m *webhookAppMetrics) HandleMessage(ctx context.Context, merchantID string, payload []byte) error {
-	err := m.next.HandleMessage(ctx, merchantID, payload)
+func (m *webhookAppMetrics) HandleMessage(ctx context.Context, merchantID string, topic string, key string, payload []byte) error {
+	err := m.next.HandleMessage(ctx, merchantID, topic, key, payload)
 	if err != nil && platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationInfrastructure {
 		platform.RecordInfrastructureError(ctx, platform.ComponentWebhookHandler)
 	}
@@ -101,6 +101,6 @@ func (w *webhookAppMetrics) RetryScheduler(ctx context.Context) error {
 	return w.next.RetryScheduler(ctx)
 }
 
-func (w *webhookAppMetrics) RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error {
-	return w.next.RouteToGlobalDLQ(ctx, payload, errorMsg)
+func (w *webhookAppMetrics) RouteToGlobalDLQ(ctx context.Context, payload []byte, topic string, key string, errorMsg string) error {
+	return w.next.RouteToGlobalDLQ(ctx, payload, topic, key, errorMsg)
 }

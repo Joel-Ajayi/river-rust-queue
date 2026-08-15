@@ -60,7 +60,8 @@ func main() {
 	)
 
 	// 2. Adapters (Outbound)
-	repo := postgres.NewRepository(pools)
+	dlqRetryCfg := platform.DLQRetryConfig(*cfg.Capacity)
+	repo := postgres.NewRepository(pools, logger, dlqRetryCfg)
 	decoratedRepo := observability.NewRepositoryMetrics(resilience.NewRepositoryResilience(repo, cbs))
 
 	httpAdapter := adapterHttp.NewWebhookClient(cfg)

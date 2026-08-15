@@ -16,7 +16,6 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 )
 
 func newMockBreakerRegistry() *resilience.BreakerRegistry {
@@ -87,8 +86,8 @@ func (m *MockRepository) GetAvailableShardIDs() []string {
 	return args.Get(0).([]string)
 }
 
-func (m *MockRepository) RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error {
-	args := m.Called(ctx, payload, errorMsg)
+func (m *MockRepository) RouteToGlobalDLQ(ctx context.Context, payload []byte, topic string, key string, errorMsg string) error {
+	args := m.Called(ctx, payload, topic, key, errorMsg)
 	return args.Error(0)
 }
 
@@ -101,7 +100,7 @@ func (m *MockHTTPClient) Post(ctx context.Context, merchantID string, url string
 
 func makeTestPayload(eventID string) []byte {
 	env := &eventsv1.EventEnvelope{EventId: eventID}
-	bytes, _ := proto.Marshal(env)
+	bytes, _ := platform.MarshalEnvelope(env)
 	return bytes
 }
 
@@ -122,9 +121,9 @@ func TestWebhookService_HandleMessage_UnmarshalError(t *testing.T) {
 	mockRepo := new(MockRepository)
 	svc := app.NewWebhookService(mockRepo, new(MockHTTPClient), zap.NewNop(), testWebhookConfig())
 
-	mockRepo.On("RouteToGlobalDLQ", mock.Anything, []byte("{invalid json}"), mock.Anything).Return(nil)
+	mockRepo.On("RouteToGlobalDLQ", mock.Anything, []byte("{invalid json}"), "notify", "merch_1", mock.Anything).Return(nil)
 
-	err := svc.HandleMessage(context.Background(), "merch_1", []byte("{invalid json}"))
+	err := svc.HandleMessage(context.Background(), "merch_1", "notify", "merch_1", []byte("{invalid json}"))
 
 	require.NoError(t, err)
 	mockRepo.AssertExpectations(t)
@@ -139,9 +138,9 @@ func TestWebhookService_HandleMessage_MerchantNotFoundRoutesToGlobalDLQ(t *testi
 	mockRepo.On("GetMerchantConfig", mock.Anything, "merch_1").Return((*domain.Merchant)(nil), nil)
 
 	// 2. Mock: RouteToGlobalDLQ should be called
-	mockRepo.On("RouteToGlobalDLQ", mock.Anything, payload, domain.ErrorMerchantLookupFailed).Return(nil)
+	mockRepo.On("RouteToGlobalDLQ", mock.Anything, payload, "notify", "merch_1", domain.ErrorMerchantLookupFailed).Return(nil)
 
-	err := svc.HandleMessage(context.Background(), "merch_1", payload)
+	err := svc.HandleMessage(context.Background(), "merch_1", "notify", "merch_1", payload)
 
 	require.NoError(t, err) // Returns nil to commit offset
 	mockRepo.AssertExpectations(t)
@@ -158,9 +157,9 @@ func TestWebhookService_HandleMessage_InactiveMerchantRoutesToDLQ(t *testing.T) 
 		Status: domain.StatusFrozen,
 	}, nil)
 
-	mockRepo.On("RouteToGlobalDLQ", mock.Anything, payload, domain.ErrorMerchantInactive).Return(nil)
+	mockRepo.On("RouteToGlobalDLQ", mock.Anything, payload, "notify", "merch_1", domain.ErrorMerchantInactive).Return(nil)
 
-	err := svc.HandleMessage(context.Background(), "merch_1", payload)
+	err := svc.HandleMessage(context.Background(), "merch_1", "notify", "merch_1", payload)
 
 	require.NoError(t, err) // Returns nil to commit offset
 	mockRepo.AssertExpectations(t)
@@ -190,7 +189,7 @@ func TestWebhookService_HandleMessage_DeliverySuccess(t *testing.T) {
 	mockClient.On("Post", mock.Anything, "merch_1", "https://example.com/hook", mock.Anything, mock.Anything, mock.Anything, "ev_1", 1).Return(200, nil)
 	mockRepo.On("CompleteDelivery", mock.Anything, "shard_a", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
-	err := svc.HandleMessage(context.Background(), "merch_1", payload)
+	err := svc.HandleMessage(context.Background(), "merch_1", "notify", "merch_1", payload)
 
 	require.NoError(t, err)
 
@@ -223,7 +222,7 @@ func TestWebhookService_HandleMessage_DeliveryFailureSchedulesRetry(t *testing.T
 	mockClient.On("Post", mock.Anything, "merch_1", "https://example.com/hook", mock.Anything, mock.Anything, mock.Anything, "ev_1", 1).Return(0, &platform.HttpError{Status: 502, Err: errors.New("bad gateway")})
 	mockRepo.On("ScheduleRetry", mock.Anything, "shard_a", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
-	err := svc.HandleMessage(context.Background(), "merch_1", payload)
+	err := svc.HandleMessage(context.Background(), "merch_1", "notify", "merch_1", payload)
 
 	require.NoError(t, err)
 	time.Sleep(50 * time.Millisecond)
@@ -259,7 +258,7 @@ func TestWebhookService_HandleMessage_Concurrent(t *testing.T) {
 
 	for i := 0; i < goroutines; i++ {
 		go func() {
-			errChan <- svc.HandleMessage(context.Background(), "merch_1", payload)
+			errChan <- svc.HandleMessage(context.Background(), "merch_1", "notify", "merch_1", payload)
 		}()
 	}
 

@@ -12,7 +12,6 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/ledger-worker/internal/core/port"
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -231,8 +230,7 @@ func (s *CrossShardStore) DebitToClearingAccount(ctx context.Context, srcShard, 
 			},
 		},
 	}
-	marshaler := protojson.MarshalOptions{EmitUnpopulated: true}
-	payloadBytes, err := marshaler.Marshal(envelope)
+	payloadBytes, err := platform.MarshalEnvelope(envelope)
 	if err != nil {
 		return err
 	}
@@ -286,7 +284,7 @@ func (s *CrossShardStore) CreditFromClearingAccount(ctx context.Context, intent 
 				},
 			},
 		}
-		payloadBytes, err := protojson.MarshalOptions{EmitUnpopulated: true}.Marshal(envelope)
+		payloadBytes, err := platform.MarshalEnvelope(envelope)
 		if err != nil {
 			return err
 		}
@@ -455,8 +453,7 @@ func (s *CrossShardStore) CreditFromClearingAccount(ctx context.Context, intent 
 			},
 		},
 	}
-	marshaler := protojson.MarshalOptions{EmitUnpopulated: true}
-	payloadBytes, err := marshaler.Marshal(envelope)
+	payloadBytes, err := platform.MarshalEnvelope(envelope)
 	if err != nil {
 		return err
 	}
@@ -547,8 +544,7 @@ func (s *CrossShardStore) SettleCrossShardTransfer(ctx context.Context, srcShard
 			},
 		},
 	}
-	marshaler := protojson.MarshalOptions{EmitUnpopulated: true}
-	payloadBytes, err := marshaler.Marshal(envelope)
+	payloadBytes, err := platform.MarshalEnvelope(envelope)
 	if err != nil {
 		return 0, "", err
 	}
@@ -729,8 +725,7 @@ func (s *CrossShardStore) ReverseCrossShardTransfer(ctx context.Context, srcShar
 			},
 		},
 	}
-	marshaler := protojson.MarshalOptions{EmitUnpopulated: true}
-	payloadBytes, err := marshaler.Marshal(envelope)
+	payloadBytes, err := platform.MarshalEnvelope(envelope)
 	if err != nil {
 		return err
 	}

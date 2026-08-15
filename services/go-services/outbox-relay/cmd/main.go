@@ -57,7 +57,8 @@ func main() {
 	)
 
 	// --- Driven adapters (outbound base) ---
-	var baseEventStore port.EventStore = postgres.NewEventStore(pools, logger)
+	dlqRetryCfg := platform.DLQRetryConfig(*cfg.Capacity)
+	var baseEventStore port.EventStore = postgres.NewEventStore(pools, logger, dlqRetryCfg, platform.ServiceNameOutboxRelay)
 	baseKafkaPublisher := kafka.NewEventPublisher(kafkaWriter)
 	publishRetryCfg := platform.RetryConfig{
 		MaxRetries: cfg.Capacity.MaxRetries,

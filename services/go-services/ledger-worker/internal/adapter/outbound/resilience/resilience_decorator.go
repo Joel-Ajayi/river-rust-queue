@@ -106,9 +106,9 @@ func NewDLQStoreResilience(next port.DLQStore, cbs *platform.DBCircuitBreakers) 
 	return &dlqStoreResilience{next: next, cbs: cbs}
 }
 
-func (d *dlqStoreResilience) WriteDLQEntry(ctx context.Context, shardID string, entry domain.DLQEntry) error {
-	_, err := d.cbs.ShardRW(shardID).Execute(func() (interface{}, error) {
-		return nil, d.next.WriteDLQEntry(ctx, shardID, entry)
+func (d *dlqStoreResilience) WriteDLQEntry(ctx context.Context, entry *eventsv1.DLQEntry) error {
+	_, err := d.cbs.Merchants().Execute(func() (interface{}, error) {
+		return nil, d.next.WriteDLQEntry(ctx, entry)
 	})
 	return err
 }

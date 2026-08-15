@@ -23,12 +23,12 @@ func NewWebhookAppResilience(next port.WebhookApp, retryCfg platform.RetryConfig
 	}
 }
 
-func (a *webhookAppResilience) HandleMessage(ctx context.Context, merchantID string, payload []byte) error {
-	return a.next.HandleMessage(ctx, merchantID, payload)
+func (a *webhookAppResilience) HandleMessage(ctx context.Context, merchantID string, topic string, key string, payload []byte) error {
+	return a.next.HandleMessage(ctx, merchantID, topic, key, payload)
 }
 
-func (a *webhookAppResilience) RouteToGlobalDLQ(ctx context.Context, payload []byte, errorMsg string) error {
-	return a.next.RouteToGlobalDLQ(ctx, payload, errorMsg)
+func (a *webhookAppResilience) RouteToGlobalDLQ(ctx context.Context, payload []byte, topic string, key string, errorMsg string) error {
+	return a.next.RouteToGlobalDLQ(ctx, payload, topic, key, errorMsg)
 }
 
 func (a *webhookAppResilience) RetryScheduler(ctx context.Context) error {
