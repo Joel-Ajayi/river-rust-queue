@@ -83,7 +83,7 @@ RRQ uses a pull-based declarative GitOps pipeline managed by **Argo CD** via the
 #### Step 1: Apply Root App-of-Apps Manifest
 Apply the root Argo CD Application to your production Kubernetes cluster:
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/Joel-Ajayi/rrq-gitops/main/apps/root-app.yaml
+kubectl apply -f https://raw.githubusercontent.com/Joel-Ajayi/rrq-gitops/main/bootstrap/root-app.yaml
 ```
 
 #### Step 2: Configure Your Production Domain & Ingress Hostnames
