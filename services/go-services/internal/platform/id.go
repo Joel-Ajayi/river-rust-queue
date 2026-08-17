@@ -62,11 +62,6 @@ func NewMerchantID() string {
 	return fmt.Sprintf("%s_%s", AggregateTypeMerchant, id.String())
 }
 
-// NewDeliveryID generates a prefixed ULID for Webhook Deliveries.
-func NewDeliveryID() string {
-	return fmt.Sprintf("%s_%s", AggregateTypeDelivery, generateULID())
-}
-
 // NewDeterministicDeliveryID generates a UUIDv5 based on the Event ID and Merchant ID to ensure idempotency.
 func NewDeterministicDeliveryID(eventID, merchantID string) string {
 	// Use a fixed namespace for webhooks

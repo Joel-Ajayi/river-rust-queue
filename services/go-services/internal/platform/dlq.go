@@ -78,8 +78,7 @@ func timestampPtr(t time.Time) *timestamppb.Timestamp {
 	return timestamppb.New(t)
 }
 
-// hashDLQID produces a compact, deterministic id from message identity. It is
-// derived, never random: redelivered messages upsert (ON CONFLICT).
+// hashDLQID produces a compact, deterministic id from message identity.
 func hashDLQID(s string) string {
 	h := sha1.Sum([]byte(s))
 	return DLQIDPrefix + hex.EncodeToString(h[:8])

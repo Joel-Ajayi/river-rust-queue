@@ -185,6 +185,21 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 	return sp, nil
 }
 
+// NewTestShardPools constructs a ShardPools instance from explicit test pools.
+func NewTestShardPools(merchants, shardA, shardB *pgxpool.Pool) *ShardPools {
+	shards := map[string]*pgxpool.Pool{
+		"shard-a": shardA,
+		"shard-b": shardB,
+	}
+	return &ShardPools{
+		merchants:   merchants,
+		roMerchants: merchants,
+		shards:      shards,
+		roShards:    shards,
+		hashRing:    NewHashRing([]string{"shard-a", "shard-b"}, 100),
+	}
+}
+
 func (sp *ShardPools) MerchantsPool() *pgxpool.Pool   { return sp.merchants }
 func (sp *ShardPools) MerchantsPoolRO() *pgxpool.Pool { return sp.roMerchants }
 func (sp *ShardPools) HashRing() *HashRing            { return sp.hashRing }

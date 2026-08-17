@@ -66,10 +66,6 @@ func (s *Server) withBulkhead(next http.Handler) http.Handler {
 		ctx := r.Context()
 		if !s.bulkhead.TryAcquire(1) {
 			platform.RecordBulkheadRejection(ctx)
-			s.log.Warn(platform.LogEventBulkheadRejected,
-				zap.String(platform.LogFieldMethod, r.Method),
-				zap.String(platform.LogFieldPath, r.URL.Path),
-			)
 			writeError(w, platform.ErrServiceUnavailable(domain.ErrMsgBulkheadExhausted))
 			return
 		}

@@ -35,12 +35,7 @@ type Config struct {
 	HTTPPort    int
 	MetricsPort int
 
-	LogLevel        string
-	TraceSampleRate float64
-
-	KubernetesNamespace string
-
-	OtelExporterEndpoint string
+	LogLevel string
 
 	PlatformAdminKey string
 
@@ -50,17 +45,17 @@ type Config struct {
 
 // CapacityConfig holds all variables derived by the SLO capacity engine.
 type CapacityConfig struct {
-	RequestTimeoutMs    int
-	ServerTimeoutMs     int
-	ShutdownTimeoutMs   int
-	ServerIdleTimeoutMs int
-	CBErrorThreshold    float64
-	CBMinRequests       int
-	CBTimeoutMs         int
-	CBIntervalMs        int
-	MaxRetries          int
-	BackoffBaseMs       int
-	BackoffCapMs        int
+	RequestTimeoutMs     int
+	ServerTimeoutMs      int
+	ShutdownTimeoutMs    int
+	ServerIdleTimeoutMs  int
+	CBErrorThreshold     float64
+	CBMinRequests        int
+	CBTimeoutMs          int
+	CBIntervalMs         int
+	MaxRetries           int
+	BackoffBaseMs        int
+	BackoffCapMs         int
 	RetryBudgetMinTokens int
 	RetryBudgetMaxTokens int
 	RetryBudgetFraction  float64
@@ -185,12 +180,7 @@ func LoadConfig(servicePrefix string) *Config {
 		HTTPPort:    envOrDefaultInt("HTTP_PORT", 8080),
 		MetricsPort: envOrDefaultInt("METRICS_PORT", 9090),
 
-		LogLevel:        env("LOG_LEVEL", "info"),
-		TraceSampleRate: envOrDefaultFloat("TRACE_SAMPLE_RATE", 1.0),
-
-		KubernetesNamespace: env("KUBERNETES_NAMESPACE", "rrq"),
-
-		OtelExporterEndpoint: env("OTEL_EXPORTER_OTLP_ENDPOINT", "agent-exporter.observability.svc.cluster.local:4317"),
+		LogLevel: env("LOG_LEVEL", "info"),
 
 		Capacity:       LoadCapacityConfig(servicePrefix),
 		GlobalCapacity: LoadGlobalCapacityConfig(),
