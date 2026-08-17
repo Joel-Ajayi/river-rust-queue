@@ -78,8 +78,17 @@ build-go: ## Build Go services
 	$(MAKE) -C services/go-services build
 
 .PHONY: test-go
-test-go: ## Run Go tests
+test-go: ## Run Go fast tests (in-memory mode)
 	$(MAKE) -C services/go-services test
+
+.PHONY: test-containers
+test-containers: ## Run Go storage container tests (persistent Docker containers)
+	cd services/go-services && go test -v -tags=integration ./...
+
+.PHONY: test-clean
+test-clean: ## Kill and remove all persistent test containers
+	@docker rm -f $$(docker ps -q --filter label=org.testcontainers=true) 2>/dev/null || true
+	@echo "Test containers cleaned up."
 
 .PHONY: lint-go
 lint-go: ## Go lint + proto lint

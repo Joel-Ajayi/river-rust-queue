@@ -14,6 +14,7 @@ RRQ is designed as a **closed-loop ledger core**: money moves exclusively betwee
 
 - [System Architecture Specification](docs/ARCHITECTURE.md) — Comprehensive component-by-component architectural reference.
 - [System Correctness Invariants (I1–I9)](docs/INVARIANTS.md) — Formal guarantees enforced in code and database constraints.
+- [Testing Strategy & Architecture](docs/TESTING.md) — Multi-tier test suite breakdown, API mock integration, and execution commands.
 - [Operational Runbooks & Incident Response](docs/RUNBOOKS.md) — Step-by-step procedures for on-call SREs and administrators.
 - [GitOps & Infrastructure Repository](https://github.com/Joel-Ajayi/rrq-gitops) — Declarative Kubernetes manifests, operators, and capacity engine.
 
