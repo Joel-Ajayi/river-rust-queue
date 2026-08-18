@@ -120,6 +120,8 @@ jobs:
           export TAG="${{ github.sha }}"
           cd rrq-gitops/overlays/prod/workloads
           yq -i '.images[].newTag = strenv(TAG)' kustomization.yaml
+          cd ../datastores
+          yq -i '.images[].newTag = strenv(TAG)' kustomization.yaml
 
       - name: Commit and Push
         working-directory: rrq-gitops
