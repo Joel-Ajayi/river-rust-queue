@@ -6,9 +6,7 @@
 SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 
-# ---------------------------------------------------------------------------
 # Configuration
-# ---------------------------------------------------------------------------
 BIN            ?= $(HOME)/.local/bin
 GOBIN          := $(shell go env GOPATH 2>/dev/null)/bin
 
@@ -18,9 +16,7 @@ MIGRATE_VERSION            ?= v4.18.2
 PROTOC_GEN_GO_VERSION      ?= v1.36.5
 PROTOC_GEN_GO_GRPC_VERSION ?= v1.5.1
 
-# ---------------------------------------------------------------------------
 # Help
-# ---------------------------------------------------------------------------
 .PHONY: help
 help: ## List available targets
 	@echo "RRQ — make targets:"
@@ -34,9 +30,7 @@ help: ## List available targets
 path: ## Print PATH additions for installed tools
 	@echo 'export PATH="$(GOBIN):$(BIN):$$PATH"'
 
-# ===========================================================================
 # Tool installation
-# ===========================================================================
 .PHONY: tools
 tools: $(BIN) tools-go ## Install development CLI tools
 	@echo "All tools installed. Run: $$(make -s path)"
@@ -59,9 +53,7 @@ tools-check: ## Report which tools are installed
 	@for t in go buf migrate protoc-gen-go; do \
 	  printf "  %-16s %s\n" "$$t" "$$(command -v $$t || echo MISSING)"; done
 
-# ===========================================================================
 # Development
-# ===========================================================================
 .PHONY: dev
 dev: ## Run local development with hot-reloading (Skaffold, no cleanup on exit)
 	skaffold fix && skaffold run
@@ -70,9 +62,7 @@ dev: ## Run local development with hot-reloading (Skaffold, no cleanup on exit)
 psql: ## Open psql against a shard (SHARD=shard-a|shard-b|merchants-db)
 	kubectl -n rrq exec -it $${SHARD:-shard-a}-1 -- psql -U postgres
 
-# ===========================================================================
 # Delegated targets — go-services/
-# ===========================================================================
 .PHONY: build-go
 build-go: ## Build Go services
 	$(MAKE) -C services/go-services build
@@ -98,9 +88,7 @@ lint-go: ## Go lint + proto lint
 fmt-go: ## Format Go code
 	$(MAKE) -C services/go-services fmt
 
-# ===========================================================================
 # Combined targets
-# ===========================================================================
 .PHONY: build
 build: build-go ## Build all services
 
@@ -114,9 +102,7 @@ lint: lint-go ## Lint all services
 .PHONY: fmt
 fmt: fmt-go ## Format all services
 
-# ===========================================================================
 # Delegated targets — proto/
-# ===========================================================================
 .PHONY: proto
 proto: ## Generate Go and Rust code from proto definitions
 	$(MAKE) -C api/proto generate
