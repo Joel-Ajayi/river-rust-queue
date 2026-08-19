@@ -34,7 +34,8 @@ jobs:
           cache-dependency-path: services/go-services/go.sum
       - uses: bufbuild/buf-setup-action@v1
       - name: buf generate
-        run: buf generate ../../api/proto
+        working-directory: api/proto
+        run: buf generate .
       - name: Unit tests
         run: make test-unit
 
@@ -52,7 +53,8 @@ jobs:
           cache: true
       - uses: bufbuild/buf-setup-action@v1
       - name: buf generate
-        run: buf generate ../../api/proto
+        working-directory: api/proto
+        run: buf generate .
       - name: Integration tests
         run: make test-integration
 
