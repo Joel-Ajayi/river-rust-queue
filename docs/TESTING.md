@@ -45,6 +45,7 @@ Developers and CI pipelines can choose between **two explicit execution modes**:
   * [ledger_container_test.go](../services/go-services/ledger-worker/internal/core/app/ledger_container_test.go) (PostgreSQL 16 Double-Entry & Sagas)
   * [webhook_container_test.go](../services/go-services/webhook-worker/internal/core/app/webhook_container_test.go) (PostgreSQL 16 & Echo HTTP Endpoint)
   * [fraud_container_test.go](../services/go-services/fraud-worker/internal/core/app/fraud_container_test.go) (Redis 7 Velocity Checks)
+  * [outbox_container_test.go](../services/go-services/outbox-relay/internal/core/app/outbox_container_test.go) (PostgreSQL 16 & Kafka Outbox Relay)
   * [testutil_sanity_test.go](../services/go-services/internal/testutil/testutil_sanity_test.go) (Cluster Setup & Seeds)
 * **Command to Run**:
   ```bash
@@ -53,6 +54,17 @@ Developers and CI pipelines can choose between **two explicit execution modes**:
 * **Command to Kill Persistent Containers**:
   ```bash
   make test-clean        # or: docker rm -f $(docker ps -q --filter label=org.testcontainers=true)
+  ```
+
+### Mode 3: Full End-to-End Pipeline Mode
+* **Goal**: Validate the entire data flow asynchronously across all microservices, ensuring Kafka topics, outbox events, background workers, and webhooks all integrate flawlessly.
+* **Architecture**: Compiles and launches all worker binaries simultaneously, connects them to real PostgreSQL, Kafka, and Redis containers, sets up an HTTP echo server for webhook delivery, and pushes real HTTP requests through the gateway.
+* **Container Test File**:
+  * [e2e_pipeline_test.go](../services/go-services/tests/e2e/e2e_pipeline_test.go)
+* **Command to Run**:
+  ```bash
+  cd services/go-services
+  go test -v -tags=integration -run=^TestFullPipelineE2E$ ./tests/e2e/...
   ```
 
 ---

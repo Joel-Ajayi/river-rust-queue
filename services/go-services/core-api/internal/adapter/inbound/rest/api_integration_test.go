@@ -239,3 +239,51 @@ func TestAPI_AdminDLQEndpoints(t *testing.T) {
 		t.Fatalf("expected 200 OK for admin DLQ list, got %d: %s", recAuth.Code, recAuth.Body.String())
 	}
 }
+
+func TestAPI_CreateMerchantEndpoint(t *testing.T) {
+	_, mux := setupTestServer()
+
+	body := bytes.NewBufferString(`{"name": "Test Merchant", "webhook_url": "https://example.com/webhook", "webhook_secret": "sec", "tier": "standard"}`)
+	req := httptest.NewRequest("POST", platform.APIMerchantsPath, body)
+	req.Header.Set("Content-Type", "application/json")
+	
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAPI_CreateWalletEndpoint(t *testing.T) {
+	_, mux := setupTestServer()
+	merchID := platform.NewMerchantID()
+
+	body := bytes.NewBufferString(`{"currency": "USD"}`)
+	req := httptest.NewRequest("POST", platform.APIWalletsPath, body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Merchant-ID", merchID)
+	
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAPI_GetBalanceEndpoint(t *testing.T) {
+	_, mux := setupTestServer()
+	merchID := platform.NewMerchantID()
+	walletID := platform.NewWalletID(merchID)
+
+	req := httptest.NewRequest("GET", platform.APIBalancesPath+"?wallet_id="+walletID, nil)
+	req.Header.Set("X-Merchant-ID", merchID)
+	
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

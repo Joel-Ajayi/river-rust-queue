@@ -132,6 +132,14 @@ func WriteDLQEntry(ctx context.Context, db DBExecer, entry *eventsv1.DLQEntry) e
 		return fmt.Errorf(DLQErrorPrefix + " entry Id is empty; caller must set a deterministic id before writing")
 	}
 
+	var firstFailedAt, lastFailedAt interface{}
+	if entry.FirstFailedAt != nil {
+		firstFailedAt = entry.FirstFailedAt.AsTime()
+	}
+	if entry.LastFailedAt != nil {
+		lastFailedAt = entry.LastFailedAt.AsTime()
+	}
+
 	_, err := db.Exec(ctx, `
 			INSERT INTO dlq_entries (
 				id, source, source_topic, original_key, original_payload,
@@ -155,8 +163,8 @@ func WriteDLQEntry(ctx context.Context, db DBExecer, entry *eventsv1.DLQEntry) e
 		entry.ErrorMessage,
 		ErrorClassificationText(entry.ErrorClassification),
 		entry.AttemptCount,
-		entry.FirstFailedAt,
-		entry.LastFailedAt,
+		firstFailedAt,
+		lastFailedAt,
 		DLQStatusText(entry.Status),
 		entry.TraceId,
 		entry.SpanId,

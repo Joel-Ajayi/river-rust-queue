@@ -10,14 +10,16 @@ import (
 )
 
 // NewRedisClient connects to the data Redis instance with optional password authentication.
-func NewRedisClient(ctx context.Context, addr string, password string, log *zap.Logger) (*redis.Client, error) {
-	client := redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: password,
+func NewRedisClient(ctx context.Context, masterName string, addr string, password string, log *zap.Logger) (redis.UniversalClient, error) {
+	client := redis.NewUniversalClient(&redis.UniversalOptions{
+		MasterName:       masterName,
+		Addrs:            []string{addr},
+		Password:         password,
+		SentinelPassword: password,
+
+		// Route read operations to the nearest/random replica pod
+		RouteByLatency: true,
 	})
-	// Manually trace every Redis command (eBPF auto-instrumentation does not
-	// cover go-redis). db.statement is intentionally DISABLED — the velocity
-	// Lua script embeds wallet/event identifiers that must not reach traces.
 	if err := redisotel.InstrumentTracing(client, redisotel.WithDBStatement(false)); err != nil {
 		return nil, fmt.Errorf("instrument redis tracing: %w", err)
 	}

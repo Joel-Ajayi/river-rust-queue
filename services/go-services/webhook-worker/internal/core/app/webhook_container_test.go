@@ -42,10 +42,10 @@ func TestWebhook_Container_HandleMessage_WithRealPostgresAndEchoEndpoint(t *test
 	}
 
 	logger, _ := zap.NewDevelopment()
-	repo := postgres.NewRepository(cluster.ShardPools, logger, platform.RetryConfig{MaxRetries: 3, InitialIntervalMs: 10, MaxIntervalMs: 100, BackoffFactor: 2.0})
+	repo := postgres.NewRepository(cluster.ShardPools, logger, platform.RetryConfig{MaxRetries: 3, BaseDelay: 10 * time.Millisecond, MaxDelay: 100 * time.Millisecond})
 
 	cfg := &platform.Config{
-		Capacity: platform.CapacityConfig{
+		Capacity: &platform.CapacityConfig{
 			HTTPTimeoutMs:               5000,
 			HTTPMaxIdleConns:            10,
 			HTTPMaxIdleConnsPerHost:     5,
@@ -91,7 +91,7 @@ func TestWebhook_Container_HandleMessage_WithRealPostgresAndEchoEndpoint(t *test
 	if err != nil {
 		t.Fatalf("failed to query webhook_deliveries in container postgres: %v", err)
 	}
-	if status != string(domain.DeliveryStatusSuccess) {
-		t.Fatalf("expected webhook delivery status 'success' in real Postgres container, got %s", status)
+	if status != string(domain.StatusDelivered) {
+		t.Fatalf("expected webhook delivery status 'delivered' in real Postgres container, got %s", status)
 	}
 }

@@ -38,7 +38,7 @@ func main() {
 	}
 	defer pools.Close()
 
-	redisClient, err := platform.NewRedisClient(ctx, cfg.RedisAddr(), cfg.RedisDataPassword, logger)
+	redisClient, err := platform.NewRedisClient(ctx, cfg.RedisDataMaster, cfg.RedisAddr(), cfg.RedisDataPassword, logger)
 	if err != nil {
 		logger.Panic(platform.LogEventRedisInitFailed, zap.Error(err))
 	}

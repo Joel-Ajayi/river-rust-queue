@@ -10,12 +10,12 @@ import (
 )
 
 type RedisStore struct {
-	client *redis.Client
+	client redis.UniversalClient
 }
 
 var _ port.RedisStore = (*RedisStore)(nil)
 
-func NewRedisStore(client *redis.Client) *RedisStore {
+func NewRedisStore(client redis.UniversalClient) *RedisStore {
 	return &RedisStore{client: client}
 }
 

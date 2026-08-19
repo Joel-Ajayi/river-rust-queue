@@ -11,7 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"crypto/ed25519"
+
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/adapter/outbound/postgres"
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/app"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/testutil"
 	"go.uber.org/zap"
@@ -25,27 +29,61 @@ func TestAPI_Container_CreateTransfer_WithRealPostgres(t *testing.T) {
 	systemWalletID := "merchant_00000000-0000-0000-0000-000000000001.00000000-0000-0000-0000-000000000000"
 
 	logger, _ := zap.NewDevelopment()
-	jobStore := postgres.NewJobStore(cluster.ShardPools, logger)
-	merchantRepo := postgres.NewMerchantRepository(cluster.MerchantsDB.Pool)
-	walletRepo := postgres.NewWalletRepository(cluster.ShardPools)
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	cfg := &platform.Config{
+		HTTPPort:       8080,
+		JWTSigningKeys: map[string]ed25519.PrivateKey{"key-1": priv},
+		JWTActiveKeyID: "key-1",
+		Capacity: &platform.CapacityConfig{
+			WorkerPoolSize:       10,
+			MaxRetries:           3,
+			BackoffBaseMs:        10,
+			BackoffCapMs:         100,
+			RetryBudgetMinTokens: 10,
+			RetryBudgetMaxTokens: 100,
+			RetryBudgetFraction:  0.1,
+			RequestTimeoutMs:     5000,
+			ServerTimeoutMs:      10000,
+			ServerIdleTimeoutMs:  60000,
+			JWTAccessHrs:         1,
+		},
+	}
+
+	jobStore := postgres.NewJobStore(cluster.ShardPools)
+	merchantRepo := postgres.NewMerchantDirectory(cluster.ShardPools)
+	walletRepo := postgres.NewWalletDirectory(cluster.ShardPools)
+
+	jobSvc := app.NewJobService(merchantRepo, jobStore)
+	merchantSvc := app.NewMerchantService(merchantRepo, cluster.ShardPools.HashRing())
+	walletSvc := app.NewWalletService(merchantRepo, walletRepo, walletRepo, jobStore, platform.NewJobID)
+	transferSvc := app.NewTransferService(merchantRepo, walletRepo, jobStore, platform.NewJobID)
+	dlqReplayer := postgres.NewDLQReplayer(cfg, cluster.ShardPools, logger)
+	adminSvc := app.NewAdminService(dlqReplayer)
 
 	server := NewServer(
+		cfg,
+		transferSvc,
+		jobSvc,
+		merchantSvc,
+		walletSvc,
+		adminSvc,
+		func(ctx context.Context) error { return nil },
 		logger,
-		jobStore,
-		merchantRepo,
-		walletRepo,
-		"http://localhost:8080",
-		15*time.Minute,
-		nil,
 	)
 
 	// Issue token for platform merchant
-	principal := platform.SecurityPrincipal{
-		MerchantID: platformMerchantID,
-		ShardID:    "shard-a",
-		Role:       "merchant",
+	now := time.Now()
+	claims := jwt.MapClaims{
+		"sub":  platformMerchantID,
+		"iss":  platform.ServiceNameCoreAPI,
+		"iat":  now.Unix(),
+		"exp":  now.Add(15 * time.Minute).Unix(),
+		"tier": platform.MerchantTierPremium,
 	}
-	token, err := server.tokenService.GenerateToken(principal, 15*time.Minute)
+	tokenObj := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
+	tokenObj.Header[platform.JWTHeaderKeyID] = "key-1"
+	token, err := tokenObj.SignedString(priv)
 	if err != nil {
 		t.Fatalf("failed to generate token for container test: %v", err)
 	}

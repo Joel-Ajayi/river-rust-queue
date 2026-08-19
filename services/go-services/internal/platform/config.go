@@ -21,19 +21,17 @@ type Config struct {
 	MerchantsDBURI string
 	ShardURIs      map[string]string
 
-	KafkaBrokers     []string
-	KafkaTopicJobs   string
-	KafkaTopicNotify string
+	KafkaBrokers []string
 
 	RedisDataHost     string
 	RedisDataPort     string
 	RedisDataPassword string
+	RedisDataMaster   string
 
 	JWTSigningKeys map[string]ed25519.PrivateKey
 	JWTActiveKeyID string
 
-	HTTPPort    int
-	MetricsPort int
+	HTTPPort int
 
 	LogLevel string
 
@@ -166,19 +164,17 @@ func LoadConfig(servicePrefix string) *Config {
 		MerchantsDBURI: os.Getenv("MERCHANTS_DB_URI"),
 		ShardURIs:      make(map[string]string),
 
-		KafkaBrokers:     strings.Split(env("KAFKA_BROKERS", "localhost:9092"), ","),
-		KafkaTopicJobs:   env("KAFKA_TOPIC_JOBS", TopicJobs),
-		KafkaTopicNotify: env("KAFKA_TOPIC_NOTIFY", TopicNotify),
+		KafkaBrokers: strings.Split(os.Getenv("KAFKA_BROKERS"), ","),
 
-		RedisDataHost:     env("REDIS_DATA_HOST", "localhost"),
-		RedisDataPort:     env("REDIS_DATA_PORT", "6379"),
-		RedisDataPassword: os.Getenv("REDIS_DATA_PASSWORD"),
+		RedisDataHost:     os.Getenv("REDIS_HOST"),
+		RedisDataPort:     os.Getenv("REDIS_PORT"),
+		RedisDataPassword: os.Getenv("REDIS_PASSWORD"),
+		RedisDataMaster:   os.Getenv("REDIS_MASTER_NAME"),
 
 		JWTSigningKeys: parseJWTKeys(os.Getenv("JWT_SIGNING_KEYS")),
-		JWTActiveKeyID: env("JWT_ACTIVE_KEY_ID", DefaultKeyID),
+		JWTActiveKeyID: os.Getenv("JWT_ACTIVE_KEY_ID"),
 
-		HTTPPort:    envOrDefaultInt("HTTP_PORT", 8080),
-		MetricsPort: envOrDefaultInt("METRICS_PORT", 9090),
+		HTTPPort: envOrDefaultInt("HTTP_PORT", 8080),
 
 		LogLevel: env("LOG_LEVEL", "info"),
 

@@ -29,6 +29,7 @@ func StartKafka(t *testing.T) (*tc_kafka.KafkaContainer, []string) {
 	kafkaOnce.Do(func() {
 		container, err := tc_kafka.Run(ctx,
 			"confluentinc/cp-kafka:7.5.0",
+			tc_kafka.WithClusterID("test-cluster"),
 		)
 		if err != nil {
 			kafkaInitError = fmt.Errorf("failed to start persistent kafka container: %w", err)
