@@ -7,12 +7,14 @@ on:
       - "services/go-services/**"
       - "api/proto/**"
       - "deploy/db/**"
+      - ".github/**"
   pull_request:
     branches: [main]
     paths:
       - "services/go-services/**"
       - "api/proto/**"
       - "deploy/db/**"
+      - ".github/**"
 
 permissions:
   contents: read
@@ -50,7 +52,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-          cache: true
+          cache-dependency-path: services/go-services/go.sum
       - uses: bufbuild/buf-setup-action@v1
       - name: buf generate
         working-directory: api/proto
@@ -63,12 +65,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: bufbuild/buf-setup-action@v1
       - name: buf lint
         run: buf lint api/proto
       - name: buf breaking
         if: github.event_name == 'pull_request'
-        run: buf breaking api/proto --against '.git#branch=main'
+        run: buf breaking api/proto --against '.git#branch=main,subdir=api/proto'
 
   # 2. RELEASE & PROMOTE (Runs ONLY on Main after tests pass)
   images:
