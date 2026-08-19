@@ -2,7 +2,6 @@
 PLAN.md
 archive/
 
-# Generated code
-services/go-services/internal/gen/proto/
+# Generated code (Go protos are committed so Docker image builds are deterministic)
 services/rust-services/proto/src/gen/
 q_decisions

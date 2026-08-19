@@ -1,6 +1,3 @@
-# Generated protobuf code
-internal/gen/
-
 # Binaries
 bin/
 *.exe
