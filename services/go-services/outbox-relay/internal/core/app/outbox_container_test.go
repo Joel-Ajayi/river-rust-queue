@@ -67,8 +67,8 @@ func TestOutboxRelay_Container_Publish_WithRealPostgresAndKafka(t *testing.T) {
 	payloadBytes, _ := platform.MarshalEnvelope(envelope)
 
 	_, err := cluster.ShardA.Pool.Exec(context.Background(), `
-		INSERT INTO outbox_events (id, event_type, aggregate_type, aggregate_id, correlation_id, payload, occurred_at, publish_topic, status)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, 'pending')
+		INSERT INTO events (event_id, event_type, aggregate_type, aggregate_id, correlation_id, payload, occurred_at, publish_topic)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)
 	`, eventID, platform.EventTypeTransferCompleted, platform.AggregateTypeTransfer, "tr_container_123", "job_container_123", payloadBytes, platform.TopicNotify)
 	if err != nil {
 		t.Fatalf("failed to insert pending event into container postgres: %v", err)
@@ -89,16 +89,17 @@ func TestOutboxRelay_Container_Publish_WithRealPostgresAndKafka(t *testing.T) {
 		t.Fatalf("failed to read from kafka container: %v", err)
 	}
 
-	if string(msg.Key) != "tr_container_123" {
-		t.Fatalf("expected kafka message key to be tr_container_123, got %s", string(msg.Key))
+	if string(msg.Key) != "merch_1" {
+		t.Fatalf("expected kafka message key to be merch_1, got %s", string(msg.Key))
 	}
 
-	var status string
-	err = cluster.ShardA.Pool.QueryRow(context.Background(), `SELECT status FROM outbox_events WHERE id = $1`, eventID).Scan(&status)
+	var publishedAt *time.Time
+	err = cluster.ShardA.Pool.QueryRow(context.Background(), `SELECT published_at FROM events WHERE event_id = $1`, eventID).Scan(&publishedAt)
 	if err != nil {
 		t.Fatalf("failed to query event status: %v", err)
 	}
-	if status != "published" {
-		t.Fatalf("expected event status to be published in db, got %s", status)
+
+	if publishedAt == nil {
+		t.Fatalf("expected event to be marked published, but published_at was NULL")
 	}
 }

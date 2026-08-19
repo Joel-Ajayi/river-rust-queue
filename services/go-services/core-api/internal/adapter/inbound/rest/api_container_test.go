@@ -97,6 +97,7 @@ func TestAPI_Container_CreateTransfer_WithRealPostgres(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/v1/transfers", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Merchant-ID", platformMerchantID)
 	req.Header.Set("X-Idempotency-Key", "idemp_container_001")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()

@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,10 +22,10 @@ func TestWebhook_Container_HandleMessage_WithRealPostgresAndEchoEndpoint(t *test
 	cluster := testutil.SetupTestDB(t)
 
 	// 1. Spin up a test HTTP server representing the Merchant Webhook Endpoint (like webhook-echo)
-	receivedWebhook := false
+	var receivedWebhook atomic.Bool
 	echoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Content-Type") == "application/json" {
-			receivedWebhook = true
+			receivedWebhook.Store(true)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		}
@@ -73,13 +74,29 @@ func TestWebhook_Container_HandleMessage_WithRealPostgresAndEchoEndpoint(t *test
 	eventID := platform.NewEventID()
 	payload := []byte(`{"event_id":"` + eventID + `","type":"transfer.completed"}`)
 
+	// Insert prerequisite event to satisfy webhook_deliveries source_event_id foreign key constraint
+	_, err = cluster.ShardA.Pool.Exec(context.Background(), `
+		INSERT INTO events (event_id, event_type, aggregate_type, aggregate_id, correlation_id, payload, occurred_at)
+		VALUES ($1, 'transfer.completed', 'transfer', 'tr_123', 'job_123', '{"foo":"bar"}', NOW())
+	`, eventID)
+	if err != nil {
+		t.Fatalf("failed to insert prerequisite event: %v", err)
+	}
+
 	// Process message against real Postgres container + live Echo HTTP endpoint
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go svc.StartFastLaneWorkers(ctx, 1)()
+
 	err = svc.HandleMessage(context.Background(), merchantID, "notify", merchantID, payload)
 	if err != nil {
 		t.Fatalf("failed to handle webhook message: %v", err)
 	}
 
-	if !receivedWebhook {
+	// Give the fast-lane worker time to hit the echo endpoint and update the database
+	time.Sleep(500 * time.Millisecond)
+
+	if !receivedWebhook.Load() {
 		t.Fatalf("expected merchant echo endpoint to receive HTTP POST webhook")
 	}
 
