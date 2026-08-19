@@ -6,13 +6,13 @@ on:
     paths:
       - "services/go-services/**"
       - "api/proto/**"
-      - "deploy/db/migrations/**"
+      - "deploy/db/**"
   pull_request:
     branches: [main]
     paths:
       - "services/go-services/**"
       - "api/proto/**"
-      - "deploy/db/migrations/**"
+      - "deploy/db/**"
 
 permissions:
   contents: read
