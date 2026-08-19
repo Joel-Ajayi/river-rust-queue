@@ -94,6 +94,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - uses: bufbuild/buf-setup-action@v1
+      - name: buf generate
+        working-directory: api/proto
+        run: buf generate .
+
       - name: Set lowercase registry
         run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
 
