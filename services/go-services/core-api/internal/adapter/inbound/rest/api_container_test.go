@@ -27,6 +27,7 @@ func TestAPI_Container_CreateTransfer_WithRealPostgres(t *testing.T) {
 	// Platform Merchant and System Wallets seeded from deploy/db/seed
 	platformMerchantID := "merchant_00000000-0000-0000-0000-000000000001"
 	systemWalletID := "merchant_00000000-0000-0000-0000-000000000001.00000000-0000-0000-0000-000000000000"
+	fiatVaultWalletID := "merchant_00000000-0000-0000-0000-000000000001.00000000-0000-0000-0000-000000000001"
 
 	logger, _ := zap.NewDevelopment()
 
@@ -90,7 +91,7 @@ func TestAPI_Container_CreateTransfer_WithRealPostgres(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"from_wallet": systemWalletID,
-		"to_wallet":   systemWalletID,
+		"to_wallet":   fiatVaultWalletID,
 		"amount":      1000,
 		"currency":    "NGN",
 	})
