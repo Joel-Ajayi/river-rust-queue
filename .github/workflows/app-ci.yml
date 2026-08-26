@@ -124,13 +124,19 @@ jobs:
           sudo chmod +x /usr/local/bin/yq
 
       - name: Update Image Tags
+        working-directory: rrq-gitops
         run: |
           export TAG="${{ github.sha }}"
           for env in prod local; do
-            (cd rrq-gitops/overlays/$env/workloads && yq -i '.images[].newTag = strenv(TAG)' kustomization.yaml)
-            (cd rrq-gitops/overlays/$env/datastores && yq -i '.images[].newTag = strenv(TAG)' kustomization.yaml)
+            (cd overlays/$env/workloads && yq -i '.images[].newTag = strenv(TAG)' kustomization.yaml)
+            (cd overlays/$env/datastores && yq -i '.images[].newTag = strenv(TAG)' kustomization.yaml)
           done
+
+      - name: Commit and Push
+        working-directory: rrq-gitops
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -am "chore: Update RRQ images to ${{ github.sha }}"
+          git add overlays/
+          git diff --quiet && git diff --staged --quiet || git commit -m "chore: Update RRQ images to ${{ github.sha }}"
           git push origin main
