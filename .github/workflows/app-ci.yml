@@ -126,14 +126,10 @@ jobs:
       - name: Update Image Tags
         run: |
           export TAG="${{ github.sha }}"
-          cd rrq-gitops/overlays/prod/workloads
-          yq -i '.images[].newTag = strenv(TAG)' kustomization.yaml
-          cd ../datastores
-          yq -i '.images[].newTag = strenv(TAG)' kustomization.yaml
-
-      - name: Commit and Push
-        working-directory: rrq-gitops
-        run: |
+          for env in prod local; do
+            (cd rrq-gitops/overlays/$env/workloads && yq -i '.images[].newTag = strenv(TAG)' kustomization.yaml)
+            (cd rrq-gitops/overlays/$env/datastores && yq -i '.images[].newTag = strenv(TAG)' kustomization.yaml)
+          done
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git commit -am "chore: Update RRQ images to ${{ github.sha }}"
