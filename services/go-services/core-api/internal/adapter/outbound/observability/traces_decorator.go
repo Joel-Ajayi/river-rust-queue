@@ -22,12 +22,12 @@ func NewTransferSubmitterTraces(next port.TransferSubmitter) port.TransferSubmit
 }
 
 func (t *transferSubmitterTraces) Transfer(ctx context.Context, tr domain.Transfer, idempKey string) (domain.SubmitResult, error) {
-	ctx, span := platform.GetTracer().Start(ctx, "api.transfer_submitter.submit",
+	ctx, span := platform.GetTracer().Start(ctx, platform.SpanAPITransferSubmitterSubmit,
 		trace.WithAttributes(
 			attribute.String(platform.MetricLabelMerchantID, tr.MerchantID),
-			attribute.Int64("amount", tr.Amount),
-			attribute.String("currency", tr.Currency),
-			attribute.String("idempotency_key", idempKey)))
+			attribute.Int64(platform.MetricLabelAmount, tr.Amount),
+			attribute.String(platform.MetricLabelCurrency, tr.Currency),
+			attribute.String(platform.MetricLabelIdempotencyKey, idempKey)))
 	defer span.End()
 
 	result, err := t.next.Transfer(ctx, tr, idempKey)
@@ -46,7 +46,7 @@ func (t *transferSubmitterTraces) Transfer(ctx context.Context, tr domain.Transf
 }
 
 func (t *transferSubmitterTraces) GetBalance(ctx context.Context, walletID, merchantID string) (int64, string, error) {
-	ctx, span := platform.GetTracer().Start(ctx, "api.transfer_submitter.get_balance",
+	ctx, span := platform.GetTracer().Start(ctx, platform.SpanAPITransferSubmitterGetBalance,
 		trace.WithAttributes(
 			attribute.String(platform.MetricLabelWalletID, walletID),
 			attribute.String(platform.MetricLabelMerchantID, merchantID)))
@@ -70,12 +70,12 @@ func NewJobStoreTraces(next port.JobStore) port.JobStore {
 }
 
 func (j *jobStoreTraces) ClaimAndRecord(ctx context.Context, shardID string, job domain.Job, tr domain.Transfer, idempKey string) (domain.SubmitResult, error) {
-	ctx, span := platform.GetTracer().Start(ctx, "api.job_store.claim_and_record",
+	ctx, span := platform.GetTracer().Start(ctx, platform.SpanAPIJobStoreClaimAndRecord,
 		trace.WithAttributes(
 			attribute.String(platform.MetricLabelShard, shardID),
 			attribute.String(platform.MetricLabelJobID, job.ID),
 			attribute.String(platform.MetricLabelMerchantID, job.MerchantID),
-			attribute.String("idempotency_key", idempKey)))
+			attribute.String(platform.MetricLabelIdempotencyKey, idempKey)))
 	defer span.End()
 
 	result, err := j.next.ClaimAndRecord(ctx, shardID, job, tr, idempKey)
@@ -94,7 +94,7 @@ func (j *jobStoreTraces) ClaimAndRecord(ctx context.Context, shardID string, job
 }
 
 func (j *jobStoreTraces) GetJob(ctx context.Context, shardID, jobID string) (domain.Job, error) {
-	ctx, span := platform.GetTracer().Start(ctx, "api.job_store.get_job",
+	ctx, span := platform.GetTracer().Start(ctx, platform.SpanAPIJobStoreGetJob,
 		trace.WithAttributes(
 			attribute.String(platform.MetricLabelShard, shardID),
 			attribute.String(platform.MetricLabelJobID, jobID)))
@@ -118,7 +118,7 @@ func NewMerchantDirectoryTraces(next port.MerchantDirectory) port.MerchantDirect
 }
 
 func (m *merchantDirectoryTraces) ShardFor(ctx context.Context, merchantID string) (string, error) {
-	ctx, span := platform.GetTracer().Start(ctx, "api.merchant_directory.shard_for",
+	ctx, span := platform.GetTracer().Start(ctx, platform.SpanAPIMerchantDirectoryShardFor,
 		trace.WithAttributes(
 			attribute.String(platform.MetricLabelMerchantID, merchantID)))
 	defer span.End()
@@ -146,7 +146,7 @@ func NewWalletDirectoryTraces(next port.WalletDirectory) port.WalletDirectory {
 }
 
 func (w *walletDirectoryTraces) CheckWalletOwnership(ctx context.Context, shardID, walletID, merchantID string) error {
-	ctx, span := platform.GetTracer().Start(ctx, "api.wallet_directory.check_ownership",
+	ctx, span := platform.GetTracer().Start(ctx, platform.SpanAPIWalletDirectoryCheckOwnership,
 		trace.WithAttributes(
 			attribute.String(platform.MetricLabelShard, shardID),
 			attribute.String(platform.MetricLabelWalletID, walletID),
@@ -167,7 +167,7 @@ func (w *walletDirectoryTraces) CheckWalletOwnership(ctx context.Context, shardI
 }
 
 func (w *walletDirectoryTraces) GetBalance(ctx context.Context, shardID, walletID string) (int64, string, error) {
-	ctx, span := platform.GetTracer().Start(ctx, "api.wallet_directory.get_balance",
+	ctx, span := platform.GetTracer().Start(ctx, platform.SpanAPIWalletDirectoryGetBalance,
 		trace.WithAttributes(
 			attribute.String(platform.MetricLabelShard, shardID),
 			attribute.String(platform.MetricLabelWalletID, walletID)))
@@ -195,10 +195,10 @@ func NewWalletUseCaseTraces(next port.WalletUseCase) port.WalletUseCase {
 }
 
 func (w *walletUseCaseTraces) CreateWallet(ctx context.Context, merchantID, currency string) (string, error) {
-	ctx, span := platform.GetTracer().Start(ctx, "api.wallet_use_case.create_wallet",
+	ctx, span := platform.GetTracer().Start(ctx, platform.SpanAPIWalletUseCaseCreateWallet,
 		trace.WithAttributes(
 			attribute.String(platform.MetricLabelMerchantID, merchantID),
-			attribute.String("currency", currency)))
+			attribute.String(platform.MetricLabelCurrency, currency)))
 	defer span.End()
 
 	walletID, err := w.next.CreateWallet(ctx, merchantID, currency)
@@ -217,12 +217,12 @@ func (w *walletUseCaseTraces) CreateWallet(ctx context.Context, merchantID, curr
 }
 
 func (w *walletUseCaseTraces) Deposit(ctx context.Context, t domain.Transfer, idempKey string) (domain.SubmitResult, error) {
-	ctx, span := platform.GetTracer().Start(ctx, "api.wallet_use_case.deposit",
+	ctx, span := platform.GetTracer().Start(ctx, platform.SpanAPIWalletUseCaseDeposit,
 		trace.WithAttributes(
 			attribute.String(platform.MetricLabelMerchantID, t.MerchantID),
-			attribute.Int64("amount", t.Amount),
-			attribute.String("currency", t.Currency),
-			attribute.String("idempotency_key", idempKey)))
+			attribute.Int64(platform.MetricLabelAmount, t.Amount),
+			attribute.String(platform.MetricLabelCurrency, t.Currency),
+			attribute.String(platform.MetricLabelIdempotencyKey, idempKey)))
 	defer span.End()
 
 	result, err := w.next.Deposit(ctx, t, idempKey)

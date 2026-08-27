@@ -31,7 +31,7 @@ func (t *eventStoreTraces) GetOldestUnpublishedEventAge(ctx context.Context, sha
 }
 
 func (t *eventStoreTraces) RouteToDLQ(ctx context.Context, event domain.Event, reason string) error {
-	ctx, span := platform.GetTracer().Start(ctx, "outbox.store.route_dlq",
+	ctx, span := platform.GetTracer().Start(ctx, platform.SpanOutboxStoreRouteDLQ,
 		trace.WithAttributes(
 			attribute.String(platform.MetricLabelJobID, event.AggregateID)))
 	defer span.End()

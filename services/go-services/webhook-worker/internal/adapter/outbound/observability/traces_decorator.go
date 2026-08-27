@@ -41,7 +41,7 @@ func (t *webhookAppTraces) HandleMessage(ctx context.Context, merchantID string,
 }
 
 func (t *webhookAppTraces) RetryScheduler(ctx context.Context) error {
-	spanCtx, span := platform.GetTracer().Start(ctx, "RetryScheduler")
+	spanCtx, span := platform.GetTracer().Start(ctx, platform.SpanRetryScheduler)
 	defer span.End()
 
 	err := t.next.RetryScheduler(spanCtx)
@@ -57,7 +57,7 @@ func (t *webhookAppTraces) RetryScheduler(ctx context.Context) error {
 }
 
 func (t *webhookAppTraces) RouteToGlobalDLQ(ctx context.Context, payload []byte, topic string, key string, errorMsg string) error {
-	spanCtx, span := platform.GetTracer().Start(ctx, "RouteToGlobalDLQ")
+	spanCtx, span := platform.GetTracer().Start(ctx, platform.SpanRouteToGlobalDLQ)
 	defer span.End()
 
 	err := t.next.RouteToGlobalDLQ(spanCtx, payload, topic, key, errorMsg)

@@ -23,13 +23,25 @@ var (
 )
 
 const (
-	SpanProcessJob            = "process.transfer"
-	SpanHandleWebhookMessage  = "HandleWebhookMessage"
-	SpanProcessMessage        = "process_message"
-	SpanCommitOffsets         = "kafka.commit"
-	SpanHandleXShardRequested = "HandleXShardRequested"
-	SpanHandleXShardSettled   = "HandleXShardSettled"
-	SpanHandleXShardFailed    = "HandleXShardFailed"
+	SpanProcessJob                       = "kafka.process_transfer"
+	SpanHandleWebhookMessage             = "webhook.handle_message"
+	SpanProcessMessage                   = "kafka.process_message"
+	SpanCommitOffsets                    = "kafka.commit_offsets"
+	SpanHandleXShardRequested            = "xshard.handle_requested"
+	SpanHandleXShardSettled              = "xshard.handle_settled"
+	SpanHandleXShardFailed               = "xshard.handle_failed"
+	SpanOutboxStoreRouteDLQ              = "outbox.store.route_dlq"
+	SpanAPITransferSubmitterSubmit       = "api.transfer_submitter.submit"
+	SpanAPITransferSubmitterGetBalance   = "api.transfer_submitter.get_balance"
+	SpanAPIJobStoreClaimAndRecord        = "api.job_store.claim_and_record"
+	SpanAPIJobStoreGetJob                = "api.job_store.get_job"
+	SpanAPIMerchantDirectoryShardFor     = "api.merchant_directory.shard_for"
+	SpanAPIWalletDirectoryCheckOwnership = "api.wallet_directory.check_ownership"
+	SpanAPIWalletDirectoryGetBalance     = "api.wallet_directory.get_balance"
+	SpanAPIWalletUseCaseCreateWallet     = "api.wallet_use_case.create_wallet"
+	SpanAPIWalletUseCaseDeposit          = "api.wallet_use_case.deposit"
+	SpanRetryScheduler                   = "webhook.retry_scheduler"
+	SpanRouteToGlobalDLQ                 = "webhook.route_to_global_dlq"
 )
 
 // InitTelemetry initializes the OpenTelemetry SDK for metrics and traces.

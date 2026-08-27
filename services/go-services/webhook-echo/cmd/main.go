@@ -58,7 +58,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info(platform.LogEventServerStarted, zap.String("port", port))
+		logger.Info(platform.LogEventServerStarted, zap.String(platform.MetricLabelPort, port))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Fatal(platform.LogEventServerFailed, zap.Error(err))
 		}
@@ -96,9 +96,9 @@ func handleWebhook(logger *zap.Logger) http.HandlerFunc {
 
 		maskedPayload := pii.Mask(body)
 		logger.Info(platform.LogEventWebhookReceived,
-			zap.String("payload_size", fmt.Sprintf("%d", len(body))),
+			zap.String(platform.MetricLabelPayloadSize, fmt.Sprintf("%d", len(body))),
 			zap.ByteString("masked_payload", maskedPayload),
-			zap.String("signature", sig),
+			zap.String(platform.MetricLabelSignature, sig),
 		)
 
 		w.Header().Set(ContentTypeKey, ContentTypeJSON)

@@ -40,7 +40,7 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 
 	activeKey, ok := s.jwtKeys[s.jwtActiveKeyID]
 	if !ok {
-		s.log.Error(platform.LogEventJWTKeyNotFound, zap.String("kid", s.jwtActiveKeyID))
+		s.log.Error(platform.LogEventJWTKeyNotFound, zap.String(platform.MetricLabelKeyID, s.jwtActiveKeyID))
 		writeError(w, platform.ErrInternal(nil))
 		return
 	}
