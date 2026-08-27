@@ -9,6 +9,9 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/outbox-relay/internal/core/port"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type EventPublisher struct {
@@ -59,6 +62,15 @@ func (p *EventPublisher) PublishBatch(ctx context.Context, shardID string, event
 		return []string{}, nil
 	}
 
+	// A4.1: per-invocation client span; ctx carries the per-transfer trace from the outbox envelope, so this is also a child on the per-transfer trace.
+	ctx, span := platform.GetTracer().Start(ctx, "kafka.publish_batch",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String(platform.MetricLabelShard, shardID),
+			attribute.Int("event.count", len(events)),
+		))
+	defer span.End()
+
 	messages := make([]kafka.Message, 0, len(events))
 	var eventIDs []string
 	for _, e := range events {
@@ -106,6 +118,8 @@ func (p *EventPublisher) PublishBatch(ctx context.Context, shardID string, event
 
 	err := p.writer.WriteMessages(ctx, messages...)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return eventIDs, err
 	}
 	return eventIDs, nil
