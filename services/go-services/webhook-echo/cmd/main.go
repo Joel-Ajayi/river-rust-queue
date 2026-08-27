@@ -41,6 +41,13 @@ func main() {
 	// -- Port --
 	port := os.Getenv(EnvVarPort)
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := platform.InitTelemetry(ctx, "webhook-echo"); err != nil {
+		logger.Panic("Failed to initialize telemetry", zap.Error(err))
+	}
+
 	// -- New Server --
 	mux := http.NewServeMux()
 	mux.HandleFunc(RootPath, handleWebhook(logger))
@@ -57,15 +64,13 @@ func main() {
 		}
 	}()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
+	<-ctx.Done()
 
 	logger.Info(platform.LogEventShutdownSignalReceived)
-	ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
-	defer cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), ShutdownTimeout)
+	defer shutdownCancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error(platform.LogEventShutdownFailed, zap.Error(err))
 	} else {
 		logger.Info(platform.LogEventServerShutdown)

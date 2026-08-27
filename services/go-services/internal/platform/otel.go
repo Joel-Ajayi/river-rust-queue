@@ -2,13 +2,18 @@ package platform
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/segmentio/kafka-go"
 	"go.opentelemetry.io/otel"
 
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -26,6 +31,48 @@ const (
 	SpanHandleXShardSettled   = "HandleXShardSettled"
 	SpanHandleXShardFailed    = "HandleXShardFailed"
 )
+
+// InitTelemetry initializes the OpenTelemetry SDK for metrics and traces.
+func InitTelemetry(ctx context.Context, serviceName string) error {
+	res, err := resource.Merge(
+		resource.Default(),
+		resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceName(serviceName),
+		),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create resource: %w", err)
+	}
+
+	// Initialize metrics exporter
+	metricExporter, err := otlpmetrichttp.New(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create metric exporter: %w", err)
+	}
+
+	meterProvider = sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(res),
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),
+	)
+	otel.SetMeterProvider(meterProvider)
+
+	// Initialize traces exporter
+	traceExporter, err := otlptracehttp.New(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create trace exporter: %w", err)
+	}
+
+	tracerProvider = sdktrace.NewTracerProvider(
+		sdktrace.WithResource(res),
+		sdktrace.WithBatcher(traceExporter),
+	)
+	otel.SetTracerProvider(tracerProvider)
+
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+
+	return nil
+}
 
 // ShutdownTelemetry should be called on application exit.
 func ShutdownTelemetry(ctx context.Context) error {

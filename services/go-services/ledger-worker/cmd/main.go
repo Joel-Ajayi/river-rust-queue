@@ -32,6 +32,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if err := platform.InitTelemetry(ctx, "ledger-worker"); err != nil {
+		logger.Panic("Failed to initialize telemetry", zap.Error(err))
+	}
+
 	pools, err := platform.NewShardPools(ctx, cfg, logger)
 	if err != nil {
 		logger.Panic(platform.LogEventPostgresInitFailed, zap.Error(err))

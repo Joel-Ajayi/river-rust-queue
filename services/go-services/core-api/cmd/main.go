@@ -40,6 +40,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if err := platform.InitTelemetry(ctx, "core-api"); err != nil {
+		log.Panic("Failed to initialize telemetry", zap.Error(err))
+	}
+
 	// Infrastructure
 	pools, err := platform.NewShardPools(ctx, cfg, log)
 	if err != nil {

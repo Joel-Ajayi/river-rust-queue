@@ -31,6 +31,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if err := platform.InitTelemetry(ctx, "outbox-relay"); err != nil {
+		logger.Panic("Failed to initialize telemetry", zap.Error(err))
+	}
+
 	// --- Infrastructure ---
 	pools, err := platform.NewShardPools(ctx, cfg, logger)
 	if err != nil {
