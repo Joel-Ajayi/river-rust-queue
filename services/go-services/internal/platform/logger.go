@@ -2,7 +2,6 @@ package platform
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"time"
 
@@ -262,8 +261,7 @@ func LoggerWithTrace(ctx context.Context, logger *zap.Logger) *zap.Logger {
 	return logger
 }
 
-// LogCanonicalEvent emits the canonical log line with trace correlation
-// Call at transaction boundaries: after DB commit, after Kafka publish, after HTTP delivery, etc.
+// LogCanonicalEvent emits the canonical log line as flat zap fields (B3). Call at transaction boundaries: after DB commit, after Kafka publish, after HTTP delivery, etc.
 func LogCanonicalEvent(ctx context.Context, logger *zap.Logger, serviceName string, line CanonicalLogLine) {
 	span := trace.SpanFromContext(ctx)
 	sc := span.SpanContext()
@@ -279,7 +277,60 @@ func LogCanonicalEvent(ctx context.Context, logger *zap.Logger, serviceName stri
 	line.Level = "INFO"
 	line.Service = serviceName
 
-	// Marshal to single JSON field to prevent field explosion in Elasticsearch
-	jsonBytes, _ := json.Marshal(line)
-	logger.Info(LogEventCanonicalLog, zap.ByteString("canonical_json", jsonBytes))
+	fields := []zap.Field{
+		zap.String("event", string(LogEventCanonicalLog)),
+		zap.Time("timestamp", line.Timestamp),
+		zap.String("level", line.Level),
+		zap.String("service", line.Service),
+		zap.String("trace_id", line.TraceID),
+		zap.String("span_id", line.SpanID),
+	}
+	if line.MerchantID != "" {
+		fields = append(fields, zap.String("merchant_id", line.MerchantID))
+	}
+	if line.JobID != "" {
+		fields = append(fields, zap.String("job_id", line.JobID))
+	}
+	if line.WalletID != "" {
+		fields = append(fields, zap.String("wallet_id", line.WalletID))
+	}
+	if line.TransferID != "" {
+		fields = append(fields, zap.String("transfer_id", line.TransferID))
+	}
+	fields = append(fields,
+		zap.String("canonical_event", string(line.Event)),
+		zap.String("status", string(line.Status)),
+	)
+	if line.Amount != 0 {
+		fields = append(fields, zap.Int64("amount", line.Amount))
+	}
+	if line.Currency != "" {
+		fields = append(fields, zap.String("currency", line.Currency))
+	}
+	if line.ErrorCode != "" {
+		fields = append(fields, zap.String("error_code", line.ErrorCode))
+	}
+	if line.ErrorMessage != "" {
+		fields = append(fields, zap.String("error_message", line.ErrorMessage))
+	}
+	if line.DurationMs != 0 {
+		fields = append(fields, zap.Float64("duration_ms", line.DurationMs))
+	}
+	if line.DBCommitDurationMs != 0 {
+		fields = append(fields, zap.Float64("db_commit_duration_ms", line.DBCommitDurationMs))
+	}
+	if line.KafkaPublishDurationMs != 0 {
+		fields = append(fields, zap.Float64("kafka_publish_duration_ms", line.KafkaPublishDurationMs))
+	}
+	if line.HTTPLatencyMs != 0 {
+		fields = append(fields, zap.Float64("http_latency_ms", line.HTTPLatencyMs))
+	}
+	if line.RetryCount != 0 {
+		fields = append(fields, zap.Int("retry_count", line.RetryCount))
+	}
+	if line.IdempotencyHit {
+		fields = append(fields, zap.Bool("idempotency_hit", line.IdempotencyHit))
+	}
+
+	logger.Info("canonical", fields...)
 }
