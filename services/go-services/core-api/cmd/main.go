@@ -44,6 +44,13 @@ func main() {
 		log.Panic("Failed to initialize telemetry", zap.Error(err))
 	}
 
+	if err := platform.InitMetrics(); err != nil {
+		log.Panic("Failed to initialize metrics", zap.Error(err))
+	}
+	if err := platform.InitBusinessMetrics(); err != nil {
+		log.Panic("Failed to initialize business metrics", zap.Error(err))
+	}
+
 	// Infrastructure
 	pools, err := platform.NewShardPools(ctx, cfg, log)
 	if err != nil {

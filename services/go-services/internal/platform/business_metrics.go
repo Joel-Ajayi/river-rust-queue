@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -47,99 +48,100 @@ var (
 	businessOnce sync.Once
 )
 
-func init() {
-	businessOnce.Do(func() {
-		var err error
+// InitBusinessMetrics registers all business OTel instruments. B1: returns an error instead of panicking.
+func InitBusinessMetrics() error {
+	var err error
+	var initErr error
 
+	register := func(name string, fn func() error) {
+		if initErr != nil {
+			return
+		}
+		if e := fn(); e != nil {
+			initErr = fmt.Errorf("business metric %s: %w", name, e)
+		}
+	}
+
+	register("business_gtv", func() error {
 		businessGTVTotal, err = meter.Int64Counter(
 			MetricBusinessGTV,
 			metric.WithDescription("Gross Transaction Value — total amount of successfully processed transfers"),
 		)
-		if err != nil {
-			panic("failed to initialize business gtv metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("business_transfers", func() error {
 		businessTransfersTotal, err = meter.Int64Counter(
 			MetricBusinessTransfers,
 			metric.WithDescription("Total number of transfers processed by status (success/failed) and shard type (same/cross)"),
 		)
-		if err != nil {
-			panic("failed to initialize business transfers metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("business_declines", func() error {
 		businessDeclinesTotal, err = meter.Int64Counter(
 			MetricBusinessDeclines,
 			metric.WithDescription("Total number of declined transfers by reason"),
 		)
-		if err != nil {
-			panic("failed to initialize business declines metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("business_saga_duration", func() error {
 		businessSagaDuration, err = meter.Float64Histogram(
 			MetricBusinessSagaDuration,
 			metric.WithDescription("Duration of cross-shard saga from initiation to completion"),
 			metric.WithUnit("s"),
 		)
-		if err != nil {
-			panic("failed to initialize business saga duration metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("business_saga_initiated", func() error {
 		businessSagaInitiated, err = meter.Int64Counter(
 			MetricBusinessSagaInitiated,
 			metric.WithDescription("Total number of cross-shard sagas initiated"),
 		)
-		if err != nil {
-			panic("failed to initialize business saga initiated metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("business_saga_completed", func() error {
 		businessSagaCompleted, err = meter.Int64Counter(
 			MetricBusinessSagaCompleted,
 			metric.WithDescription("Total number of cross-shard sagas completed successfully"),
 		)
-		if err != nil {
-			panic("failed to initialize business saga completed metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("business_refunds", func() error {
 		businessRefundsTotal, err = meter.Int64Counter(
 			MetricBusinessRefunds,
 			metric.WithDescription("Total number of refunds processed"),
 		)
-		if err != nil {
-			panic("failed to initialize business refunds metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("business_disputes", func() error {
 		businessDisputesTotal, err = meter.Int64Counter(
 			MetricBusinessDisputes,
 			metric.WithDescription("Total number of disputes by status (opened/resolved)"),
 		)
-		if err != nil {
-			panic("failed to initialize business disputes metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("business_wallets_created", func() error {
 		businessWalletsCreated, err = meter.Int64Counter(
 			MetricBusinessWalletsCreated,
 			metric.WithDescription("Total number of successfully created customer/merchant wallets"),
 		)
-		if err != nil {
-			panic("failed to initialize business wallets created metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("business_deposits", func() error {
 		businessDepositsTotal, err = meter.Int64Counter(
 			MetricBusinessDeposits,
 			metric.WithDescription("Total number of deposit requests processed"),
 		)
-		if err != nil {
-			panic("failed to initialize business deposits metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("business_deposits_amount", func() error {
 		businessDepositsAmount, err = meter.Int64Counter(
 			MetricBusinessDepositsAmount,
 			metric.WithDescription("Total amount deposited from fiat vault into wallets"),
 		)
-		if err != nil {
-			panic("failed to initialize business deposits amount metric: " + err.Error())
-		}
+		return err
 	})
+
+	return initErr
 }
 
 // RecordBusinessGTV records the amount of a successful transfer (Gross Transaction Value).
