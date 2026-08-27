@@ -295,6 +295,7 @@ func (r *DBCircuitBreakers) newDBBreaker(name string) *CircuitBreaker {
 }
 
 // recordBreakerStateChange records state gauge and open/half-open counters.
+// B2: lower-effort fix — failsafe does not expose the originating context in the state-change event, so the metric ctx is context.Background(). The originating log line above carries the breaker name so an on-call can pivot by CB.
 func recordBreakerStateChange(logger *zap.Logger, name string, from circuitbreaker.State, to circuitbreaker.State) {
 	var stateVal int64
 	switch to {
@@ -304,6 +305,14 @@ func recordBreakerStateChange(logger *zap.Logger, name string, from circuitbreak
 		stateVal = CBGaugeHalfOpen
 	case circuitbreaker.OpenState:
 		stateVal = CBGaugeOpen
+	}
+	if to == circuitbreaker.OpenState && logger != nil {
+		logger.Warn("B2: circuit-breaker state metric uses context.Background(); no originating trace. See circuit_breakers.go:recordBreakerStateChange",
+			zap.String(LogFieldComponent, "circuit-breaker"),
+			zap.String("circuit_breaker_name", name),
+			zap.String("from", from.String()),
+			zap.String("to", to.String()),
+		)
 	}
 	RecordCircuitBreakerState(context.Background(), name, stateVal)
 	if to == circuitbreaker.OpenState {
