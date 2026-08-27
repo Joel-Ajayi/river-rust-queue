@@ -12,6 +12,8 @@ import (
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/webhook-worker/internal/core/domain"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type WebhookClient struct {
@@ -59,6 +61,16 @@ func (c *WebhookClient) Post(ctx context.Context, merchantID string, url string,
 	req.Header.Set(domain.HTTPHeaderEventID, eventID)
 	req.Header.Set(domain.HTTPHeaderDeliveryAttempt, strconv.Itoa(attempt))
 	req.Header.Set(domain.HTTPHeaderUserAgent, domain.HTTPUserAgentValue)
+
+	// A4.2: per-attempt span attributes. Span attributes only, NOT metric dimensions (no per-merchant cardinality).
+	span := trace.SpanFromContext(ctx)
+	if span.SpanContext().IsValid() {
+		span.SetAttributes(
+			attribute.String(platform.MetricLabelMerchantID, merchantID),
+			attribute.String(platform.MetricLabelJobID, eventID),
+			attribute.Int("delivery.attempt", attempt),
+		)
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
