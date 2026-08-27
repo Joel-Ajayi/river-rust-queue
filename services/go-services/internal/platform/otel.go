@@ -34,10 +34,9 @@ const (
 
 // InitTelemetry initializes the OpenTelemetry SDK for metrics and traces.
 func InitTelemetry(ctx context.Context, serviceName string) error {
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
+	res, err := resource.New(
+		ctx,
+		resource.WithAttributes(
 			semconv.ServiceName(serviceName),
 		),
 	)
