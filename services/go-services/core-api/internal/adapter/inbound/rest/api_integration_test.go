@@ -246,7 +246,7 @@ func TestAPI_CreateMerchantEndpoint(t *testing.T) {
 	body := bytes.NewBufferString(`{"name": "Test Merchant", "webhook_url": "https://example.com/webhook", "webhook_secret": "sec", "tier": "standard"}`)
 	req := httptest.NewRequest("POST", platform.APIMerchantsPath, body)
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -263,7 +263,7 @@ func TestAPI_CreateWalletEndpoint(t *testing.T) {
 	req := httptest.NewRequest("POST", platform.APIWalletsPath, body)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Merchant-ID", merchID)
-	
+
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -279,7 +279,7 @@ func TestAPI_GetBalanceEndpoint(t *testing.T) {
 
 	req := httptest.NewRequest("GET", platform.APIBalancesPath+"?wallet_id="+walletID, nil)
 	req.Header.Set("X-Merchant-ID", merchID)
-	
+
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 

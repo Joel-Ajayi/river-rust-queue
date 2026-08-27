@@ -227,7 +227,7 @@ func (r *Repository) FailDeliveryAndRouteToDLQ(ctx context.Context, shardID stri
 		platform.DLQSourceWebhook, "notify", "", d.Payload, origin, errorMsg,
 		platform.ClassificationTerminal, firstFailedAt, lastFailedAt, traceID, spanID,
 	)
-	
+
 	merchantsPool := r.pools.MerchantsPool()
 	if merchantsPool == nil {
 		return platform.ErrMerchantsPoolNotInitialized

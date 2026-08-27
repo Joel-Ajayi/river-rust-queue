@@ -35,7 +35,7 @@ func (pgxQueryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx
 			attribute.String("db.statement", data.SQL),
 		),
 	}
-	ctx, _ = otel.Tracer(MetricMeterName + ".postgres").Start(ctx, op, opts...)
+	ctx, _ = otel.Tracer(MetricMeterName+".postgres").Start(ctx, op, opts...)
 	return ctx
 }
 

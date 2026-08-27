@@ -68,12 +68,12 @@ func (md *MerchantDirectory) AuthenticateAPIKey(ctx context.Context, apiKey stri
 	}
 
 	rawKey := strings.TrimPrefix(apiKey, platform.APIKeyPrefix)
-	
+
 	lastUnderscore := strings.LastIndex(rawKey, platform.APIKeySeparator)
 	if lastUnderscore == -1 || lastUnderscore == 0 || lastUnderscore == len(rawKey)-1 {
 		return domain.Principal{}, domain.ErrInvalidAPIKey
 	}
-	
+
 	merchantID := rawKey[:lastUnderscore]
 	secretPart := rawKey[lastUnderscore+1:]
 

@@ -15,9 +15,9 @@ import (
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/adapter/outbound/postgres"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/app"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/testutil"
+	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
 )
 

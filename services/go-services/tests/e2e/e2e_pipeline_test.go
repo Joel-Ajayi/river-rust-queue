@@ -96,7 +96,7 @@ func TestFullPipelineE2E(t *testing.T) {
 	webhookBin := buildService(t, "../../webhook-worker")
 
 	t.Log("Services built successfully. Starting them...")
-	
+
 	commonEnv := []string{
 		"LOG_LEVEL=debug",
 		"KAFKA_BROKERS=" + brokers[0],
@@ -251,7 +251,7 @@ func TestFullPipelineE2E(t *testing.T) {
 		resp.Body.Close()
 		return wResp.WalletId
 	}
-	
+
 	wallet1 := createWallet()
 	wallet2 := createWallet()
 
@@ -288,7 +288,7 @@ func TestFullPipelineE2E(t *testing.T) {
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("expected 202 Accepted, got %d", resp.StatusCode)
 	}
-	
+
 	select {
 	case <-webhookReceived:
 		t.Log("Webhook successfully received! Pipeline complete.")
