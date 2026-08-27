@@ -23,7 +23,7 @@ func NewMerchantDirectoryResilience(next port.MerchantDirectory, cbs *platform.D
 }
 
 func (m *merchantDirResilience) ShardFor(ctx context.Context, merchantID string) (string, error) {
-	res, err := m.cbs.Merchants().Execute(func() (interface{}, error) {
+	res, err := m.cbs.Merchants().Execute(ctx, func() (interface{}, error) {
 		return m.next.ShardFor(ctx, merchantID)
 	})
 	if err != nil {
@@ -43,14 +43,14 @@ func NewLedgerStoreResilience(next port.LedgerStore, cbs *platform.DBCircuitBrea
 }
 
 func (l *ledgerStoreResilience) PostTransfer(ctx context.Context, shardID string, transfer domain.Transfer) error {
-	_, err := l.cbs.ShardRW(shardID).Execute(func() (interface{}, error) {
+	_, err := l.cbs.ShardRW(shardID).Execute(ctx, func() (interface{}, error) {
 		return nil, l.next.PostTransfer(ctx, shardID, transfer)
 	})
 	return err
 }
 
 func (l *ledgerStoreResilience) FailTransfer(ctx context.Context, shardID string, transfer domain.Transfer, reason string) error {
-	_, err := l.cbs.ShardRW(shardID).Execute(func() (interface{}, error) {
+	_, err := l.cbs.ShardRW(shardID).Execute(ctx, func() (interface{}, error) {
 		return nil, l.next.FailTransfer(ctx, shardID, transfer, reason)
 	})
 	return err
@@ -67,21 +67,21 @@ func NewCrossShardStoreResilience(next port.CrossShardStore, cbs *platform.DBCir
 }
 
 func (x *crossShardStoreResilience) DebitToClearingAccount(ctx context.Context, srcShard, dstShard, jobID string, transfer domain.Transfer) error {
-	_, err := x.cbs.ShardRW(srcShard).Execute(func() (interface{}, error) {
+	_, err := x.cbs.ShardRW(srcShard).Execute(ctx, func() (interface{}, error) {
 		return nil, x.next.DebitToClearingAccount(ctx, srcShard, dstShard, jobID, transfer)
 	})
 	return err
 }
 
 func (x *crossShardStoreResilience) CreditFromClearingAccount(ctx context.Context, intent *eventsv1.XShardTransferRequestedPayload) error {
-	_, err := x.cbs.ShardRW(intent.DstShard).Execute(func() (interface{}, error) {
+	_, err := x.cbs.ShardRW(intent.DstShard).Execute(ctx, func() (interface{}, error) {
 		return nil, x.next.CreditFromClearingAccount(ctx, intent)
 	})
 	return err
 }
 
 func (x *crossShardStoreResilience) SettleCrossShardTransfer(ctx context.Context, srcShard, transferID string) (int64, string, error) {
-	res, err := x.cbs.ShardRW(srcShard).Execute(func() (interface{}, error) {
+	res, err := x.cbs.ShardRW(srcShard).Execute(ctx, func() (interface{}, error) {
 		amount, currency, err := x.next.SettleCrossShardTransfer(ctx, srcShard, transferID)
 		return []interface{}{amount, currency}, err
 	})
@@ -90,7 +90,7 @@ func (x *crossShardStoreResilience) SettleCrossShardTransfer(ctx context.Context
 }
 
 func (x *crossShardStoreResilience) ReverseCrossShardTransfer(ctx context.Context, srcShard, transferID, reason string) error {
-	_, err := x.cbs.ShardRW(srcShard).Execute(func() (interface{}, error) {
+	_, err := x.cbs.ShardRW(srcShard).Execute(ctx, func() (interface{}, error) {
 		return nil, x.next.ReverseCrossShardTransfer(ctx, srcShard, transferID, reason)
 	})
 	return err
@@ -111,7 +111,7 @@ func NewDLQStoreResilience(next port.DLQStore, cbs *platform.DBCircuitBreakers) 
 }
 
 func (d *dlqStoreResilience) WriteDLQEntry(ctx context.Context, entry *eventsv1.DLQEntry) error {
-	_, err := d.cbs.Merchants().Execute(func() (interface{}, error) {
+	_, err := d.cbs.Merchants().Execute(ctx, func() (interface{}, error) {
 		return nil, d.next.WriteDLQEntry(ctx, entry)
 	})
 	return err

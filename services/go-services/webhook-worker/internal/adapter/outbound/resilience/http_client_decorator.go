@@ -85,7 +85,7 @@ func NewHTTPClientResilience(next port.HTTPClient, breakers *BreakerRegistry) po
 func (c *httpClientResilience) Post(ctx context.Context, merchantID string, url string, payload []byte, signature, timestamp, eventID string, attempt int) (int, error) {
 	breaker := c.breakers.For(merchantID)
 
-	result, err := breaker.Execute(func() (interface{}, error) {
+	result, err := breaker.Execute(ctx, func() (interface{}, error) {
 		return c.next.Post(ctx, merchantID, url, payload, signature, timestamp, eventID, attempt)
 	})
 

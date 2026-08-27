@@ -15,35 +15,35 @@ const (
 	// Observability Metrics
 	// names
 	MetricMeterName                   = "rrq/platform"
-	MetricCBOpenTotal                 = "rrq.circuit_breaker.open.total"
-	MetricCBHalfOpenFailure           = "rrq.circuit_breaker.half_open.failure"
-	MetricCBState                     = "rrq.circuit_breaker.state"
-	MetricDLQIngestionRate            = "rrq.dlq.ingestion.rate"
-	MetricInfraErrorsTotal            = "rrq.infrastructure.errors.total"
-	MetricOutboxLagSeconds            = "rrq.outbox.lag.seconds"
-	MetricOutboxEventsPublishedTotal  = "rrq.outbox.events.published.total"
-	MetricOutboxPanicsTotal           = "rrq.outbox.panics.total"
-	MetricConsumerPanicsTotal         = "rrq.kafka_consumer.panics.total"
-	MetricDLQInfrastructureFlood      = "rrq.dlq.infrastructure_flood.total"
-	MetricKafkaProducerBufferFill     = "rrq.kafka.producer.buffer_fill.ratio"
-	MetricIdempotencyConflictsTotal   = "rrq.idempotency.conflicts.total"
-	MetricIdempotencyHitsTotal        = "rrq.idempotency.hits.total"
-	MetricConsumerBackoffDuration     = "rrq.kafka_consumer.backoff_duration.seconds"
-	MetricCommitCoordinatorQueueDepth = "rrq.commit_coordinator.queue.depth"
-	MetricLedgerImbalance             = "rrq.ledger.imbalance"
-	MetricSagaUnresolvedCount         = "rrq.saga.unresolved.count"
-	MetricVelocityLimitExceededTotal  = "rrq.velocity.limit_exceeded.total"
-	MetricAdminDLQReplayedTotal       = "rrq.admin.dlq_replayed.total"
-	MetricBulkheadRejectionsTotal     = "rrq.bulkhead.rejections.total"
-	MetricBulkheadInFlight            = "rrq.bulkhead.in_flight"
-	MetricPGPoolAcquiredConns         = "rrq.pg.pool.acquired.conns"
-	MetricPGPoolIdleConns             = "rrq.pg.pool.idle.conns"
-	MetricPGPoolMaxConns              = "rrq.pg.pool.max.conns"
-	MetricPGPoolEmptyAcquireCount     = "rrq.pg.pool.empty_acquire.count"
-	MetricRetryBudgetExhaustedTotal   = "rrq.retry.budget.exhausted.total"
-	MetricReconDiscrepanciesTotal     = "rrq.recon.discrepancies.total"
-	MetricRedisFailClosed             = "rrq.redis.fail_closed.total"
-	MetricTaskChannelFillRatio        = "rrq.task_channel.fill_ratio"
+	MetricCBOpenTotal                 = "circuit_breaker.open.total"
+	MetricCBHalfOpenFailure           = "circuit_breaker.half_open.failure"
+	MetricCBState                     = "circuit_breaker.state"
+	MetricDLQIngestionRate            = "dlq.ingestion.rate"
+	MetricInfraErrorsTotal            = "infrastructure.errors.total"
+	MetricOutboxLagSeconds            = "outbox.lag.seconds"
+	MetricOutboxEventsPublishedTotal  = "outbox.events.published.total"
+	MetricOutboxPanicsTotal           = "outbox.panics.total"
+	MetricConsumerPanicsTotal         = "kafka_consumer.panics.total"
+	MetricDLQInfrastructureFlood      = "dlq.infrastructure_flood.total"
+	MetricKafkaProducerBufferFill     = "kafka.producer.buffer_fill.ratio"
+	MetricIdempotencyConflictsTotal   = "idempotency.conflicts.total"
+	MetricIdempotencyHitsTotal        = "idempotency.hits.total"
+	MetricConsumerBackoffDuration     = "kafka_consumer.backoff_duration.seconds"
+	MetricCommitCoordinatorQueueDepth = "commit_coordinator.queue.depth"
+	MetricLedgerImbalance             = "ledger.imbalance"
+	MetricSagaUnresolvedCount         = "saga.unresolved.count"
+	MetricVelocityLimitExceededTotal  = "velocity.limit_exceeded.total"
+	MetricAdminDLQReplayedTotal       = "admin.dlq_replayed.total"
+	MetricBulkheadRejectionsTotal     = "bulkhead.rejections.total"
+	MetricBulkheadInFlight            = "bulkhead.in_flight"
+	MetricPGPoolAcquiredConns         = "pg.pool.acquired.conns"
+	MetricPGPoolIdleConns             = "pg.pool.idle.conns"
+	MetricPGPoolMaxConns              = "pg.pool.max.conns"
+	MetricPGPoolEmptyAcquireCount     = "pg.pool.empty_acquire.count"
+	MetricRetryBudgetExhaustedTotal   = "retry.budget.exhausted.total"
+	MetricReconDiscrepanciesTotal     = "recon.discrepancies.total"
+	MetricRedisFailClosed             = "redis.fail_closed.total"
+	MetricTaskChannelFillRatio        = "task_channel.fill_ratio"
 
 	// label
 	MetricLabelCircuitBreaker = "circuit.breaker"
@@ -52,9 +52,6 @@ const (
 	MetricLabelShard          = "shard"
 	MetricLabelDBPool         = "db.pool"
 	MetricLabelTopic          = "topic"
-	MetricLabelMerchantID     = "merchant.id"
-	MetricLabelJobID          = "job.id"
-	MetricLabelWalletID       = "wallet.id"
 	MetricLabelErrorType      = "error.type"
 	MetricLabelErrorMessage   = "error.message"
 	MetricLabelHandler        = "handler"
@@ -415,8 +412,6 @@ func RecordKafkaProducerBufferFill(ctx context.Context, shardID string, ratio fl
 // RecordIdempotencyConflict increments the counter for business/idempotency conflicts.
 func RecordIdempotencyConflict(ctx context.Context, merchantID, jobID, shardID string) {
 	idempotencyConflictsTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelMerchantID, merchantID),
-		attribute.String(MetricLabelJobID, jobID),
 		attribute.String(MetricLabelShard, shardID),
 	))
 }
@@ -425,8 +420,6 @@ func RecordIdempotencyConflict(ctx context.Context, merchantID, jobID, shardID s
 // A hit is a duplicate submission resolved to the prior job without a conflict error.
 func RecordIdempotencyHit(ctx context.Context, merchantID, jobID, shardID string) {
 	idempotencyHitsTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelMerchantID, merchantID),
-		attribute.String(MetricLabelJobID, jobID),
 		attribute.String(MetricLabelShard, shardID),
 	))
 }
@@ -451,7 +444,6 @@ func RecordSagaUnresolvedCount(ctx context.Context, count int64) {
 // RecordVelocityLimitExceeded records a velocity limit violation.
 func RecordVelocityLimitExceeded(ctx context.Context, walletID, limitType string) {
 	velocityLimitExceededTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelWalletID, walletID),
 		attribute.String(MetricLabelLimitType, limitType),
 	))
 }
@@ -521,3 +513,8 @@ func RecordReconDiscrepancies(ctx context.Context, count int64) {
 	}
 	reconDiscrepanciesTotal.Add(ctx, count)
 }
+const (
+	MetricLabelMerchantID     = "merchant.id"
+	MetricLabelJobID          = "job.id"
+	MetricLabelWalletID       = "wallet.id"
+)

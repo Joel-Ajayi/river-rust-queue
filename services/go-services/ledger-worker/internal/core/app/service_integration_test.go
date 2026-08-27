@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"testing"
+	_ "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/testutil"
 
 	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
@@ -209,4 +210,8 @@ func TestLedger_XShardSettledAndFailed(t *testing.T) {
 	if errFailed != nil {
 		t.Fatalf("expected nil for HandleXShardFailed, got %v", errFailed)
 	}
+}
+
+func (m *mockCrossShardStore) CountUnresolvedSagas(ctx context.Context, olderThan int64) (int64, error) {
+	return 0, nil
 }

@@ -18,7 +18,7 @@ func NewMerchantDirectoryResilience(next port.MerchantDirectory, cbs *platform.D
 }
 
 func (m *merchantDirResilience) ShardFor(ctx context.Context, merchantID string) (string, error) {
-	res, err := m.cbs.Merchants().Execute(func() (interface{}, error) {
+	res, err := m.cbs.Merchants().Execute(ctx, func() (interface{}, error) {
 		return m.next.ShardFor(ctx, merchantID)
 	})
 	if err != nil {
@@ -37,7 +37,7 @@ func NewWalletRepositoryResilience(next port.WalletRepository, cbs *platform.DBC
 }
 
 func (w *walletRepoResilience) GetWalletStatus(ctx context.Context, shardID string, walletID string) (string, error) {
-	res, err := w.cbs.ShardRO(shardID).Execute(func() (interface{}, error) {
+	res, err := w.cbs.ShardRO(shardID).Execute(ctx, func() (interface{}, error) {
 		return w.next.GetWalletStatus(ctx, shardID, walletID)
 	})
 	if err != nil {
@@ -47,7 +47,7 @@ func (w *walletRepoResilience) GetWalletStatus(ctx context.Context, shardID stri
 }
 
 func (w *walletRepoResilience) FreezeWallet(ctx context.Context, shardID string, walletID string, reason string) error {
-	_, err := w.cbs.ShardRW(shardID).Execute(func() (interface{}, error) {
+	_, err := w.cbs.ShardRW(shardID).Execute(ctx, func() (interface{}, error) {
 		return nil, w.next.FreezeWallet(ctx, shardID, walletID, reason)
 	})
 	return err
@@ -63,7 +63,7 @@ func NewDLQStoreResilience(next port.DLQStore, cbs *platform.DBCircuitBreakers) 
 }
 
 func (d *dlqStoreResilience) WriteDLQEntry(ctx context.Context, entry *eventsv1.DLQEntry) error {
-	_, err := d.cbs.Merchants().Execute(func() (interface{}, error) {
+	_, err := d.cbs.Merchants().Execute(ctx, func() (interface{}, error) {
 		return nil, d.next.WriteDLQEntry(ctx, entry)
 	})
 	return err

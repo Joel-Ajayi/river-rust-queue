@@ -32,7 +32,7 @@ func NewMerchantDirectoryCB(next port.MerchantDirectory, cbs *platform.DBCircuit
 }
 
 func (c *merchantDirCB) ShardFor(ctx context.Context, merchantID string) (string, error) {
-	res, err := c.cbs.Merchants().Execute(func() (interface{}, error) {
+	res, err := c.cbs.Merchants().Execute(ctx, func() (interface{}, error) {
 		return c.next.ShardFor(ctx, merchantID)
 	})
 	if err != nil {
@@ -57,14 +57,14 @@ func NewWalletDirectoryCB(next port.WalletDirectory, cbs *platform.DBCircuitBrea
 }
 
 func (c *walletDirCB) CheckWalletOwnership(ctx context.Context, shardID, walletID, merchantID string) error {
-	_, err := c.cbs.ShardRO(shardID).Execute(func() (interface{}, error) {
+	_, err := c.cbs.ShardRO(shardID).Execute(ctx, func() (interface{}, error) {
 		return nil, c.next.CheckWalletOwnership(ctx, shardID, walletID, merchantID)
 	})
 	return err
 }
 
 func (c *walletDirCB) GetBalance(ctx context.Context, shardID, walletID string) (int64, string, error) {
-	res, err := c.cbs.ShardRO(shardID).Execute(func() (interface{}, error) {
+	res, err := c.cbs.ShardRO(shardID).Execute(ctx, func() (interface{}, error) {
 		balance, currency, err := c.next.GetBalance(ctx, shardID, walletID)
 		return balanceResult{bal: balance, cur: currency}, err
 	})
@@ -90,7 +90,7 @@ func NewJobStoreCB(next port.JobStore, cbs *platform.DBCircuitBreakers) port.Job
 }
 
 func (c *jobStoreCB) GetJob(ctx context.Context, shardID, jobID string) (domain.Job, error) {
-	res, err := c.cbs.ShardRO(shardID).Execute(func() (interface{}, error) {
+	res, err := c.cbs.ShardRO(shardID).Execute(ctx, func() (interface{}, error) {
 		return c.next.GetJob(ctx, shardID, jobID)
 	})
 	if err != nil {
@@ -104,7 +104,7 @@ func (c *jobStoreCB) GetJob(ctx context.Context, shardID, jobID string) (domain.
 }
 
 func (c *jobStoreCB) ClaimAndRecord(ctx context.Context, shardID string, job domain.Job, t domain.Transfer, idempKey string) (domain.SubmitResult, error) {
-	res, err := c.cbs.ShardRW(shardID).Execute(func() (interface{}, error) {
+	res, err := c.cbs.ShardRW(shardID).Execute(ctx, func() (interface{}, error) {
 		return c.next.ClaimAndRecord(ctx, shardID, job, t, idempKey)
 	})
 	if err != nil {

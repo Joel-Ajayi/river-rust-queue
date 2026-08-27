@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"testing"
+	_ "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/testutil"
 	"time"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/fraud-worker/internal/core/domain"

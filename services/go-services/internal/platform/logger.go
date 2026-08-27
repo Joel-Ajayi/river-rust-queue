@@ -298,7 +298,7 @@ func LogCanonicalEvent(ctx context.Context, logger *zap.Logger, serviceName stri
 		fields = append(fields, zap.String("transfer_id", line.TransferID))
 	}
 	fields = append(fields,
-		zap.String("canonical_event", string(line.Event)),
+		zap.String(LogFieldEvent, string(line.Event)),
 		zap.String("status", string(line.Status)),
 	)
 	if line.Amount != 0 {

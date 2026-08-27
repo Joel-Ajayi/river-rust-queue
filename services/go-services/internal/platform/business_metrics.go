@@ -12,17 +12,17 @@ import (
 
 const (
 	// Business Metrics
-	MetricBusinessGTV            = "rrq.business.gtv.total"
-	MetricBusinessTransfers      = "rrq.business.transfers.total"
-	MetricBusinessDeclines       = "rrq.business.declines.total"
-	MetricBusinessSagaDuration   = "rrq.business.saga_duration.seconds"
-	MetricBusinessSagaInitiated  = "rrq.business.saga.initiated.total"
-	MetricBusinessSagaCompleted  = "rrq.business.saga.completed.total"
-	MetricBusinessRefunds        = "rrq.business.refunds.total"
-	MetricBusinessDisputes       = "rrq.business.disputes.total"
-	MetricBusinessWalletsCreated = "rrq.business.wallets_created.total"
-	MetricBusinessDeposits       = "rrq.business.deposits.total"
-	MetricBusinessDepositsAmount = "rrq.business.deposits_amount.total"
+	MetricBusinessGTV            = "business.gtv.total"
+	MetricBusinessTransfers      = "business.transfers.total"
+	MetricBusinessDeclines       = "business.declines.total"
+	MetricBusinessSagaDuration   = "business.saga_duration.seconds"
+	MetricBusinessSagaInitiated  = "business.saga.initiated.total"
+	MetricBusinessSagaCompleted  = "business.saga.completed.total"
+	MetricBusinessRefunds        = "business.refunds.total"
+	MetricBusinessDisputes       = "business.disputes.total"
+	MetricBusinessWalletsCreated = "business.wallets_created.total"
+	MetricBusinessDeposits       = "business.deposits.total"
+	MetricBusinessDepositsAmount = "business.deposits_amount.total"
 
 	// Business Metric Labels
 	MetricLabelCurrency      = "currency"
@@ -198,7 +198,6 @@ func RecordBusinessDispute(ctx context.Context, disputeStatus string) {
 // RecordWalletCreated records a newly created wallet.
 func RecordWalletCreated(ctx context.Context, merchantID, currency string) {
 	businessWalletsCreated.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelMerchantID, merchantID),
 		attribute.String(MetricLabelCurrency, currency),
 	))
 }
@@ -206,13 +205,11 @@ func RecordWalletCreated(ctx context.Context, merchantID, currency string) {
 // RecordDepositRequest records a deposit request status and amount.
 func RecordDepositRequest(ctx context.Context, merchantID, currency string, amount int64, status string) {
 	businessDepositsTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelMerchantID, merchantID),
 		attribute.String(MetricLabelCurrency, currency),
 		attribute.String(MetricLabelStatus, status),
 	))
 	if status == TransferMetricSuccess {
 		businessDepositsAmount.Add(ctx, amount, metric.WithAttributes(
-			attribute.String(MetricLabelMerchantID, merchantID),
 			attribute.String(MetricLabelCurrency, currency),
 		))
 	}

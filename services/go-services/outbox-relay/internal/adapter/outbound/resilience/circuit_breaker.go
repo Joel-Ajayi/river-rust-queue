@@ -25,7 +25,7 @@ func NewEventStoreCB(next port.EventStore, shardID string, cbs *platform.DBCircu
 }
 
 func (c *eventStoreCB) ProcessUnpublishedEvents(ctx context.Context, shardID string, batchSize int, processor func(ctx context.Context, events []domain.Event) error) error {
-	_, err := c.cb.Execute(func() (interface{}, error) {
+	_, err := c.cb.Execute(ctx, func() (interface{}, error) {
 		return nil, c.next.ProcessUnpublishedEvents(ctx, shardID, batchSize, processor)
 	})
 	return err

@@ -20,7 +20,7 @@ func NewRedisStoreResilience(next port.RedisStore, cb *platform.RedisCircuitBrea
 }
 
 func (r *redisStoreResilience) UpdateVelocity(ctx context.Context, walletID string, eventID string, timestampMs int64, windowMs int) (int, error) {
-	res, err := r.cb.Execute(func() (any, error) {
+	res, err := r.cb.Execute(ctx, func() (any, error) {
 		return r.next.UpdateVelocity(ctx, walletID, eventID, timestampMs, windowMs)
 	})
 	if err != nil {

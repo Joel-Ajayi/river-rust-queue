@@ -15,14 +15,17 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/segmentio/kafka-go"
 	"go.uber.org/zap"
+	"sync/atomic"
 )
 
-// CircuitBreaker wraps a failsafe-go circuitbreaker.CircuitBreaker[any] with helper methods.
+// CircuitBreaker wraps a failsafe circuit breaker.
 type CircuitBreaker struct {
-	cb circuitbreaker.CircuitBreaker[any]
+	cb        circuitbreaker.CircuitBreaker[any]
+	latestCtx atomic.Pointer[context.Context]
 }
 
-func (c *CircuitBreaker) Execute(fn func() (any, error)) (any, error) {
+func (c *CircuitBreaker) Execute(ctx context.Context, fn func() (any, error)) (any, error) {
+	c.latestCtx.Store(&ctx)
 	return failsafe.With[any](c.cb).Get(fn)
 }
 
@@ -65,11 +68,12 @@ type CircuitBreakerConfig struct {
 	MinRequests   uint32
 	ErrorRate     float64
 	IsSuccessful  func(error) bool
-	OnStateChange func(logger *zap.Logger, name string, from circuitbreaker.State, to circuitbreaker.State)
+	OnStateChange func(ctx context.Context, logger *zap.Logger, name string, from circuitbreaker.State, to circuitbreaker.State)
 }
 
 // newCircuitBreaker creates a standardized failsafe-go CircuitBreaker for the platform.
 func newCircuitBreaker(cfg CircuitBreakerConfig) *CircuitBreaker {
+	c := &CircuitBreaker{}
 	builder := circuitbreaker.NewBuilder[any]()
 
 	switch {
@@ -99,11 +103,17 @@ func newCircuitBreaker(cfg CircuitBreakerConfig) *CircuitBreaker {
 
 	builder.OnStateChanged(func(e circuitbreaker.StateChangedEvent) {
 		if cfg.OnStateChange != nil {
-			cfg.OnStateChange(cfg.Logger, cfg.Name, e.OldState, e.NewState)
+			ctxPtr := c.latestCtx.Load()
+			ctx := context.Background()
+			if ctxPtr != nil {
+				ctx = *ctxPtr
+			}
+			cfg.OnStateChange(ctx, cfg.Logger, cfg.Name, e.OldState, e.NewState)
 		}
 	})
 
-	return &CircuitBreaker{cb: builder.Build()}
+	c.cb = builder.Build()
+	return c
 }
 
 // dbIsSuccessfulPolicy: terminal business errors + safe ACID transaction failures
@@ -206,7 +216,7 @@ type WebhookResilience struct {
 	cb       circuitbreaker.CircuitBreaker[any]
 }
 
-func (w *WebhookResilience) Execute(fn func() (any, error)) (any, error) {
+func (w *WebhookResilience) Execute(ctx context.Context, fn func() (any, error)) (any, error) {
 	return w.executor.Get(fn)
 }
 
@@ -295,8 +305,7 @@ func (r *DBCircuitBreakers) newDBBreaker(name string) *CircuitBreaker {
 }
 
 // recordBreakerStateChange records state gauge and open/half-open counters.
-// B2: lower-effort fix — failsafe does not expose the originating context in the state-change event, so the metric ctx is context.Background(). The originating log line above carries the breaker name so an on-call can pivot by CB.
-func recordBreakerStateChange(logger *zap.Logger, name string, from circuitbreaker.State, to circuitbreaker.State) {
+func recordBreakerStateChange(ctx context.Context, logger *zap.Logger, name string, from circuitbreaker.State, to circuitbreaker.State) {
 	var stateVal int64
 	switch to {
 	case circuitbreaker.ClosedState:
@@ -307,18 +316,13 @@ func recordBreakerStateChange(logger *zap.Logger, name string, from circuitbreak
 		stateVal = CBGaugeOpen
 	}
 	if to == circuitbreaker.OpenState && logger != nil {
-		logger.Warn("B2: circuit-breaker state metric uses context.Background(); no originating trace. See circuit_breakers.go:recordBreakerStateChange",
-			zap.String(LogFieldComponent, "circuit-breaker"),
-			zap.String("circuit_breaker_name", name),
-			zap.String("from", from.String()),
-			zap.String("to", to.String()),
-		)
+
 	}
-	RecordCircuitBreakerState(context.Background(), name, stateVal)
+	RecordCircuitBreakerState(ctx, name, stateVal)
 	if to == circuitbreaker.OpenState {
-		RecordCircuitBreakerOpen(context.Background(), name)
+		RecordCircuitBreakerOpen(ctx, name)
 		if from == circuitbreaker.HalfOpenState {
-			RecordCircuitBreakerHalfOpenFailure(context.Background(), name)
+			RecordCircuitBreakerHalfOpenFailure(ctx, name)
 		}
 		if logger != nil {
 			logger.Warn("Circuit breaker opened", zap.String(LogFieldComponent, "circuit-breaker"), zap.String("circuit_breaker_name", name))
@@ -423,8 +427,8 @@ func NewRedisCircuitBreaker(name string, cbConfig CircuitBreakerConfig, logger *
 
 // Execute runs fn guarded by the Redis breaker. While the breaker is open,
 // calls fail fast without touching the Redis client.
-func (r *RedisCircuitBreaker) Execute(fn func() (any, error)) (any, error) {
-	return r.cb.Execute(fn)
+func (r *RedisCircuitBreaker) Execute(ctx context.Context, fn func() (any, error)) (any, error) {
+	return r.cb.Execute(ctx, fn)
 }
 
 // Breaker returns the underlying failsafe-go circuitbreaker instance.
