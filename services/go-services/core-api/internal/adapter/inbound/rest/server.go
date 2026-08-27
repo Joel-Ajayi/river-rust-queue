@@ -73,7 +73,13 @@ func NewServer(
 	mux := http.NewServeMux()
 	s.RegisterRoutes(mux)
 
-	tracedMux := otelhttp.NewHandler(mux, platform.ServiceNameCoreAPI)
+	tracedMux := otelhttp.NewHandler(
+		mux,
+		platform.ServiceNameCoreAPI,
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			return r.URL.Path != platform.APIHealthPath && r.URL.Path != platform.APIReadyPath
+		}),
+	)
 
 	timeoutMsg := `{"error":"gateway_timeout"}`
 	timeoutHandler := http.TimeoutHandler(tracedMux, time.Duration(cfg.Capacity.ServerTimeoutMs)*time.Millisecond, timeoutMsg)
