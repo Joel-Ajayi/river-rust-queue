@@ -13,4 +13,6 @@ type CrossShardStore interface {
 	CreditFromClearingAccount(ctx context.Context, intent *eventsv1.XShardTransferRequestedPayload) error
 	SettleCrossShardTransfer(ctx context.Context, srcShard, transferID string) (int64, string, error)
 	ReverseCrossShardTransfer(ctx context.Context, srcShard, transferID, reason string) error
+	// CountUnresolvedSagas returns the count of cross_shard_transfer rows that are still pending and older than thresholdMs.
+	CountUnresolvedSagas(ctx context.Context, thresholdMs int64) (int64, error)
 }

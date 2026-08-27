@@ -36,6 +36,13 @@ func main() {
 		logger.Panic("Failed to initialize telemetry", zap.Error(err))
 	}
 
+	if err := platform.InitMetrics(); err != nil {
+		logger.Panic("Failed to initialize metrics", zap.Error(err))
+	}
+	if err := platform.InitBusinessMetrics(); err != nil {
+		logger.Panic("Failed to initialize business metrics", zap.Error(err))
+	}
+
 	pools, err := platform.NewShardPools(ctx, cfg, logger)
 	if err != nil {
 		logger.Panic(platform.LogEventPostgresInitFailed, zap.Error(err))
@@ -98,6 +105,30 @@ func main() {
 	logger.Info(platform.LogEventServerStarted)
 
 	var wg sync.WaitGroup
+
+	// C1: periodic scan for unresolved cross-shard sagas. Feeds rrq.saga.unresolved.count for the tier2 panel and the LedgerDoubleEntryImbalance alert.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				scanCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				count, err := xshardStore.CountUnresolvedSagas(scanCtx, 120000)
+				cancel()
+				if err != nil {
+					logger.Warn("saga unresolved scan failed", zap.Error(err))
+					continue
+				}
+				platform.RecordSagaUnresolvedCount(context.Background(), count)
+			}
+		}
+	}()
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

@@ -470,11 +470,36 @@ func (s *CrossShardStore) CreditFromClearingAccount(ctx context.Context, intent 
 	return tx.Commit(ctx)
 }
 
+// CountUnresolvedSagas returns the count of cross_shard_transfer rows on every shard that are still pending and older than thresholdMs.
+func (s *CrossShardStore) CountUnresolvedSagas(ctx context.Context, thresholdMs int64) (int64, error) {
+	shardIDs := s.pools.GetAvailableShardIDs()
+	if len(shardIDs) == 0 {
+		return 0, nil
+	}
+	var total int64
+	for _, shardID := range shardIDs {
+		pool, err := s.pools.ShardPool(shardID)
+		if err != nil {
+			continue
+		}
+		var n int64
+		err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM cross_shard_transfer WHERE state = $1 AND created_at < NOW() - ($2::bigint * INTERVAL '1 millisecond')`, platform.XShardTransferStatusPending, thresholdMs).Scan(&n)
+		if err != nil {
+			continue
+		}
+		total += n
+	}
+	return total, nil
+}
+
 func (s *CrossShardStore) SettleCrossShardTransfer(ctx context.Context, srcShard string, transferID string) (int64, string, error) {
 	pool, err := s.pools.ShardPool(srcShard)
 	if err != nil {
 		return 0, "", err
 	}
+
+	// A4.3: capture saga start for rrq_business_saga_duration_seconds histogram.
+	sagaStart := time.Now()
 
 	// Removed hardcoded timeout
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -557,7 +582,13 @@ func (s *CrossShardStore) SettleCrossShardTransfer(ctx context.Context, srcShard
 		return 0, "", err
 	}
 
-	return amount, currency, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return 0, "", err
+	}
+
+	// A4.3: record saga duration only on successful commit.
+	platform.RecordBusinessSagaDuration(ctx, time.Since(sagaStart))
+	return amount, currency, nil
 }
 
 func (s *CrossShardStore) ReverseCrossShardTransfer(ctx context.Context, srcShard, transferID, reason string) error {

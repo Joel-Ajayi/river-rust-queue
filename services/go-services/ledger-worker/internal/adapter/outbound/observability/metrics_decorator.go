@@ -77,6 +77,10 @@ func (m *crossShardStoreMetrics) ReverseCrossShardTransfer(ctx context.Context, 
 	return err
 }
 
+func (m *crossShardStoreMetrics) CountUnresolvedSagas(ctx context.Context, thresholdMs int64) (int64, error) {
+	return m.next.CountUnresolvedSagas(ctx, thresholdMs)
+}
+
 // -- DLQ Store Decorator --
 
 type dlqStoreMetrics struct {

@@ -96,6 +96,10 @@ func (x *crossShardStoreResilience) ReverseCrossShardTransfer(ctx context.Contex
 	return err
 }
 
+func (x *crossShardStoreResilience) CountUnresolvedSagas(ctx context.Context, thresholdMs int64) (int64, error) {
+	return x.next.CountUnresolvedSagas(ctx, thresholdMs)
+}
+
 // DLQStore shares the same per-shard breaker as LedgerStore & CrossShardStore.
 type dlqStoreResilience struct {
 	next port.DLQStore
