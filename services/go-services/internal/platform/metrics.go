@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -23,16 +24,13 @@ const (
 	MetricOutboxEventsPublishedTotal  = "rrq.outbox.events.published.total"
 	MetricOutboxPanicsTotal           = "rrq.outbox.panics.total"
 	MetricConsumerPanicsTotal         = "rrq.kafka_consumer.panics.total"
-	MetricRedisFailClosed             = "rrq.redis.fail_closed.total"
 	MetricDLQInfrastructureFlood      = "rrq.dlq.infrastructure_flood.total"
 	MetricKafkaProducerBufferFill     = "rrq.kafka.producer.buffer_fill.ratio"
 	MetricIdempotencyConflictsTotal   = "rrq.idempotency.conflicts.total"
 	MetricIdempotencyHitsTotal        = "rrq.idempotency.hits.total"
-	MetricWeakAPIKeyAuth              = "rrq.weak_api_key.auth.total"
 	MetricConsumerBackoffDuration     = "rrq.kafka_consumer.backoff_duration.seconds"
 	MetricCommitCoordinatorQueueDepth = "rrq.commit_coordinator.queue.depth"
-	MetricTaskChannelFillRatio        = "rrq.task_channel.fill.ratio"
-	MetricLedgerImbalanceTotal        = "rrq.ledger.imbalance.total"
+	MetricLedgerImbalance             = "rrq.ledger.imbalance"
 	MetricSagaUnresolvedCount         = "rrq.saga.unresolved.count"
 	MetricVelocityLimitExceededTotal  = "rrq.velocity.limit_exceeded.total"
 	MetricAdminDLQReplayedTotal       = "rrq.admin.dlq_replayed.total"
@@ -42,6 +40,10 @@ const (
 	MetricPGPoolIdleConns             = "rrq.pg.pool.idle.conns"
 	MetricPGPoolMaxConns              = "rrq.pg.pool.max.conns"
 	MetricPGPoolEmptyAcquireCount     = "rrq.pg.pool.empty_acquire.count"
+	MetricRetryBudgetExhaustedTotal   = "rrq.retry.budget.exhausted.total"
+	MetricReconDiscrepanciesTotal     = "rrq.recon.discrepancies.total"
+	MetricRedisFailClosed             = "rrq.redis.fail_closed.total"
+	MetricTaskChannelFillRatio        = "rrq.task_channel.fill_ratio"
 
 	// label
 	MetricLabelCircuitBreaker = "circuit.breaker"
@@ -98,231 +100,233 @@ var (
 	pgPoolMaxConns          metric.Int64Gauge
 	pgPoolEmptyAcquireCount metric.Int64Counter
 
+	retryBudgetExhaustedTotal metric.Int64Counter
+	reconDiscrepanciesTotal   metric.Int64Counter
+
 	metricsOnce sync.Once
 )
 
-// init initializes the OpenTelemetry instruments on package load.
-func init() {
-	metricsOnce.Do(func() {
-		var err error
+// InitMetrics registers all platform OTel instruments. Call from main() after InitTelemetry.
+// B1: returns an error instead of panicking so callers can decide on shutdown vs. continue-with-reduced-instrumentation.
+func InitMetrics() error {
+	var err error
+	var initErr error
 
+	register := func(name string, fn func() error) {
+		if initErr != nil {
+			return
+		}
+		if e := fn(); e != nil {
+			initErr = fmt.Errorf("metric %s: %w", name, e)
+		}
+	}
+
+	register("circuit_breaker_open_total", func() error {
 		circuitBreakerOpenTotal, err = meter.Int64Counter(
 			MetricCBOpenTotal,
 			metric.WithDescription("Total number of times a circuit breaker has tripped to OPEN"),
 		)
-		if err != nil {
-			panic("failed to initialize circuit breaker open metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("circuit_breaker_half_open_failure", func() error {
 		circuitBreakerHalfOpenFailure, err = meter.Int64Counter(
 			MetricCBHalfOpenFailure,
 			metric.WithDescription("Total number of times a circuit breaker failed its half-open trial"),
 		)
-		if err != nil {
-			panic("failed to initialize circuit breaker half open failure metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("dlq_ingestion_rate", func() error {
 		dlqIngestionRate, err = meter.Int64Counter(
 			MetricDLQIngestionRate,
 			metric.WithDescription("Total number of poison pills routed to the DLQ"),
 		)
-		if err != nil {
-			panic("failed to initialize dlq ingestion rate metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("circuit_breaker_state", func() error {
 		circuitBreakerState, err = meter.Int64Gauge(
 			MetricCBState,
 			metric.WithDescription("Current state of the circuit breaker (0=Closed, 1=HalfOpen, 2=Open)"),
 		)
-		if err != nil {
-			panic("failed to initialize circuit breaker state metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("outbox_lag_seconds", func() error {
 		outboxLagGauge, err = meter.Float64Gauge(
 			MetricOutboxLagSeconds,
 			metric.WithDescription("Age in seconds of the oldest unpublished outbox event per shard"),
 		)
-		if err != nil {
-			panic("failed to initialize outbox lag metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("infrastructure_errors_total", func() error {
 		infrastructureErrorsTotal, err = meter.Int64Counter(
 			MetricInfraErrorsTotal,
 			metric.WithDescription("Total number of transient infrastructure errors encountered"),
 		)
-		if err != nil {
-			panic("failed to initialize infrastructure errors metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("outbox_events_published_total", func() error {
 		outboxEventsPublishedTotal, err = meter.Int64Counter(
 			MetricOutboxEventsPublishedTotal,
 			metric.WithDescription("Total number of events successfully published by outbox relay"),
 		)
-		if err != nil {
-			panic("failed to initialize outbox events published metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("outbox_panics_total", func() error {
 		outboxPanicsTotal, err = meter.Int64Counter(
 			MetricOutboxPanicsTotal,
 			metric.WithDescription("Total number of panics caught in outbox relay loop"),
 		)
-		if err != nil {
-			panic("failed to initialize outbox panics metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("consumer_panics_total", func() error {
 		consumerPanicsTotal, err = meter.Int64Counter(
 			MetricConsumerPanicsTotal,
 			metric.WithDescription("Total number of panics caught in any service's worker pool"),
 		)
-		if err != nil {
-			panic("failed to initialize consumer panics metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("redis_fail_closed_total", func() error {
 		redisFailClosedTotal, err = meter.Int64Counter(
 			MetricRedisFailClosed,
 			metric.WithDescription("Number of operations rejected because Redis was unavailable (fail-closed)"),
 		)
-		if err != nil {
-			panic("failed to initialize redis fail-closed metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("dlq_infrastructure_flood_total", func() error {
 		dlqInfraFloodTotal, err = meter.Int64Counter(
 			MetricDLQInfrastructureFlood,
 			metric.WithDescription("Number of messages routed to the DLQ specifically because an infrastructure dependency was down (vs. business-rule violations)"),
 		)
-		if err != nil {
-			panic("failed to initialize DLQ infrastructure flood metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("kafka_producer_buffer_fill", func() error {
 		kafkaProducerBufferFill, err = meter.Float64Gauge(
 			MetricKafkaProducerBufferFill,
 			metric.WithDescription("Kafka producer staging buffer fill ratio (0.0-1.0) computed from writer.BufferedBytes vs the 50KB allocation budget"),
 		)
-		if err != nil {
-			panic("failed to initialize kafka producer buffer fill ratio metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("idempotency_conflicts_total", func() error {
 		idempotencyConflictsTotal, err = meter.Int64Counter(
 			MetricIdempotencyConflictsTotal,
 			metric.WithDescription("Total number of idempotency conflicts"),
 		)
-		if err != nil {
-			panic(err)
-		}
-
+		return err
+	})
+	register("idempotency_hits_total", func() error {
 		idempotencyHitsTotal, err = meter.Int64Counter(
 			MetricIdempotencyHitsTotal,
 			metric.WithDescription("Total number of idempotency key replay hits (duplicate submission resolved to prior job)"),
 		)
-		if err != nil {
-			panic(err)
-		}
-
+		return err
+	})
+	register("consumer_backoff_duration", func() error {
 		consumerBackoffDuration, err = meter.Float64Histogram(
 			MetricConsumerBackoffDuration,
 			metric.WithDescription("Duration of consumer backoff sleeps"),
 			metric.WithUnit("s"),
 		)
-		if err != nil {
-			panic("failed to initialize consumer backoff duration metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("commit_coordinator_queue_depth", func() error {
 		commitCoordinatorQueueDepth, err = meter.Int64Gauge(
 			MetricCommitCoordinatorQueueDepth,
 			metric.WithDescription("Messages waiting in per-partition CommitCoordinator FIFO"),
 		)
-		if err != nil {
-			panic("failed to initialize commit coordinator queue depth metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("task_channel_fill_ratio", func() error {
 		taskChannelFillRatio, err = meter.Float64Gauge(
 			MetricTaskChannelFillRatio,
 			metric.WithDescription("taskChan fill ratio (0.0-1.0) per partition"),
 		)
-		if err != nil {
-			panic("failed to initialize task channel fill ratio metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("ledger_imbalance", func() error {
 		ledgerImbalanceTotal, err = meter.Int64Gauge(
-			MetricLedgerImbalanceTotal,
+			MetricLedgerImbalance,
 			metric.WithDescription("Total double-entry ledger imbalance sum"),
 		)
-		if err != nil {
-			panic("failed to initialize ledger imbalance metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("saga_unresolved_count", func() error {
 		sagaUnresolvedCount, err = meter.Int64Gauge(
 			MetricSagaUnresolvedCount,
 			metric.WithDescription("Total count of hanging cross-shard sagas unresolved > 120s"),
 		)
-		if err != nil {
-			panic("failed to initialize saga unresolved count metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("velocity_limit_exceeded_total", func() error {
 		velocityLimitExceededTotal, err = meter.Int64Counter(
 			MetricVelocityLimitExceededTotal,
 			metric.WithDescription("Total number of velocity limit violations"),
 		)
-		if err != nil {
-			panic("failed to initialize velocity limit exceeded metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("admin_dlq_replayed_total", func() error {
 		adminDLQReplayedTotal, err = meter.Int64Counter(
 			MetricAdminDLQReplayedTotal,
 			metric.WithDescription("Total number of DLQ messages successfully replayed"),
 		)
-		if err != nil {
-			panic("failed to initialize admin dlq replayed metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("bulkhead_rejections_total", func() error {
 		bulkheadRejectionsTotal, err = meter.Int64Counter(
 			MetricBulkheadRejectionsTotal,
 			metric.WithDescription("Total number of requests rejected by the bulkhead"),
 		)
-		if err != nil {
-			panic("failed to initialize bulkhead rejections metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("bulkhead_in_flight", func() error {
 		bulkheadInFlight, err = meter.Int64UpDownCounter(
 			MetricBulkheadInFlight,
 			metric.WithDescription("Current number of requests in flight through the bulkhead"),
 		)
-		if err != nil {
-			panic("failed to initialize bulkhead in flight metric: " + err.Error())
-		}
-
+		return err
+	})
+	register("pg_pool_acquired_conns", func() error {
 		pgPoolAcquiredConns, err = meter.Int64Gauge(
 			MetricPGPoolAcquiredConns,
 			metric.WithDescription("Number of currently acquired connections in the PG pool"),
 		)
-		if err != nil {
-			panic(err)
-		}
-
+		return err
+	})
+	register("pg_pool_idle_conns", func() error {
 		pgPoolIdleConns, err = meter.Int64Gauge(
 			MetricPGPoolIdleConns,
 			metric.WithDescription("Number of currently idle connections in the PG pool"),
 		)
-		if err != nil {
-			panic(err)
-		}
-
+		return err
+	})
+	register("pg_pool_max_conns", func() error {
 		pgPoolMaxConns, err = meter.Int64Gauge(
 			MetricPGPoolMaxConns,
 			metric.WithDescription("Maximum number of connections allowed in the PG pool"),
 		)
-		if err != nil {
-			panic(err)
-		}
-
+		return err
+	})
+	register("pg_pool_empty_acquire_count", func() error {
 		pgPoolEmptyAcquireCount, err = meter.Int64Counter(
 			MetricPGPoolEmptyAcquireCount,
 			metric.WithDescription("Cumulative count of successful acquires that waited for a connection to be released or established"),
 		)
-		if err != nil {
-			panic(err)
-		}
+		return err
 	})
+	register("retry_budget_exhausted_total", func() error {
+		retryBudgetExhaustedTotal, err = meter.Int64Counter(
+			MetricRetryBudgetExhaustedTotal,
+			metric.WithDescription("Total number of retry budget exhaustion events (Token Bucket denial) per service"),
+		)
+		return err
+	})
+	register("recon_discrepancies_total", func() error {
+		reconDiscrepanciesTotal, err = meter.Int64Counter(
+			MetricReconDiscrepanciesTotal,
+			metric.WithDescription("Total number of reconciliation discrepancies detected across shards"),
+		)
+		return err
+	})
+
+	return initErr
 }
 
 // RecordCircuitBreakerOpen increments the counter for tripped circuit breakers.
@@ -382,27 +386,19 @@ func RecordOutboxPanic(ctx context.Context, shardID string) {
 	))
 }
 
-// RecordConsumerPanic increments the counter for panics recovered in any
-// service's worker pool. The topic is required because the outbox relay uses
-// shardID (which is also a topic for the relay's purposes).
+// RecordConsumerPanic increments the counter for panics recovered in any service's worker pool. Topic required (outbox relay uses shardID as topic).
 func RecordConsumerPanic(ctx context.Context, topic string) {
 	consumerPanicsTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(MetricLabelTopic, topic),
 	))
 }
 
-// RecordRedisFailClosed increments the counter for operations rejected because
-// Redis was unavailable. Used by services that fail-closed on Redis errors
-// (e.g., fraud-worker) so operators can distinguish "Redis down" from
-// business-rule rejections in dashboards.
+// RecordRedisFailClosed increments the counter for operations rejected because Redis was unavailable (fail-closed).
 func RecordRedisFailClosed(ctx context.Context) {
 	redisFailClosedTotal.Add(ctx, 1)
 }
 
-// RecordDLQInfraFlood increments the counter for messages routed to the DLQ
-// because of an infrastructure failure (Redis, PG, Kafka down). Pair with
-// RecordDLQIngestion to compute the ratio of infra-driven vs. business-driven
-// DLQ entries. See issue 36.
+// RecordDLQInfraFlood increments the counter for messages routed to the DLQ because of an infrastructure failure (Redis, PG, Kafka down).
 func RecordDLQInfraFlood(ctx context.Context, serviceName string) {
 	dlqInfraFloodTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(MetricLabelService, serviceName),
@@ -510,4 +506,18 @@ func AddPGPoolEmptyAcquireCount(ctx context.Context, poolName string, serviceNam
 		attribute.String(MetricLabelService, serviceName),
 		attribute.String(MetricLabelDBPool, poolName),
 	))
+}
+
+// RecordRetryBudgetExhausted increments the counter for retry budget exhaustion (Token Bucket denial).
+// Service dimension lives on the OTel service.name resource attribute, not on the metric label.
+func RecordRetryBudgetExhausted(ctx context.Context) {
+	retryBudgetExhaustedTotal.Add(ctx, 1)
+}
+
+// RecordReconDiscrepancies increments the counter for reconciliation discrepancies across shards.
+func RecordReconDiscrepancies(ctx context.Context, count int64) {
+	if count <= 0 {
+		return
+	}
+	reconDiscrepanciesTotal.Add(ctx, count)
 }

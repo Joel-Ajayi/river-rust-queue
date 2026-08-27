@@ -132,7 +132,8 @@ func ExecuteWithJitter(ctx context.Context, cfg RetryConfig, fn func(exec failsa
 		}
 		// Enforce Token Bucket Retry Budget before permitting a retry attempt
 		if !budget.TryAcquire() {
-			return false // Retry budget exhausted -> fail fast to DLQ!
+			RecordRetryBudgetExhausted(ctx) // B1: surface budget denial in rrq.retry.budget.exhausted
+			return false                    // Retry budget exhausted -> fail fast to DLQ!
 		}
 		classification := ClassifyError(err, nil)
 		return classification == ClassificationTransient || classification == ClassificationInfrastructure
