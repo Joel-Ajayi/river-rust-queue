@@ -32,23 +32,29 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// 3. Initialize OpenTelemetry tracing and metrics
 	if err := platform.InitTelemetry(ctx, "fraud-worker"); err != nil {
 		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
+	}
 
-		if err := platform.InitMetrics(); err != nil {
-			logger.Panic(platform.LogEventMetricsInitFailed, zap.Error(err))
-		}
+	if err := platform.InitMetrics(); err != nil {
+		logger.Panic(platform.LogEventMetricsInitFailed, zap.Error(err))
+	}
+	if err := platform.InitBusinessMetrics(); err != nil {
 		logger.Panic(platform.LogEventBusinessMetricsInitFailed, zap.Error(err))
 	}
 
+	// 4. Initialize PostgreSQL shard connection pools
 	pools, err := platform.NewShardPools(ctx, cfg, logger)
 	if err != nil {
+		logger.Panic(platform.LogEventPostgresInitFailed, zap.Error(err))
 	}
 	defer pools.Close()
 
 	// 5. Initialize Redis data client for sliding-window velocity checks
 	redisClient, err := platform.NewRedisClient(ctx, cfg.RedisDataMaster, cfg.RedisAddr(), cfg.RedisDataPassword, logger)
 	if err != nil {
+		logger.Panic(platform.LogEventRedisInitFailed, zap.Error(err))
 	}
 	defer redisClient.Close()
 

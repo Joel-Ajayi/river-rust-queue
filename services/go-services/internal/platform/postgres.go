@@ -201,9 +201,14 @@ func NewTestShardPools(merchants, shardA, shardB *pgxpool.Pool) *ShardPools {
 	}
 }
 
-func (sp *ShardPools) MerchantsPool() *pgxpool.Pool   { return sp.merchants }
-func (sp *ShardPools) MerchantsPoolRO() *pgxpool.Pool { return sp.roMerchants }
-func (sp *ShardPools) HashRing() *HashRing            { return sp.hashRing }
+func (sp *ShardPools) MerchantsPool() *pgxpool.Pool { return sp.merchants }
+func (sp *ShardPools) MerchantsPoolRO() *pgxpool.Pool {
+	if sp.roMerchants != nil {
+		return sp.roMerchants
+	}
+	return sp.merchants
+}
+func (sp *ShardPools) HashRing() *HashRing { return sp.hashRing }
 
 // ShardPool returns the Read-Write pool for the given shard ID.
 func (sp *ShardPools) ShardPool(shardID string) (*pgxpool.Pool, error) {
@@ -216,15 +221,17 @@ func (sp *ShardPools) ShardPool(shardID string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// ShardPoolRO returns the Read-Only pool for the given shard ID.
+// ShardPoolRO returns the Read-Only pool for the given shard ID, falling back to RW pool if RO is not provisioned.
 func (sp *ShardPools) ShardPoolRO(shardID string) (*pgxpool.Pool, error) {
 	sp.mu.RLock()
 	defer sp.mu.RUnlock()
-	pool, ok := sp.roShards[shardID]
-	if !ok || pool == nil {
-		return nil, fmt.Errorf("%w: %q (RO pool not provisioned for this service)", ErrUnknownShard, shardID)
+	if pool, ok := sp.roShards[shardID]; ok && pool != nil {
+		return pool, nil
 	}
-	return pool, nil
+	if pool, ok := sp.shards[shardID]; ok && pool != nil {
+		return pool, nil
+	}
+	return nil, fmt.Errorf("%w: %q", ErrUnknownShard, shardID)
 }
 
 // Return Available Shard IDs
