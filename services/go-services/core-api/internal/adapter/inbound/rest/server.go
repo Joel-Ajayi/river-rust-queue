@@ -77,7 +77,9 @@ func NewServer(
 		mux,
 		platform.ServiceNameCoreAPI,
 		otelhttp.WithFilter(func(r *http.Request) bool {
-			return r.URL.Path != platform.APIHealthPath && r.URL.Path != platform.APIReadyPath
+			return r.URL.Path != platform.APIHealthPath &&
+				r.URL.Path != platform.APIReadyPath &&
+				r.URL.Path != "/.well-known/jwks.json"
 		}),
 	)
 

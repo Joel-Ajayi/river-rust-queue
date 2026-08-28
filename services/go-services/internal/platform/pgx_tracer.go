@@ -13,11 +13,6 @@ import (
 
 // pgxQueryTracer emits an OpenTelemetry client span for every SQL statement run
 // through the shared pgx pools.
-//
-// The Go eBPF auto-instrumentor can only observe `database/sql` call sites; it
-// cannot see pgx-native (pgxpool) queries. Postgres is therefore traced
-// manually here so the collector's span_metrics connector can derive DB RED
-// metrics (traces_span_metrics_*) keyed by db.system.name="postgresql".
 type pgxQueryTracer struct{}
 
 var _ pgx.QueryTracer = pgxQueryTracer{}
@@ -25,13 +20,14 @@ var _ pgx.QueryTracer = pgxQueryTracer{}
 // TraceQueryStart starts a client span covering the statement's execution.
 func (pgxQueryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	op := dbOperation(data.SQL)
+	if op == "SELECT" {
+		return ctx
+	}
 	opts := []trace.SpanStartOption{
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
 			attribute.String("db.system.name", "postgresql"),
 			attribute.String("db.operation", op),
-			// SQL uses positional ($1, $2) placeholders, so no literal values
-			// are embedded and argument values are never recorded here.
 			attribute.String("db.statement", data.SQL),
 		),
 	}
@@ -41,6 +37,9 @@ func (pgxQueryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx
 
 func (pgxQueryTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
 	span := trace.SpanFromContext(ctx)
+	if !span.IsRecording() {
+		return
+	}
 	if data.Err != nil {
 		span.RecordError(data.Err)
 		span.SetStatus(codes.Error, data.Err.Error())
