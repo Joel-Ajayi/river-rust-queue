@@ -55,17 +55,7 @@ func (p *JobService) ProcessJob(ctx context.Context, payload *eventsv1.JobReques
 		return domain.ErrMissingTransferData
 	}
 
-	// 2. Resolve source database shard from merchant directory
-	srcShard, err := p.directory.ShardFor(ctx, payload.MerchantId)
-	if err != nil {
-		platform.LoggerWithTrace(ctx, p.logger).Error(platform.LogEventMerchantLookupFailed,
-			zap.String(platform.LogFieldMerchantID, payload.MerchantId),
-			zap.Error(err),
-		)
-		return err
-	}
-
-	// 3. Resolve destination database shard from merchant directory
+	// 2. Resolve destination database shard from merchant directory
 	dstShard, err := p.directory.ShardFor(ctx, transferData.ToMerchantId)
 	if err != nil {
 		platform.LoggerWithTrace(ctx, p.logger).Error(platform.LogEventMerchantLookupFailed,
@@ -73,6 +63,18 @@ func (p *JobService) ProcessJob(ctx context.Context, payload *eventsv1.JobReques
 			zap.Error(err),
 		)
 		return err
+	}
+
+	// 3. Resolve source database shard (vault deposits and same-merchant transfers execute locally on dstShard)
+	var srcShard string
+	if transferData.FromWallet == "" || payload.MerchantId == transferData.ToMerchantId {
+		srcShard = dstShard
+	} else {
+		srcShard, err = p.directory.ShardFor(ctx, payload.MerchantId)
+		if err != nil {
+			// If source merchant has no dedicated shard (e.g. system vault entity), route locally on dstShard
+			srcShard = dstShard
+		}
 	}
 
 	// 4. Construct deterministic transfer entity

@@ -43,9 +43,8 @@ func (s *Server) extractMerchant(next http.Handler) http.Handler {
 }
 
 // requirePlatformAdmin restricts an endpoint to the platform administrator.
-// It requires the request to have arrived via the Envoy gateway's admin route
-// (which stamps X-RRQ-Edge) and the authenticated merchant to be the seeded
-// platform merchant.
+// It requires the request to have arrived via the X-RRQ-Edge header
+// and the authenticated principal to have the platform tier.
 func (s *Server) requirePlatformAdmin(next http.Handler) http.Handler {
 	return s.extractMerchant(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(HeaderEdgeOrigin) != HeaderEdgeOriginValue {
@@ -53,7 +52,7 @@ func (s *Server) requirePlatformAdmin(next http.Handler) http.Handler {
 			return
 		}
 		principal, ok := r.Context().Value(ContextPrincipal).(domain.Principal)
-		if !ok || principal.MerchantID != platform.PlatformMerchantID {
+		if !ok || principal.Tier != platform.MerchantTierPlatform {
 			writeError(w, platform.ErrForbidden(domain.ErrAdminForbidden))
 			return
 		}

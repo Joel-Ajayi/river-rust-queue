@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
 	_ "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/testutil"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
@@ -230,9 +231,10 @@ func TestAPI_AdminDLQEndpoints(t *testing.T) {
 		t.Fatalf("expected 401 Unauthorized, got %d", recUnauth.Code)
 	}
 
-	// Authorized (platform admin identity + envoy edge header)
+	// Authorized (platform admin tier + envoy edge header)
 	reqAuth := httptest.NewRequest("GET", platform.APIAdminDLQListPath, nil)
-	reqAuth.Header.Set(HeaderMerchantID, platform.PlatformMerchantID)
+	reqAuth.Header.Set(HeaderMerchantID, "merchant_test_admin")
+	reqAuth.Header.Set(HeaderMerchantTier, platform.MerchantTierPlatform)
 	reqAuth.Header.Set(HeaderEdgeOrigin, HeaderEdgeOriginValue)
 	recAuth := httptest.NewRecorder()
 	mux.ServeHTTP(recAuth, reqAuth)

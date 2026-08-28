@@ -57,6 +57,7 @@ const (
 	MerchantStatusClosed = "closed"
 
 	// Merchant Tiers
+	MerchantTierPlatform = "platform"
 	MerchantTierPremium  = "premium"
 	MerchantTierStandard = "standard"
 
@@ -69,10 +70,6 @@ const (
 	WalletStatusActive = "active"
 	WalletStatusFrozen = "frozen"
 	WalletStatusClosed = "closed"
-
-	// Platform Merchant (infrastructure)
-	PlatformMerchantShardID = "__platform__"
-	PlatformMerchantID      = "merchant_00000000-0000-0000-0000-000000000001"
 
 	// Shard Status
 	DefaultShardID       = ShardIDPrefix + "a"

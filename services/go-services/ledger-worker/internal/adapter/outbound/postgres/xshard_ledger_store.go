@@ -54,9 +54,9 @@ func (s *CrossShardStore) DebitToClearingAccount(ctx context.Context, srcShard, 
 		return nil
 	}
 
-	// Look up the clearing wallet for the platform merchant (lives on this shard).
+	// Look up the clearing wallet for this shard by wallet_type and currency
 	var clearingWallet string
-	err = tx.QueryRow(ctx, `SELECT id FROM wallets WHERE merchant_id = $1 AND wallet_type = $2 AND currency = $3`, platform.PlatformMerchantID, string(domain.WalletTypeSystem), transfer.Currency).Scan(&clearingWallet)
+	err = tx.QueryRow(ctx, `SELECT id FROM wallets WHERE wallet_type = $1 AND currency = $2`, string(domain.WalletTypeSystem), transfer.Currency).Scan(&clearingWallet)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return domain.ErrWalletNotFound
@@ -310,7 +310,7 @@ func (s *CrossShardStore) CreditFromClearingAccount(ctx context.Context, intent 
 	}
 
 	var clearingWallet string
-	err = tx.QueryRow(ctx, `SELECT id FROM wallets WHERE merchant_id = $1 AND wallet_type = $2 AND currency = $3`, platform.PlatformMerchantID, string(domain.WalletTypeSystem), intent.Currency).Scan(&clearingWallet)
+	err = tx.QueryRow(ctx, `SELECT id FROM wallets WHERE wallet_type = $1 AND currency = $2`, string(domain.WalletTypeSystem), intent.Currency).Scan(&clearingWallet)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return emitFailure(domain.ErrWalletNotFound.Error())
@@ -629,8 +629,8 @@ func (s *CrossShardStore) ReverseCrossShardTransfer(ctx context.Context, srcShar
 	}
 
 	var clearingWallet string
-	err = tx.QueryRow(ctx, `SELECT id FROM wallets WHERE merchant_id = $1 AND wallet_type = $2 AND currency = $3`,
-		platform.PlatformMerchantID, string(domain.WalletTypeSystem), currency).Scan(&clearingWallet)
+	err = tx.QueryRow(ctx, `SELECT id FROM wallets WHERE wallet_type = $1 AND currency = $2`,
+		string(domain.WalletTypeSystem), currency).Scan(&clearingWallet)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return domain.ErrWalletNotFound

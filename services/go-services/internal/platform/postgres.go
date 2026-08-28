@@ -188,9 +188,8 @@ func NewShardPools(ctx context.Context, cfg *Config, log *zap.Logger) (*ShardPoo
 // NewTestShardPools constructs a ShardPools instance from explicit test pools.
 func NewTestShardPools(merchants, shardA, shardB *pgxpool.Pool) *ShardPools {
 	shards := map[string]*pgxpool.Pool{
-		"shard-a":      shardA,
-		"shard-b":      shardB,
-		"__platform__": shardA, // Map platform shard to shard-a for integration tests
+		"shard-a": shardA,
+		"shard-b": shardB,
 	}
 	return &ShardPools{
 		merchants:   merchants,
