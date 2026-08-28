@@ -73,18 +73,8 @@ func NewServer(
 	mux := http.NewServeMux()
 	s.RegisterRoutes(mux)
 
-	tracedMux := otelhttp.NewHandler(
-		mux,
-		platform.ServiceNameCoreAPI,
-		otelhttp.WithFilter(func(r *http.Request) bool {
-			return r.URL.Path != platform.APIHealthPath &&
-				r.URL.Path != platform.APIReadyPath &&
-				r.URL.Path != "/.well-known/jwks.json"
-		}),
-	)
-
 	timeoutMsg := `{"error":"gateway_timeout"}`
-	timeoutHandler := http.TimeoutHandler(tracedMux, time.Duration(cfg.Capacity.ServerTimeoutMs)*time.Millisecond, timeoutMsg)
+	timeoutHandler := http.TimeoutHandler(mux, time.Duration(cfg.Capacity.ServerTimeoutMs)*time.Millisecond, timeoutMsg)
 
 	s.httpSrv = &http.Server{
 		Addr:              ":" + strconv.Itoa(cfg.HTTPPort),
@@ -126,22 +116,26 @@ func (s *Server) IsDraining() bool {
 	return s.draining.Load()
 }
 
+func (s *Server) handle(mux *http.ServeMux, pattern string, handler http.Handler) {
+	mux.Handle(pattern, otelhttp.NewHandler(handler, pattern))
+}
+
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
-	// Health (no auth).
+	// Health (no auth, no tracing).
 	mux.HandleFunc("GET "+platform.APIHealthPath, s.handleHealth)
 	mux.HandleFunc("GET "+platform.APIReadyPath, s.handleReady)
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 
-	mux.Handle("POST "+platform.APIAuthTokenPath, s.withLogging(s.withBulkhead(http.HandlerFunc(s.handleAuthToken))))
+	s.handle(mux, "POST "+platform.APIAuthTokenPath, s.withLogging(s.withBulkhead(http.HandlerFunc(s.handleAuthToken))))
 
-	mux.Handle("POST "+platform.APITransfersPath, s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleCreateTransfer)))))
+	s.handle(mux, "POST "+platform.APITransfersPath, s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleCreateTransfer)))))
 
-	mux.Handle("GET "+platform.APIJobPathPrefix+"{id}", s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleGetJob)))))
-	mux.Handle("GET "+platform.APIBalancesPath, s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleGetBalance)))))
+	s.handle(mux, "GET "+platform.APIJobPathPrefix+"{id}", s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleGetJob)))))
+	s.handle(mux, "GET "+platform.APIBalancesPath, s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleGetBalance)))))
 
-	mux.Handle("POST "+platform.APIMerchantsPath, s.withLogging(s.withBulkhead(http.HandlerFunc(s.handleCreateMerchant))))
-	mux.Handle("POST "+platform.APIAdminDLQReplayPath, s.withLogging(s.withBulkhead(s.requirePlatformAdmin(http.HandlerFunc(s.handleAdminDLQReplay)))))
-	mux.Handle("GET "+platform.APIAdminDLQListPath, s.withLogging(s.withBulkhead(s.requirePlatformAdmin(http.HandlerFunc(s.handleAdminDLQList)))))
-	mux.Handle("POST "+platform.APIAdminDLQReplayOnePath, s.withLogging(s.withBulkhead(s.requirePlatformAdmin(http.HandlerFunc(s.handleAdminDLQReplayOne)))))
-	mux.Handle("POST "+platform.APIWalletsPath, s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleCreateWallet)))))
+	s.handle(mux, "POST "+platform.APIMerchantsPath, s.withLogging(s.withBulkhead(http.HandlerFunc(s.handleCreateMerchant))))
+	s.handle(mux, "POST "+platform.APIAdminDLQReplayPath, s.withLogging(s.withBulkhead(s.requirePlatformAdmin(http.HandlerFunc(s.handleAdminDLQReplay)))))
+	s.handle(mux, "GET "+platform.APIAdminDLQListPath, s.withLogging(s.withBulkhead(s.requirePlatformAdmin(http.HandlerFunc(s.handleAdminDLQList)))))
+	s.handle(mux, "POST "+platform.APIAdminDLQReplayOnePath, s.withLogging(s.withBulkhead(s.requirePlatformAdmin(http.HandlerFunc(s.handleAdminDLQReplayOne)))))
+	s.handle(mux, "POST "+platform.APIWalletsPath, s.withLogging(s.withBulkhead(s.extractMerchant(http.HandlerFunc(s.handleCreateWallet)))))
 }
