@@ -3,6 +3,7 @@ package platform_consumer
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -118,12 +119,11 @@ func (wp *WorkerPool) syncLocked(incoming map[partitionKey]*PartitionTaskChan) {
 }
 
 // partitionLoop drains a single partition channel sequentially.
-// It acquires a semaphore slot before processing each message, ensuring
-// bounded total concurrency.
 func (wp *WorkerPool) partitionLoop(ctx context.Context, pc *PartitionTaskChan) {
 	defer wp.wg.Done()
 
 	for {
+		// 1. Await incoming consumer task or context cancellation
 		select {
 		case <-ctx.Done():
 			return
@@ -132,20 +132,20 @@ func (wp *WorkerPool) partitionLoop(ctx context.Context, pc *PartitionTaskChan) 
 				return
 			}
 
-			// Acquire semaphore — blocks if all concurrency slots are taken.
+			// 2. Acquire concurrency semaphore slot to bound active goroutines
 			select {
 			case wp.sem <- struct{}{}:
 			case <-ctx.Done():
 				return
 			}
 
+			// 3. Process task with tracing, timeout, and panic recovery
 			wp.processTask(task)
 
-			// Release semaphore slot.
+			// 4. Release semaphore slot upon completion
 			<-wp.sem
 
-			// Decrement the Fetcher's pending-bytes counter so the next
-			// blocked fetch can proceed. (See issue 35.)
+			// 5. Decrement pending-bytes budget in Fetcher to unblock incoming batches
 			if wp.fetcher != nil {
 				wp.fetcher.ReleasePendingBytes(int64(len(task.Msg.Value)))
 			}
@@ -155,6 +155,7 @@ func (wp *WorkerPool) partitionLoop(ctx context.Context, pc *PartitionTaskChan) 
 
 // processTask executes a single task with tracing, timeout, and panic recovery.
 func (wp *WorkerPool) processTask(task *ConsumerTask) {
+	// 1. Start OpenTelemetry span with partition and offset attributes
 	spanCtx, span := platform.GetTracer().Start(task.Ctx, platform.SpanProcessMessage)
 	defer span.End()
 	span.SetAttributes(
@@ -163,14 +164,23 @@ func (wp *WorkerPool) processTask(task *ConsumerTask) {
 		attribute.Int64(platform.LogFieldOffset, task.Msg.Offset),
 	)
 
+	// 2. Set up panic recovery defer to capture stack traces and route poison messages to DLQ
 	defer func() {
 		if r := recover(); r != nil {
 			panicErr := fmt.Errorf("%w: %v", platform.ErrConsumerPanic, r)
 			span.RecordError(panicErr)
 			span.SetStatus(codes.Error, fmt.Sprintf("%v", r))
 			platform.RecordConsumerPanic(spanCtx, task.Msg.Topic)
+			platform.LoggerWithTrace(spanCtx, wp.logger).Error(
+				platform.LogEventPanicRecovered,
+				zap.Any(platform.LogFieldPanic, r),
+				zap.String(platform.LogFieldStack, string(debug.Stack())),
+				zap.String(platform.LogFieldTopic, task.Msg.Topic),
+				zap.Int(platform.LogFieldPartition, task.Msg.Partition),
+				zap.Int64(platform.LogFieldOffset, task.Msg.Offset),
+			)
 			// Route the message to the DLQ first so the poison event is preserved
-			// even if the commit-coordinator behavior changes (see issue 2).
+			// even if the commit-coordinator behavior changes.
 			if wp.onPanicDLQ != nil {
 				// Outer DLQ write deadline (engine-derived, == SessionMs).
 				dlqCtx, dlqCancel := context.WithTimeout(context.Background(), wp.dlqWriteTimeout)
@@ -194,21 +204,19 @@ func (wp *WorkerPool) processTask(task *ConsumerTask) {
 		}
 	}()
 
+	// 3. Execute message processing handler within configured execution timeout
 	processCtx, cancel := context.WithTimeout(spanCtx, wp.processTimeout)
 	defer cancel()
 	err := task.Process(processCtx)
+
+	// 4. Record error telemetry and trigger DLQ fallback if handler returned an error
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		// Issue 2 (Option B): the handler returned an error after retries were
-		// exhausted. Route the message to the DLQ before reporting to the commit
-		// coordinator so the poison event is preserved (at-least-once
-		// delivery: the offset will still be committed, but the message is
-		// not lost).
+		// Route the message to the DLQ before reporting to the commit
+		// coordinator so the poison event is preserved (at-least-oncedelivery).
 		if wp.onPanicDLQ != nil {
 			// Outer DLQ write deadline (engine-derived, == SessionMs).
-			// A fresh context (not processCtx) so a tight ProcessTimeout
-			// doesn't kill a DLQ write already in progress.
 			dlqCtx, dlqCancel := context.WithTimeout(context.Background(), wp.dlqWriteTimeout)
 			if dlqErr := wp.onPanicDLQ(dlqCtx, task.Msg, err); dlqErr != nil {
 				platform.LoggerWithTrace(spanCtx, wp.logger).Error(
@@ -222,6 +230,8 @@ func (wp *WorkerPool) processTask(task *ConsumerTask) {
 			dlqCancel()
 		}
 	}
+
+	// 5. Report processing result to commit coordinator for ordered offset committing
 	wp.coordinator.Report(ConsumerResult{
 		Partition: task.Msg.Partition,
 		Offset:    task.Msg.Offset,

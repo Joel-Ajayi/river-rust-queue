@@ -287,7 +287,7 @@ func (s *WebhookService) attemptDelivery(ctx context.Context, m *domain.Merchant
 }
 
 func (s *WebhookService) handleFailure(ctx context.Context, shardID string, merchant *domain.Merchant, deliveryID, eventID string, payload []byte, attempt, statusCode int, err error, firstFailedAt time.Time, latencyMs float64) {
-	// Use detached context for terminal writes to prevent state corruption on shutdown
+	// 1. Prepare detached context to guarantee DB state write finishes even during shutdown
 	detachedCtx := context.WithoutCancel(ctx)
 	now := time.Now()
 	log := platform.LoggerWithTrace(ctx, s.logger)
@@ -311,10 +311,19 @@ func (s *WebhookService) handleFailure(ctx context.Context, shardID string, merc
 		LastError:     &lastErr,
 	}
 
+	// 2. Classify error type (terminal vs transient retryable)
 	isTerminal := platform.ClassifyError(err, domain.IsTerminalError) == platform.ClassificationTerminal
 
+	// 3. If maximum attempts exhausted or error is terminal, route to DLQ
 	if attempt >= s.maxAttempts || isTerminal {
 		d.Status = domain.StatusDLQ
+		log.Warn(platform.LogEventWebhookDeliveryDLQ,
+			zap.String(platform.LogFieldMerchantID, merchant.ID),
+			zap.String(platform.LogFieldTransferID, eventID),
+			zap.Int(platform.LogFieldAttempt, attempt),
+			zap.Float64(platform.LogFieldLatency, latencyMs),
+			zap.String(platform.LogFieldReason, lastErr),
+		)
 		if dbErr := s.repo.FailDeliveryAndRouteToDLQ(detachedCtx, shardID, &d, lastErr, pii.Mask(payload), platform.NewEventID(), firstFailedAt, now); dbErr != nil {
 			log.Error(platform.LogEventDLQWriteFailed, zap.Error(dbErr))
 		}
@@ -330,25 +339,34 @@ func (s *WebhookService) handleFailure(ctx context.Context, shardID string, merc
 		return
 	}
 
-	// 2) Otherwise, schedule a retry
+	// 4. Calculate next retry with exponential backoff and full jitter
 	d.Status = domain.StatusPending
-	// exponential backoff with full jitter
 	base := s.baseRetryDelaySec
 	cap := s.capRetryDelaySec
 	delaySeconds := base * math.Pow(2, float64(attempt-1))
 	if delaySeconds > cap {
 		delaySeconds = cap
 	}
-	// locally seeded PRNG to avoid global lock contention or unseeded deterministic fallback
 	localRand := rand.New(rand.NewSource(now.UnixNano()))
 	jitterDelay := localRand.Float64() * delaySeconds
 	nextRetryAt := now.Add(time.Duration(jitterDelay) * time.Second)
 	d.NextRetryAt = &nextRetryAt
 
+	log.Warn(platform.LogEventWebhookDeliveryAttemptFailed,
+		zap.String(platform.LogFieldMerchantID, merchant.ID),
+		zap.String(platform.LogFieldTransferID, eventID),
+		zap.Int(platform.LogFieldAttempt, attempt),
+		zap.Float64(platform.LogFieldLatency, latencyMs),
+		zap.Time(platform.LogFieldNextRetryAt, nextRetryAt),
+		zap.Error(err),
+	)
+
+	// 5. Persist scheduled retry timestamp in shard database
 	if dbErr := s.repo.ScheduleRetry(detachedCtx, shardID, &d, pii.Mask(payload), platform.NewEventID()); dbErr != nil {
-		log.Error(platform.LogEventDLQWriteFailed, zap.Error(dbErr))
+		log.Error(platform.LogEventScheduleRetryFailed, zap.Error(dbErr))
 	}
 
+	// 6. Emit canonical log for failed delivery attempt
 	platform.LogCanonicalEvent(ctx, s.logger, platform.ServiceNameWebhookWorker, platform.CanonicalLogLine{
 		Event:         platform.EventWebhookFailed,
 		Status:        platform.StatusRetry,
@@ -361,9 +379,9 @@ func (s *WebhookService) handleFailure(ctx context.Context, shardID string, merc
 }
 
 func (s *WebhookService) recordSuccess(ctx context.Context, shardID string, merchant *domain.Merchant, deliveryID, eventID string, payload []byte, statusCode, attempt int, latencyMs float64) {
+	// 1. Prepare detached context for database delivery completion
 	log := platform.LoggerWithTrace(ctx, s.logger)
 	now := time.Now()
-	// Detached context ensures graceful shutdown does not corrupt state
 	detachedCtx := context.WithoutCancel(ctx)
 	delivery := &domain.WebhookDelivery{
 		ID:            deliveryID,
@@ -379,11 +397,12 @@ func (s *WebhookService) recordSuccess(ctx context.Context, shardID string, merc
 		DeliveredAt:   &now,
 	}
 
+	// 2. Mark delivery completed in shard database
 	if err := s.repo.CompleteDelivery(detachedCtx, shardID, delivery, pii.Mask(payload), platform.NewEventID()); err != nil {
-		log.Error(platform.LogEventDLQWriteFailed, zap.Error(err))
+		log.Error(platform.LogEventDeliveryCompleteFailed, zap.Error(err))
 	}
 
-	// Canonical log: webhook delivered
+	// 3. Emit canonical log for successful delivery
 	platform.LogCanonicalEvent(ctx, s.logger, platform.ServiceNameWebhookWorker, platform.CanonicalLogLine{
 		Event:         platform.EventWebhookDelivered,
 		Status:        platform.StatusSuccess,

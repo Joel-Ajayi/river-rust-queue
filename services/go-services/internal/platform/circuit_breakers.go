@@ -304,8 +304,9 @@ func (r *DBCircuitBreakers) newDBBreaker(name string) *CircuitBreaker {
 	return newCircuitBreaker(cfg)
 }
 
-// recordBreakerStateChange records state gauge and open/half-open counters.
+// recordBreakerStateChange records state gauge, open/half-open counters, and structured logs.
 func recordBreakerStateChange(ctx context.Context, logger *zap.Logger, name string, from circuitbreaker.State, to circuitbreaker.State) {
+	// 1. Map circuit breaker target state to numerical gauge value
 	var stateVal int64
 	switch to {
 	case circuitbreaker.ClosedState:
@@ -315,21 +316,28 @@ func recordBreakerStateChange(ctx context.Context, logger *zap.Logger, name stri
 	case circuitbreaker.OpenState:
 		stateVal = CBGaugeOpen
 	}
-	if to == circuitbreaker.OpenState && logger != nil {
 
-	}
+	// 2. Record state gauge metric
 	RecordCircuitBreakerState(ctx, name, stateVal)
+
+	// 3. Handle state-specific metrics and structured logging
 	if to == circuitbreaker.OpenState {
 		RecordCircuitBreakerOpen(ctx, name)
 		if from == circuitbreaker.HalfOpenState {
 			RecordCircuitBreakerHalfOpenFailure(ctx, name)
 		}
 		if logger != nil {
-			logger.Warn("Circuit breaker opened", zap.String(LogFieldComponent, "circuit-breaker"), zap.String("circuit_breaker_name", name))
+			LoggerWithTrace(ctx, logger).Warn(LogEventCircuitBreakerOpened,
+				zap.String(LogFieldComponent, "circuit-breaker"),
+				zap.String(LogFieldCBName, name),
+			)
 		}
 	} else if to == circuitbreaker.ClosedState && from != circuitbreaker.ClosedState {
 		if logger != nil {
-			logger.Info("Circuit breaker closed", zap.String(LogFieldComponent, "circuit-breaker"), zap.String("circuit_breaker_name", name))
+			LoggerWithTrace(ctx, logger).Info(LogEventCircuitBreakerClosed,
+				zap.String(LogFieldComponent, "circuit-breaker"),
+				zap.String(LogFieldCBName, name),
+			)
 		}
 	}
 }

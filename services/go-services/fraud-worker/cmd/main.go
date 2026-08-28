@@ -33,25 +33,22 @@ func main() {
 	defer stop()
 
 	if err := platform.InitTelemetry(ctx, "fraud-worker"); err != nil {
-		logger.Panic("Failed to initialize telemetry", zap.Error(err))
-	}
+		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 
-	if err := platform.InitMetrics(); err != nil {
-		logger.Panic("Failed to initialize metrics", zap.Error(err))
-	}
-	if err := platform.InitBusinessMetrics(); err != nil {
-		logger.Panic("Failed to initialize business metrics", zap.Error(err))
+		if err := platform.InitMetrics(); err != nil {
+			logger.Panic(platform.LogEventMetricsInitFailed, zap.Error(err))
+		}
+		logger.Panic(platform.LogEventBusinessMetricsInitFailed, zap.Error(err))
 	}
 
 	pools, err := platform.NewShardPools(ctx, cfg, logger)
 	if err != nil {
-		logger.Panic(platform.LogEventPostgresInitFailed, zap.Error(err))
 	}
 	defer pools.Close()
 
+	// 5. Initialize Redis data client for sliding-window velocity checks
 	redisClient, err := platform.NewRedisClient(ctx, cfg.RedisDataMaster, cfg.RedisAddr(), cfg.RedisDataPassword, logger)
 	if err != nil {
-		logger.Panic(platform.LogEventRedisInitFailed, zap.Error(err))
 	}
 	defer redisClient.Close()
 

@@ -3,7 +3,6 @@ package platform
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -99,12 +98,9 @@ var (
 
 	retryBudgetExhaustedTotal metric.Int64Counter
 	reconDiscrepanciesTotal   metric.Int64Counter
-
-	metricsOnce sync.Once
 )
 
 // InitMetrics registers all platform OTel instruments. Call from main() after InitTelemetry.
-// B1: returns an error instead of panicking so callers can decide on shutdown vs. continue-with-reduced-instrumentation.
 func InitMetrics() error {
 	var err error
 	var initErr error
@@ -328,157 +324,203 @@ func InitMetrics() error {
 
 // RecordCircuitBreakerOpen increments the counter for tripped circuit breakers.
 func RecordCircuitBreakerOpen(ctx context.Context, cbName string) {
-	circuitBreakerOpenTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelCircuitBreaker, cbName),
-	))
+	if circuitBreakerOpenTotal != nil {
+		circuitBreakerOpenTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelCircuitBreaker, cbName),
+		))
+	}
 }
 
 // RecordCircuitBreakerHalfOpenFailure increments the counter for half-open trial failures.
 func RecordCircuitBreakerHalfOpenFailure(ctx context.Context, cbName string) {
-	circuitBreakerHalfOpenFailure.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelCircuitBreaker, cbName),
-	))
+	if circuitBreakerHalfOpenFailure != nil {
+		circuitBreakerHalfOpenFailure.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelCircuitBreaker, cbName),
+		))
+	}
 }
 
 // RecordOutboxLag sets the age of the oldest unpublished event
 func RecordOutboxLag(ctx context.Context, shardID string, lag time.Duration) {
-	outboxLagGauge.Record(ctx, lag.Seconds(), metric.WithAttributes(
-		attribute.String(MetricLabelShard, shardID),
-	))
+	if outboxLagGauge != nil {
+		outboxLagGauge.Record(ctx, lag.Seconds(), metric.WithAttributes(
+			attribute.String(MetricLabelShard, shardID),
+		))
+	}
 }
 
 // RecordDLQIngestion increments the DLQ ingestion metric.
 func RecordDLQIngestion(ctx context.Context, topic string) {
-	dlqIngestionRate.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelTopic, topic),
-	))
+	if dlqIngestionRate != nil {
+		dlqIngestionRate.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelTopic, topic),
+		))
+	}
 }
 
 // RecordCircuitBreakerState sets the current state of a circuit breaker as a gauge.
 func RecordCircuitBreakerState(ctx context.Context, cbName string, state int64) {
-	circuitBreakerState.Record(ctx, state, metric.WithAttributes(
-		attribute.String(MetricLabelCircuitBreaker, cbName),
-	))
+	if circuitBreakerState != nil {
+		circuitBreakerState.Record(ctx, state, metric.WithAttributes(
+			attribute.String(MetricLabelCircuitBreaker, cbName),
+		))
+	}
 }
 
 // RecordInfrastructureError increments the counter for transient infrastructure errors.
 func RecordInfrastructureError(ctx context.Context, component string) {
-	infrastructureErrorsTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelComponent, component),
-	))
+	if infrastructureErrorsTotal != nil {
+		infrastructureErrorsTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelComponent, component),
+		))
+	}
 }
 
 // RecordOutboxEventsPublished increments the counter for successfully published outbox events.
 func RecordOutboxEventsPublished(ctx context.Context, shardID string, topic string, count int) {
-	outboxEventsPublishedTotal.Add(ctx, int64(count), metric.WithAttributes(
-		attribute.String(MetricLabelShard, shardID),
-		attribute.String(MetricLabelTopic, topic),
-	))
+	if outboxEventsPublishedTotal != nil {
+		outboxEventsPublishedTotal.Add(ctx, int64(count), metric.WithAttributes(
+			attribute.String(MetricLabelShard, shardID),
+			attribute.String(MetricLabelTopic, topic),
+		))
+	}
 }
 
 // RecordOutboxPanic increments the counter for panics recovered in the outbox relay.
 func RecordOutboxPanic(ctx context.Context, shardID string) {
-	outboxPanicsTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelShard, shardID),
-	))
+	if outboxPanicsTotal != nil {
+		outboxPanicsTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelShard, shardID),
+		))
+	}
 }
 
 // RecordConsumerPanic increments the counter for panics recovered in any service's worker pool. Topic required (outbox relay uses shardID as topic).
 func RecordConsumerPanic(ctx context.Context, topic string) {
-	consumerPanicsTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelTopic, topic),
-	))
+	if consumerPanicsTotal != nil {
+		consumerPanicsTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelTopic, topic),
+		))
+	}
 }
 
 // RecordRedisFailClosed increments the counter for operations rejected because Redis was unavailable (fail-closed).
 func RecordRedisFailClosed(ctx context.Context) {
-	redisFailClosedTotal.Add(ctx, 1)
+	if redisFailClosedTotal != nil {
+		redisFailClosedTotal.Add(ctx, 1)
+	}
 }
 
 // RecordDLQInfraFlood increments the counter for messages routed to the DLQ because of an infrastructure failure (Redis, PG, Kafka down).
 func RecordDLQInfraFlood(ctx context.Context, serviceName string) {
-	dlqInfraFloodTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelService, serviceName),
-	))
+	if dlqInfraFloodTotal != nil {
+		dlqInfraFloodTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelService, serviceName),
+		))
+	}
 }
 
 // RecordKafkaProducerBufferFill records the Kafka staging buffer fill ratio (0.0-1.0).
 func RecordKafkaProducerBufferFill(ctx context.Context, shardID string, ratio float64) {
-	kafkaProducerBufferFill.Record(ctx, ratio, metric.WithAttributes(
-		attribute.String(MetricLabelShard, shardID),
-	))
+	if kafkaProducerBufferFill != nil {
+		kafkaProducerBufferFill.Record(ctx, ratio, metric.WithAttributes(
+			attribute.String(MetricLabelShard, shardID),
+		))
+	}
 }
 
 // RecordIdempotencyConflict increments the counter for business/idempotency conflicts.
 func RecordIdempotencyConflict(ctx context.Context, merchantID, jobID, shardID string) {
-	idempotencyConflictsTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelShard, shardID),
-	))
+	if idempotencyConflictsTotal != nil {
+		idempotencyConflictsTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelShard, shardID),
+		))
+	}
 }
 
 // RecordIdempotencyHit increments the counter for idempotency-key replay hits.
 // A hit is a duplicate submission resolved to the prior job without a conflict error.
 func RecordIdempotencyHit(ctx context.Context, merchantID, jobID, shardID string) {
-	idempotencyHitsTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelShard, shardID),
-	))
+	if idempotencyHitsTotal != nil {
+		idempotencyHitsTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelShard, shardID),
+		))
+	}
 }
 
 // RecordConsumerBackoffDuration records the duration of consumer backoff sleep.
 func RecordConsumerBackoffDuration(ctx context.Context, topic string, duration time.Duration) {
-	consumerBackoffDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
-		attribute.String(MetricLabelTopic, topic),
-	))
+	if consumerBackoffDuration != nil {
+		consumerBackoffDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
+			attribute.String(MetricLabelTopic, topic),
+		))
+	}
 }
 
 // RecordLedgerImbalance records the absolute ledger imbalance sum.
 func RecordLedgerImbalance(ctx context.Context, value int64) {
-	ledgerImbalanceTotal.Record(ctx, value)
+	if ledgerImbalanceTotal != nil {
+		ledgerImbalanceTotal.Record(ctx, value)
+	}
 }
 
 // RecordSagaUnresolvedCount records the unresolved saga count.
 func RecordSagaUnresolvedCount(ctx context.Context, count int64) {
-	sagaUnresolvedCount.Record(ctx, count)
+	if sagaUnresolvedCount != nil {
+		sagaUnresolvedCount.Record(ctx, count)
+	}
 }
 
 // RecordVelocityLimitExceeded records a velocity limit violation.
 func RecordVelocityLimitExceeded(ctx context.Context, walletID, limitType string) {
-	velocityLimitExceededTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelLimitType, limitType),
-	))
+	if velocityLimitExceededTotal != nil {
+		velocityLimitExceededTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelLimitType, limitType),
+		))
+	}
 }
 
 // RecordAdminDLQReplayed increments the counter of successfully replayed DLQ messages.
 func RecordAdminDLQReplayed(ctx context.Context, shardID string, count int64) {
-	adminDLQReplayedTotal.Add(ctx, count, metric.WithAttributes(
-		attribute.String(MetricLabelShard, shardID),
-	))
+	if adminDLQReplayedTotal != nil {
+		adminDLQReplayedTotal.Add(ctx, count, metric.WithAttributes(
+			attribute.String(MetricLabelShard, shardID),
+		))
+	}
 }
 
 // RecordBulkheadRejection increments the counter of requests rejected by the bulkhead.
 func RecordBulkheadRejection(ctx context.Context) {
-	bulkheadRejectionsTotal.Add(ctx, 1)
+	if bulkheadRejectionsTotal != nil {
+		bulkheadRejectionsTotal.Add(ctx, 1)
+	}
 }
 
 // AddBulkheadInFlight adjusts the current in-flight request count through the bulkhead.
 func AddBulkheadInFlight(ctx context.Context, delta int64) {
-	bulkheadInFlight.Add(ctx, delta)
+	if bulkheadInFlight != nil {
+		bulkheadInFlight.Add(ctx, delta)
+	}
 }
 
 // RecordCommitCoordinatorQueueDepth records the number of messages waiting in a partition's FIFO.
 func RecordCommitCoordinatorQueueDepth(ctx context.Context, topic string, partition int, depth int64) {
-	commitCoordinatorQueueDepth.Record(ctx, depth, metric.WithAttributes(
-		attribute.String(MetricLabelTopic, topic),
-		attribute.Int(MetricLabelPartition, partition),
-	))
+	if commitCoordinatorQueueDepth != nil {
+		commitCoordinatorQueueDepth.Record(ctx, depth, metric.WithAttributes(
+			attribute.String(MetricLabelTopic, topic),
+			attribute.Int(MetricLabelPartition, partition),
+		))
+	}
 }
 
 // RecordTaskChannelFillRatio records the fill ratio of a per-partition task channel.
 func RecordTaskChannelFillRatio(ctx context.Context, topic string, partition int, ratio float64) {
-	taskChannelFillRatio.Record(ctx, ratio, metric.WithAttributes(
-		attribute.String(MetricLabelTopic, topic),
-		attribute.Int(MetricLabelPartition, partition),
-	))
+	if taskChannelFillRatio != nil {
+		taskChannelFillRatio.Record(ctx, ratio, metric.WithAttributes(
+			attribute.String(MetricLabelTopic, topic),
+			attribute.Int(MetricLabelPartition, partition),
+		))
+	}
 }
 
 // RecordPGPoolStats records the current pgxpool statistics.
@@ -487,23 +529,33 @@ func RecordPGPoolStats(ctx context.Context, poolName string, serviceName string,
 		attribute.String(MetricLabelService, serviceName),
 		attribute.String(MetricLabelDBPool, poolName),
 	)
-	pgPoolAcquiredConns.Record(ctx, int64(acquired), attrs)
-	pgPoolIdleConns.Record(ctx, int64(idle), attrs)
-	pgPoolMaxConns.Record(ctx, int64(maxConns), attrs)
+	if pgPoolAcquiredConns != nil {
+		pgPoolAcquiredConns.Record(ctx, int64(acquired), attrs)
+	}
+	if pgPoolIdleConns != nil {
+		pgPoolIdleConns.Record(ctx, int64(idle), attrs)
+	}
+	if pgPoolMaxConns != nil {
+		pgPoolMaxConns.Record(ctx, int64(maxConns), attrs)
+	}
 }
 
 // AddPGPoolEmptyAcquireCount adds to the cumulative count of empty acquires.
 func AddPGPoolEmptyAcquireCount(ctx context.Context, poolName string, serviceName string, delta int64) {
-	pgPoolEmptyAcquireCount.Add(ctx, delta, metric.WithAttributes(
-		attribute.String(MetricLabelService, serviceName),
-		attribute.String(MetricLabelDBPool, poolName),
-	))
+	if pgPoolEmptyAcquireCount != nil {
+		pgPoolEmptyAcquireCount.Add(ctx, delta, metric.WithAttributes(
+			attribute.String(MetricLabelService, serviceName),
+			attribute.String(MetricLabelDBPool, poolName),
+		))
+	}
 }
 
 // RecordRetryBudgetExhausted increments the counter for retry budget exhaustion (Token Bucket denial).
 // Service dimension lives on the OTel service.name resource attribute, not on the metric label.
 func RecordRetryBudgetExhausted(ctx context.Context) {
-	retryBudgetExhaustedTotal.Add(ctx, 1)
+	if retryBudgetExhaustedTotal != nil {
+		retryBudgetExhaustedTotal.Add(ctx, 1)
+	}
 }
 
 // RecordReconDiscrepancies increments the counter for reconciliation discrepancies across shards.
@@ -511,10 +563,13 @@ func RecordReconDiscrepancies(ctx context.Context, count int64) {
 	if count <= 0 {
 		return
 	}
-	reconDiscrepanciesTotal.Add(ctx, count)
+	if reconDiscrepanciesTotal != nil {
+		reconDiscrepanciesTotal.Add(ctx, count)
+	}
 }
+
 const (
-	MetricLabelMerchantID     = "merchant.id"
-	MetricLabelJobID          = "job.id"
-	MetricLabelWalletID       = "wallet.id"
+	MetricLabelMerchantID = "merchant.id"
+	MetricLabelJobID      = "job.id"
+	MetricLabelWalletID   = "wallet.id"
 )

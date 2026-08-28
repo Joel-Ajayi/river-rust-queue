@@ -30,7 +30,7 @@ const (
 )
 
 func main() {
-	//  -- Logger --
+	// 1. Initialize structured logger
 	logLevel := os.Getenv(EnvVarLogLevel)
 	logger, err := platform.NewLogger(logLevel)
 	if err != nil {
@@ -38,17 +38,16 @@ func main() {
 	}
 	defer logger.Sync()
 
-	// -- Port --
+	// 2. Resolve port and context
 	port := os.Getenv(EnvVarPort)
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// 3. Initialize telemetry
 	if err := platform.InitTelemetry(ctx, "webhook-echo"); err != nil {
-		logger.Panic("Failed to initialize telemetry", zap.Error(err))
+		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 
-	// -- New Server --
 	mux := http.NewServeMux()
 	mux.HandleFunc(RootPath, handleWebhook(logger))
 

@@ -46,11 +46,11 @@ func NewKafkaWriter(cfg *Config, brokers []string, topic string, batchSize int, 
 		w.BatchTimeout = batchTimeout
 	}
 	kafkaLog := log.Named(LogComponentKafka)
-	kafkaLog.Info("Created Kafka writer",
+	kafkaLog.Info(LogEventKafkaWriterCreated,
 		zap.String(LogFieldEvent, LogEventKafkaWriterCreated),
 		zap.String(LogFieldTopic, topic),
-		zap.Int("batch_size", w.BatchSize),
-		zap.Duration("batch_timeout", w.BatchTimeout),
+		zap.Int(LogFieldBatchSize, w.BatchSize),
+		zap.Duration(LogFieldBatchTimeout, w.BatchTimeout),
 	)
 	return w
 }

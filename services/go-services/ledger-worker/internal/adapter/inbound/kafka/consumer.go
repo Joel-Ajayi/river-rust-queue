@@ -237,7 +237,7 @@ func (m *ConsumerManager) processWithRetry(ctx context.Context, msg kafka.Messag
 	})
 
 	if err != nil {
-		logger.Warn("Transient retry budget exhausted, routing to DLQ to unblock partition",
+		logger.Warn(platform.LogEventRetryBudgetExhaustedDLQ,
 			zap.String(platform.LogFieldTopic, msg.Topic),
 			zap.Int(platform.LogFieldPartition, msg.Partition),
 			zap.Int64(platform.LogFieldOffset, msg.Offset),

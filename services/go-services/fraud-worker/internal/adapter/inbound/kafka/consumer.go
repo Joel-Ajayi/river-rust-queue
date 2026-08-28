@@ -98,6 +98,17 @@ func (m *ConsumerManager) messageHandler() platform_consumer.MessageHandler {
 		logger := platform.LoggerWithTrace(ctx, m.logger)
 
 		payload := envelope.GetJobRequested()
+		if payload == nil {
+			return nil
+		}
+
+		var occurredAtMs int64
+		if envelope.OccurredAt != nil {
+			occurredAtMs = envelope.OccurredAt.AsTime().UnixMilli()
+		} else {
+			occurredAtMs = time.Now().UnixMilli()
+		}
+
 		err = platform.ExecuteWithJitter(ctx, retryCfg, func(exec failsafe.Execution[any]) error {
 			attemptCount++
 
@@ -105,7 +116,7 @@ func (m *ConsumerManager) messageHandler() platform_consumer.MessageHandler {
 				return ctx.Err()
 			}
 
-			procErr := m.handler.ProcessJob(ctx, payload, envelope.EventId, envelope.OccurredAt.AsTime().UnixMilli())
+			procErr := m.handler.ProcessJob(ctx, payload, envelope.EventId, occurredAtMs)
 			if procErr != nil {
 				classification := platform.ClassifyError(procErr, domain.IsTerminalError)
 
@@ -153,8 +164,7 @@ func (m *ConsumerManager) messageHandler() platform_consumer.MessageHandler {
 		})
 
 		if err != nil {
-			logger.Warn("Transient retry budget exhausted, routing to DLQ to unblock partition",
-				zap.String(platform.LogFieldTopic, msg.Topic),
+			logger.Warn(platform.LogEventRetryBudgetExhaustedDLQ,
 				zap.Int(platform.LogFieldPartition, msg.Partition),
 				zap.Int64(platform.LogFieldOffset, msg.Offset),
 				zap.Int(platform.LogFieldRetryCount, attemptCount),

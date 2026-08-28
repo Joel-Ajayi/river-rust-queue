@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -64,14 +65,20 @@ func startService(t *testing.T, binPath string, env []string) *exec.Cmd {
 func TestFullPipelineE2E(t *testing.T) {
 	// 1. Start Containers
 	cluster := testutil.SetupTestDB(t)
-	redisClient, _ := testutil.StartRedis(t)
+	redisClient, redisURI := testutil.StartRedis(t)
 	_, brokers := testutil.StartKafka(t)
 
-	webhookReceived := make(chan bool, 1)
+	rHost, rPort, err := net.SplitHostPort(redisURI)
+	if err != nil {
+		t.Fatalf("failed to parse redis URI %q: %v", redisURI, err)
+	}
+
+	webhookReceived := make(chan []byte, 1)
 	echoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Content-Type") == "application/json" {
+			body, _ := io.ReadAll(r.Body)
 			select {
-			case webhookReceived <- true:
+			case webhookReceived <- body:
 			default:
 			}
 			w.WriteHeader(http.StatusOK)
@@ -103,8 +110,8 @@ func TestFullPipelineE2E(t *testing.T) {
 		"MERCHANTS_DB_URI=" + cluster.MerchantsDB.URI,
 		"SHARD_A_URI=" + cluster.ShardA.URI,
 		"SHARD_B_URI=" + cluster.ShardB.URI,
-		"REDIS_DATA_HOST=" + strings.Split(redisClient.Options().Addr, ":")[0],
-		"REDIS_DATA_PORT=" + strings.Split(redisClient.Options().Addr, ":")[1],
+		"REDIS_HOST=" + rHost,
+		"REDIS_PORT=" + rPort,
 		"JWT_SIGNING_KEYS=key-1:" + pemStr,
 		"JWT_ACTIVE_KEY_ID=key-1",
 		"SHARD_LETTERS=AB",
@@ -289,13 +296,19 @@ func TestFullPipelineE2E(t *testing.T) {
 		t.Fatalf("expected 202 Accepted, got %d", resp.StatusCode)
 	}
 
+	var webhookPayload []byte
 	select {
-	case <-webhookReceived:
-		t.Log("Webhook successfully received! Pipeline complete.")
+	case webhookPayload = <-webhookReceived:
+		t.Logf("Webhook successfully received! Payload: %s", string(webhookPayload))
 	case <-time.After(15 * time.Second):
 		t.Fatalf("timed out waiting for webhook echo to receive the event")
 	}
 
+	if len(webhookPayload) == 0 {
+		t.Fatalf("received empty webhook payload")
+	}
+
+	// 1. Verify Wallet Balances on Shard
 	var balance int64
 	err = shardPool.QueryRow(context.Background(), "SELECT balance FROM wallet_balance_cache WHERE wallet_id = $1", wallet1).Scan(&balance)
 	if err != nil {
@@ -313,6 +326,7 @@ func TestFullPipelineE2E(t *testing.T) {
 		t.Fatalf("expected wallet2 balance to be 5000, got %d", balance)
 	}
 
+	// 2. Verify Job Status on Shard
 	var status string
 	err = shardPool.QueryRow(context.Background(), "SELECT status FROM jobs WHERE idempotency_key = 'e2e_idem_1'").Scan(&status)
 	if err != nil {
@@ -321,4 +335,37 @@ func TestFullPipelineE2E(t *testing.T) {
 	if status != "completed" {
 		t.Fatalf("expected job status completed, got %s", status)
 	}
+
+	// 3. Verify Outbox Relay Published All Shard Events
+	var pendingOutboxCount int64
+	err = shardPool.QueryRow(context.Background(), "SELECT COUNT(*) FROM events WHERE published_at IS NULL AND publish_topic IS NOT NULL").Scan(&pendingOutboxCount)
+	if err != nil {
+		t.Fatalf("failed to query events table: %v", err)
+	}
+	if pendingOutboxCount != 0 {
+		t.Fatalf("expected 0 pending outbox events, found %d", pendingOutboxCount)
+	}
+
+	// 4. Verify Fraud Worker Evaluated Velocity in Redis
+	velocityCount, err := redisClient.ZCard(context.Background(), "velocity:wallet:"+wallet1).Result()
+	if err != nil {
+		t.Fatalf("failed to check redis velocity for wallet %s: %v", wallet1, err)
+	}
+	if velocityCount < 1 {
+		t.Fatalf("expected fraud-worker to record velocity in Redis, got count %d", velocityCount)
+	}
+	t.Logf("Fraud worker successfully verified: recorded %d velocity event(s) in Redis", velocityCount)
+
+	// 5. Verify Zero Poison Pills or Panics in DLQ
+	var dlqCount int64
+	err = cluster.MerchantsDB.Pool.QueryRow(context.Background(), "SELECT COUNT(*) FROM dlq_entries").Scan(&dlqCount)
+	if err != nil {
+		t.Fatalf("failed to query dlq_entries in merchants_db: %v", err)
+	}
+	if dlqCount != 0 {
+		var errMsg, source string
+		_ = cluster.MerchantsDB.Pool.QueryRow(context.Background(), "SELECT source, error_message FROM dlq_entries LIMIT 1").Scan(&source, &errMsg)
+		t.Fatalf("E2E Pipeline Failure: %d messages routed to DLQ! First DLQ entry from %s: %s", dlqCount, source, errMsg)
+	}
+	t.Log("DLQ verification passed: 0 poison pills or consumer panics recorded across all services.")
 }

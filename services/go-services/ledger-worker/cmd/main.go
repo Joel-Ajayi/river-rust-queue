@@ -21,6 +21,7 @@ import (
 )
 
 func main() {
+	// 1. Load configuration and initialize structured logger
 	cfg := platform.LoadConfig("LEDGER_WORKER_")
 
 	logger, err := platform.NewLogger(cfg.LogLevel)
@@ -32,23 +33,26 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// 2. Initialize OpenTelemetry tracing and metrics
 	if err := platform.InitTelemetry(ctx, "ledger-worker"); err != nil {
-		logger.Panic("Failed to initialize telemetry", zap.Error(err))
+		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 
 	if err := platform.InitMetrics(); err != nil {
-		logger.Panic("Failed to initialize metrics", zap.Error(err))
+		logger.Panic(platform.LogEventMetricsInitFailed, zap.Error(err))
 	}
 	if err := platform.InitBusinessMetrics(); err != nil {
-		logger.Panic("Failed to initialize business metrics", zap.Error(err))
+		logger.Panic(platform.LogEventBusinessMetricsInitFailed, zap.Error(err))
 	}
 
+	// 3. Initialize PostgreSQL shard connection pools
 	pools, err := platform.NewShardPools(ctx, cfg, logger)
 	if err != nil {
 		logger.Panic(platform.LogEventPostgresInitFailed, zap.Error(err))
 	}
 	defer pools.Close()
 
+	// 4. Initialize database circuit breakers
 	cbs := platform.NewDBCircuitBreakers(
 		platform.CBNameMerchantsGlobal,
 		pools.GetAvailableShardIDs(),
@@ -64,6 +68,7 @@ func main() {
 		logger,
 	)
 
+	// 5. Construct repositories and services with resilience & metrics decorators
 	merchantDir := observability.NewMerchantDirectoryMetrics(resilience.NewMerchantDirectoryResilience(postgres.NewMerchantDirectory(pools, logger), cbs))
 	ledgerStore := observability.NewLedgerStoreMetrics(resilience.NewLedgerStoreResilience(postgres.NewLedgerStore(pools, logger), cbs))
 	xshardStore := observability.NewCrossShardStoreMetrics(resilience.NewCrossShardStoreResilience(postgres.NewCrossShardStore(pools, logger), cbs))
@@ -76,6 +81,7 @@ func main() {
 	xshardService := app.NewXShardService(logger, xshardStore)
 	sagaHandler := observability.NewSagaHandlerTraces(observability.NewSagaHandlerMetrics(xshardService))
 
+	// 6. Initialize Kafka consumer readers for jobs and cross-shard topics
 	groupID := platform.ConsumerGroupLedgerWorker
 	jobReader := platform.NewKafkaConsumerReader(cfg, cfg.KafkaBrokers, platform.TopicJobs, groupID, time.Duration(cfg.Capacity.KafkaSessionMs)*time.Millisecond, time.Duration(cfg.Capacity.KafkaHeartbeatMs)*time.Millisecond, logger.Named(platform.LogComponentKafka))
 	defer jobReader.Close()
@@ -106,7 +112,7 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	// C1: periodic scan for unresolved cross-shard sagas. Feeds rrq.saga.unresolved.count for the tier2 panel and the LedgerDoubleEntryImbalance alert.
+	// 7. Start periodic saga watchdog to count and export unresolved sagas
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -121,7 +127,7 @@ func main() {
 				count, err := xshardStore.CountUnresolvedSagas(scanCtx, 120000)
 				cancel()
 				if err != nil {
-					logger.Warn("saga unresolved scan failed", zap.Error(err))
+					logger.Warn(platform.LogEventSagaScanFailed, zap.Error(err))
 					continue
 				}
 				platform.RecordSagaUnresolvedCount(context.Background(), count)

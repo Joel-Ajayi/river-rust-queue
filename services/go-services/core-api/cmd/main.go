@@ -21,7 +21,7 @@ import (
 )
 
 func main() {
-	// Config & Logger
+	// 1. Load configuration and initialize Argon2 and request bounds
 	cfg := platform.LoadConfig("CORE_API_")
 
 	platform.SetArgon2Params(
@@ -31,6 +31,7 @@ func main() {
 	)
 	rest.SetMaxRequestBodyBytes(int64(cfg.Capacity.MaxRequestBytes))
 
+	// 2. Initialize structured Zap logger
 	log, err := platform.NewLogger(cfg.LogLevel)
 	if err != nil {
 		panic("logger: " + err.Error())
@@ -40,18 +41,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// 3. Initialize OpenTelemetry tracing and metrics
 	if err := platform.InitTelemetry(ctx, "core-api"); err != nil {
-		log.Panic("Failed to initialize telemetry", zap.Error(err))
+		log.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 
 	if err := platform.InitMetrics(); err != nil {
-		log.Panic("Failed to initialize metrics", zap.Error(err))
+		log.Panic(platform.LogEventMetricsInitFailed, zap.Error(err))
 	}
 	if err := platform.InitBusinessMetrics(); err != nil {
-		log.Panic("Failed to initialize business metrics", zap.Error(err))
+		log.Panic(platform.LogEventBusinessMetricsInitFailed, zap.Error(err))
 	}
 
-	// Infrastructure
+	// 4. Initialize PostgreSQL shard connection pools
 	pools, err := platform.NewShardPools(ctx, cfg, log)
 	if err != nil {
 		log.Panic(platform.LogEventPostgresInitFailed, zap.Error(err))

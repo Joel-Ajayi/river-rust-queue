@@ -12,46 +12,72 @@ import (
 
 const (
 	// Logging Fields
-	LogFieldComponent  = "component"
-	LogFieldEvent      = "event"
-	LogFieldJobID      = "job_id"
-	LogFieldDuration   = "duration_ms"
-	LogFieldStatus     = "status_code"
-	LogFieldShardID    = "shard_id"
-	LogFieldTopic      = "topic"
-	LogFieldSource     = "source"
-	LogFieldGroup      = "group"
-	LogFieldAddr       = "addr"
-	LogFieldPath       = "path"
-	LogFieldMethod     = "method"
-	LogFieldName       = "name"
-	LogFieldFrom       = "from"
-	LogFieldTo         = "to"
-	LogFieldPanic      = "panic"
-	LogFieldKey        = "message_key"
-	LogFieldSrcShard   = "src_shard"
-	LogFieldDstShard   = "dst_shard"
-	LogFieldJobStatus  = "job_status"
-	LogFieldTransferID = "transfer_id"
-	LogFieldReason     = "reason"
-	LogFieldEntryID    = "entry_id"
-	LogFieldCount      = "count"
-	LogFieldEventID    = "event_id"
-	LogFieldSize       = "size"
-	LogFieldAttempt    = "attempt"
-	LogFieldDLQID      = "dlq_id"
+	LogFieldComponent              = "component"
+	LogFieldEvent                  = "event"
+	LogFieldJobID                  = "job_id"
+	LogFieldDuration               = "duration_ms"
+	LogFieldStatus                 = "status_code"
+	LogFieldShardID                = "shard_id"
+	LogFieldTopic                  = "topic"
+	LogFieldStack                  = "stack"
+	LogFieldSource                 = "source"
+	LogFieldGroup                  = "group"
+	LogFieldAddr                   = "addr"
+	LogFieldPath                   = "path"
+	LogFieldMethod                 = "method"
+	LogFieldName                   = "name"
+	LogFieldFrom                   = "from"
+	LogFieldTo                     = "to"
+	LogFieldPanic                  = "panic"
+	LogFieldKey                    = "message_key"
+	LogFieldSrcShard               = "src_shard"
+	LogFieldDstShard               = "dst_shard"
+	LogFieldJobStatus              = "job_status"
+	LogFieldTransferID             = "transfer_id"
+	LogFieldReason                 = "reason"
+	LogFieldEntryID                = "entry_id"
+	LogFieldCount                  = "count"
+	LogFieldEventID                = "event_id"
+	LogFieldSize                   = "size"
+	LogFieldAttempt                = "attempt"
+	LogFieldDLQID                  = "dlq_id"
+	LogFieldCBName                 = "circuit_breaker_name"
+	LogFieldWalletID               = "wallet_id"
+	LogFieldMerchantID             = "merchant_id"
+	LogFieldAmount                 = "amount"
+	LogFieldCurrency               = "currency"
+	LogFieldFromWallet             = "from_wallet"
+	LogFieldToWallet               = "to_wallet"
+	LogFieldIdempotencyKey         = "idempotency_key"
+	LogFieldURL                    = "url"
+	LogFieldStatusCode             = "status_code"
+	LogFieldLatency                = "latency_ms"
+	LogFieldTraceID                = "trace_id"
+	LogFieldSpanID                 = "span_id"
+	LogFieldLevel                  = "level"
+	LogFieldService                = "service"
+	LogFieldTimestamp              = "timestamp"
+	LogFieldErrorCode              = "error_code"
+	LogFieldErrorMessage           = "error_message"
+	LogFieldDBCommitDurationMs     = "db_commit_duration_ms"
+	LogFieldKafkaPublishDurationMs = "kafka_publish_duration_ms"
+	LogFieldHTTPLatencyMs          = "http_latency_ms"
+	LogFieldIdempotencyHit         = "idempotency_hit"
+	LogFieldThreshold              = "threshold"
+	LogFieldNextRetryAt            = "next_retry_at"
 
 	// Consumer Pipeline Logging Fields
-	LogFieldPartition  = "partition"
-	LogFieldOffset     = "offset"
-	LogFieldErrorType  = "error_type"
-	LogFieldRetryCount = "retry_count"
-	LogFieldBatchSize  = "batch_size"
-	LogFieldChanFill   = "channel_fill_ratio"
-	LogFieldWorkerPool = "worker_pool_size"
-	LogFieldPollMs     = "max_poll_interval_ms"
-	LogFieldDelay      = "delay_ms"
-	LogFieldMaxDelay   = "max_delay_ms"
+	LogFieldPartition    = "partition"
+	LogFieldOffset       = "offset"
+	LogFieldErrorType    = "error_type"
+	LogFieldRetryCount   = "retry_count"
+	LogFieldBatchSize    = "batch_size"
+	LogFieldBatchTimeout = "batch_timeout"
+	LogFieldChanFill     = "channel_fill_ratio"
+	LogFieldWorkerPool   = "worker_pool_size"
+	LogFieldPollMs       = "max_poll_interval_ms"
+	LogFieldDelay        = "delay_ms"
+	LogFieldMaxDelay     = "max_delay_ms"
 
 	// Logging Events
 	LogEventDLQReplayCompleted            = "dlq.replay_completed"
@@ -78,6 +104,40 @@ const (
 	LogEventBatchProcessed                = "outbox.batch_processed"
 	LogEventCanonicalLog                  = "canonical.log"
 	LogEventTelemetryInitFailed           = "telemetry.init_failed"
+	LogEventMetricsInitFailed             = "metrics.init_failed"
+	LogEventBusinessMetricsInitFailed     = "business_metrics.init_failed"
+	LogEventCircuitBreakerOpened          = "circuit_breaker.opened"
+	LogEventCircuitBreakerClosed          = "circuit_breaker.closed"
+	LogEventSagaScanFailed                = "saga.scan_failed"
+	LogEventRetryBudgetExhaustedDLQ       = "kafka_consumer.retry_budget_exhausted_dlq"
+	LogEventScheduleRetryFailed           = "webhook.schedule_retry_failed"
+	LogEventDeliveryCompleteFailed        = "webhook.delivery_complete_failed"
+	LogEventFastLaneEnqueued              = "webhook.fast_lane_enqueued"
+	LogEventTransferFailed                = "transfer.failed"
+	LogEventTransferSubmitted             = "transfer.submitted"
+	LogEventTransferCompleted             = "transfer.completed"
+	LogEventTransferValidated             = "transfer.validated"
+	LogEventTransferPosted                = "transfer.posted"
+	LogEventTransferDeclined              = "transfer.declined"
+	LogEventJobNotFound                   = "job.not_found"
+	LogEventDepositSubmitted              = "deposit.submitted"
+	LogEventDepositFailed                 = "deposit.failed"
+	LogEventConsumerPanic                 = "kafka_consumer.panic"
+	LogEventInvalidPayload                = "kafka_consumer.invalid_payload"
+	LogEventWalletCreateFailed            = "wallet.create_failed"
+	LogEventAuthTokenFailed               = "auth.token_failed"
+	LogEventMerchantCreateFailed          = "merchant.create_failed"
+	LogEventOutboxLagCheckFailed          = "outbox.lag_check_failed"
+	LogEventOutboxPublishFailed           = "outbox.publish_failed"
+	LogEventSagaRequested                 = "saga.requested"
+	LogEventSagaSettled                   = "saga.settled"
+	LogEventSagaCompensated               = "saga.compensated"
+	LogEventSagaFailed                    = "saga.failed"
+	LogEventVelocityLimitExceeded         = "fraud.velocity_limit_exceeded"
+	LogEventWebhookDeliveryAttemptFailed  = "webhook.delivery_attempt_failed"
+	LogEventWebhookDeliverySucceeded      = "webhook.delivery_succeeded"
+	LogEventWebhookDeliveryScheduled      = "webhook.delivery_scheduled"
+	LogEventWebhookDeliveryDLQ            = "webhook.delivery_dlq"
 	LogEventPostgresInitFailed            = "postgres.init_failed"
 	LogEventServerFatalError              = "server.fatal_error"
 	LogEventNoShardsAvailable             = "postgres.no_shards_available"
@@ -254,8 +314,8 @@ func LoggerWithTrace(ctx context.Context, logger *zap.Logger) *zap.Logger {
 	span := trace.SpanFromContext(ctx)
 	if span.SpanContext().IsValid() {
 		return logger.With(
-			zap.String("trace_id", span.SpanContext().TraceID().String()),
-			zap.String("span_id", span.SpanContext().SpanID().String()),
+			zap.String(LogFieldTraceID, span.SpanContext().TraceID().String()),
+			zap.String(LogFieldSpanID, span.SpanContext().SpanID().String()),
 		)
 	}
 	return logger
@@ -263,6 +323,7 @@ func LoggerWithTrace(ctx context.Context, logger *zap.Logger) *zap.Logger {
 
 // LogCanonicalEvent emits the canonical log line as flat zap fields (B3). Call at transaction boundaries: after DB commit, after Kafka publish, after HTTP delivery, etc.
 func LogCanonicalEvent(ctx context.Context, logger *zap.Logger, serviceName string, line CanonicalLogLine) {
+	// 1. Extract OpenTelemetry trace and span IDs if available
 	span := trace.SpanFromContext(ctx)
 	sc := span.SpanContext()
 
@@ -277,60 +338,62 @@ func LogCanonicalEvent(ctx context.Context, logger *zap.Logger, serviceName stri
 	line.Level = "INFO"
 	line.Service = serviceName
 
+	// 2. Build flat structured fields using canonical constants
 	fields := []zap.Field{
-		zap.String("event", string(LogEventCanonicalLog)),
-		zap.Time("timestamp", line.Timestamp),
-		zap.String("level", line.Level),
-		zap.String("service", line.Service),
-		zap.String("trace_id", line.TraceID),
-		zap.String("span_id", line.SpanID),
+		zap.String(LogFieldEvent, string(LogEventCanonicalLog)),
+		zap.Time(LogFieldTimestamp, line.Timestamp),
+		zap.String(LogFieldLevel, line.Level),
+		zap.String(LogFieldService, line.Service),
+		zap.String(LogFieldTraceID, line.TraceID),
+		zap.String(LogFieldSpanID, line.SpanID),
 	}
 	if line.MerchantID != "" {
-		fields = append(fields, zap.String("merchant_id", line.MerchantID))
+		fields = append(fields, zap.String(LogFieldMerchantID, line.MerchantID))
 	}
 	if line.JobID != "" {
-		fields = append(fields, zap.String("job_id", line.JobID))
+		fields = append(fields, zap.String(LogFieldJobID, line.JobID))
 	}
 	if line.WalletID != "" {
-		fields = append(fields, zap.String("wallet_id", line.WalletID))
+		fields = append(fields, zap.String(LogFieldWalletID, line.WalletID))
 	}
 	if line.TransferID != "" {
-		fields = append(fields, zap.String("transfer_id", line.TransferID))
+		fields = append(fields, zap.String(LogFieldTransferID, line.TransferID))
 	}
 	fields = append(fields,
 		zap.String(LogFieldEvent, string(line.Event)),
-		zap.String("status", string(line.Status)),
+		zap.String(LogFieldStatus, string(line.Status)),
 	)
 	if line.Amount != 0 {
-		fields = append(fields, zap.Int64("amount", line.Amount))
+		fields = append(fields, zap.Int64(LogFieldAmount, line.Amount))
 	}
 	if line.Currency != "" {
-		fields = append(fields, zap.String("currency", line.Currency))
+		fields = append(fields, zap.String(LogFieldCurrency, line.Currency))
 	}
 	if line.ErrorCode != "" {
-		fields = append(fields, zap.String("error_code", line.ErrorCode))
+		fields = append(fields, zap.String(LogFieldErrorCode, line.ErrorCode))
 	}
 	if line.ErrorMessage != "" {
-		fields = append(fields, zap.String("error_message", line.ErrorMessage))
+		fields = append(fields, zap.String(LogFieldErrorMessage, line.ErrorMessage))
 	}
 	if line.DurationMs != 0 {
-		fields = append(fields, zap.Float64("duration_ms", line.DurationMs))
+		fields = append(fields, zap.Float64(LogFieldDuration, line.DurationMs))
 	}
 	if line.DBCommitDurationMs != 0 {
-		fields = append(fields, zap.Float64("db_commit_duration_ms", line.DBCommitDurationMs))
+		fields = append(fields, zap.Float64(LogFieldDBCommitDurationMs, line.DBCommitDurationMs))
 	}
 	if line.KafkaPublishDurationMs != 0 {
-		fields = append(fields, zap.Float64("kafka_publish_duration_ms", line.KafkaPublishDurationMs))
+		fields = append(fields, zap.Float64(LogFieldKafkaPublishDurationMs, line.KafkaPublishDurationMs))
 	}
 	if line.HTTPLatencyMs != 0 {
-		fields = append(fields, zap.Float64("http_latency_ms", line.HTTPLatencyMs))
+		fields = append(fields, zap.Float64(LogFieldHTTPLatencyMs, line.HTTPLatencyMs))
 	}
 	if line.RetryCount != 0 {
-		fields = append(fields, zap.Int("retry_count", line.RetryCount))
+		fields = append(fields, zap.Int(LogFieldRetryCount, line.RetryCount))
 	}
 	if line.IdempotencyHit {
-		fields = append(fields, zap.Bool("idempotency_hit", line.IdempotencyHit))
+		fields = append(fields, zap.Bool(LogFieldIdempotencyHit, line.IdempotencyHit))
 	}
 
-	logger.Info("canonical", fields...)
+	// 3. Emit canonical line at Info level
+	logger.Info(string(LogEventCanonicalLog), fields...)
 }

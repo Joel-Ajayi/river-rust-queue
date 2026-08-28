@@ -19,7 +19,7 @@ import (
 )
 
 func main() {
-	// --- Config & Logs ---
+	// 1. Load configuration and initialize structured logger
 	cfg := platform.LoadConfig("OUTBOX_RELAY_")
 	logger, err := platform.NewLogger(cfg.LogLevel)
 	if err != nil {
@@ -27,22 +27,23 @@ func main() {
 	}
 	defer logger.Sync()
 
-	// --- Context (webhook-worker pattern: signal.NotifyContext) ---
+	// 2. Set up root context with OS shutdown signal cancellation
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// 3. Initialize OpenTelemetry tracing and metrics
 	if err := platform.InitTelemetry(ctx, "outbox-relay"); err != nil {
-		logger.Panic("Failed to initialize telemetry", zap.Error(err))
+		logger.Panic(platform.LogEventTelemetryInitFailed, zap.Error(err))
 	}
 
 	if err := platform.InitMetrics(); err != nil {
-		logger.Panic("Failed to initialize metrics", zap.Error(err))
+		logger.Panic(platform.LogEventMetricsInitFailed, zap.Error(err))
 	}
 	if err := platform.InitBusinessMetrics(); err != nil {
-		logger.Panic("Failed to initialize business metrics", zap.Error(err))
+		logger.Panic(platform.LogEventBusinessMetricsInitFailed, zap.Error(err))
 	}
 
-	// --- Infrastructure ---
+	// 4. Initialize PostgreSQL shard connection pools
 	pools, err := platform.NewShardPools(ctx, cfg, logger)
 	if err != nil {
 		logger.Panic(platform.LogEventPostgresInitFailed, zap.Error(err))

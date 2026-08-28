@@ -3,7 +3,6 @@ package platform
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -44,8 +43,6 @@ var (
 	businessWalletsCreated metric.Int64Counter
 	businessDepositsTotal  metric.Int64Counter
 	businessDepositsAmount metric.Int64Counter
-
-	businessOnce sync.Once
 )
 
 // InitBusinessMetrics registers all business OTel instruments. B1: returns an error instead of panicking.
@@ -146,69 +143,89 @@ func InitBusinessMetrics() error {
 
 // RecordBusinessGTV records the amount of a successful transfer (Gross Transaction Value).
 func RecordBusinessGTV(ctx context.Context, amount int64, currency string) {
-	businessGTVTotal.Add(ctx, amount, metric.WithAttributes(
-		attribute.String(MetricLabelCurrency, currency),
-	))
+	if businessGTVTotal != nil {
+		businessGTVTotal.Add(ctx, amount, metric.WithAttributes(
+			attribute.String(MetricLabelCurrency, currency),
+		))
+	}
 }
 
 // RecordBusinessTransfer records a transfer outcome for TSR computation.
 func RecordBusinessTransfer(ctx context.Context, status, shardType string) {
-	businessTransfersTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelStatus, status),
-		attribute.String(MetricLabelShardType, shardType),
-	))
+	if businessTransfersTotal != nil {
+		businessTransfersTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelStatus, status),
+			attribute.String(MetricLabelShardType, shardType),
+		))
+	}
 }
 
 // RecordBusinessDecline records a declined transfer.
 func RecordBusinessDecline(ctx context.Context, reason string) {
-	businessDeclinesTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelReason, reason),
-	))
+	if businessDeclinesTotal != nil {
+		businessDeclinesTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelReason, reason),
+		))
+	}
 }
 
 // RecordBusinessSagaDuration records the duration of a cross-shard saga from initiation to completion/failure.
 func RecordBusinessSagaDuration(ctx context.Context, duration time.Duration) {
-	businessSagaDuration.Record(ctx, duration.Seconds())
+	if businessSagaDuration != nil {
+		businessSagaDuration.Record(ctx, duration.Seconds())
+	}
 }
 
 // RecordBusinessSagaInitiated records a saga initiation.
 func RecordBusinessSagaInitiated(ctx context.Context) {
-	businessSagaInitiated.Add(ctx, 1)
+	if businessSagaInitiated != nil {
+		businessSagaInitiated.Add(ctx, 1)
+	}
 }
 
 // RecordBusinessSagaCompleted records a successful saga completion.
 func RecordBusinessSagaCompleted(ctx context.Context) {
-	businessSagaCompleted.Add(ctx, 1)
+	if businessSagaCompleted != nil {
+		businessSagaCompleted.Add(ctx, 1)
+	}
 }
 
 // RecordBusinessRefund records a refund processed.
 func RecordBusinessRefund(ctx context.Context, currency string) {
-	businessRefundsTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelCurrency, currency),
-	))
+	if businessRefundsTotal != nil {
+		businessRefundsTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelCurrency, currency),
+		))
+	}
 }
 
 // RecordBusinessDispute records a dispute event.
 func RecordBusinessDispute(ctx context.Context, disputeStatus string) {
-	businessDisputesTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelDisputeStatus, disputeStatus),
-	))
+	if businessDisputesTotal != nil {
+		businessDisputesTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelDisputeStatus, disputeStatus),
+		))
+	}
 }
 
 // RecordWalletCreated records a newly created wallet.
 func RecordWalletCreated(ctx context.Context, merchantID, currency string) {
-	businessWalletsCreated.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelCurrency, currency),
-	))
+	if businessWalletsCreated != nil {
+		businessWalletsCreated.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelCurrency, currency),
+		))
+	}
 }
 
 // RecordDepositRequest records a deposit request status and amount.
 func RecordDepositRequest(ctx context.Context, merchantID, currency string, amount int64, status string) {
-	businessDepositsTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(MetricLabelCurrency, currency),
-		attribute.String(MetricLabelStatus, status),
-	))
-	if status == TransferMetricSuccess {
+	if businessDepositsTotal != nil {
+		businessDepositsTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(MetricLabelCurrency, currency),
+			attribute.String(MetricLabelStatus, status),
+		))
+	}
+	if status == TransferMetricSuccess && businessDepositsAmount != nil {
 		businessDepositsAmount.Add(ctx, amount, metric.WithAttributes(
 			attribute.String(MetricLabelCurrency, currency),
 		))

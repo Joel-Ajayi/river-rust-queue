@@ -37,27 +37,45 @@ func (p *JobService) Directory() port.MerchantDirectory {
 }
 
 func (p *JobService) ProcessJob(ctx context.Context, payload *eventsv1.JobRequestedPayload) error {
+	// 1. Validate job type and ensure transfer data payload exists
 	if payload.JobType != platform.JobTypeTransfer {
+		platform.LoggerWithTrace(ctx, p.logger).Warn(platform.LogEventTerminalBusinessError,
+			zap.String(platform.LogFieldJobID, payload.JobId),
+			zap.String(platform.LogFieldReason, "invalid job type"),
+		)
 		return domain.ErrInvalidJobType
 	}
 
 	transferData := payload.GetTransferData()
 	if transferData == nil {
+		platform.LoggerWithTrace(ctx, p.logger).Warn(platform.LogEventTerminalBusinessError,
+			zap.String(platform.LogFieldJobID, payload.JobId),
+			zap.String(platform.LogFieldReason, "missing transfer data"),
+		)
 		return domain.ErrMissingTransferData
 	}
 
-	// 1. Determine Source Shard
+	// 2. Resolve source database shard from merchant directory
 	srcShard, err := p.directory.ShardFor(ctx, payload.MerchantId)
 	if err != nil {
+		platform.LoggerWithTrace(ctx, p.logger).Error(platform.LogEventMerchantLookupFailed,
+			zap.String(platform.LogFieldMerchantID, payload.MerchantId),
+			zap.Error(err),
+		)
 		return err
 	}
 
-	// 2. Determine Destination Shard
+	// 3. Resolve destination database shard from merchant directory
 	dstShard, err := p.directory.ShardFor(ctx, transferData.ToMerchantId)
 	if err != nil {
+		platform.LoggerWithTrace(ctx, p.logger).Error(platform.LogEventMerchantLookupFailed,
+			zap.String(platform.LogFieldMerchantID, transferData.ToMerchantId),
+			zap.Error(err),
+		)
 		return err
 	}
 
+	// 4. Construct deterministic transfer entity
 	transfer := domain.Transfer{
 		ID:         platform.NewDeterministicTransferID(payload.JobId),
 		JobID:      payload.JobId,
@@ -68,7 +86,7 @@ func (p *JobService) ProcessJob(ctx context.Context, payload *eventsv1.JobReques
 		Currency:   transferData.Currency,
 	}
 
-	// 3. Route to the appropriate store
+	// 5. Route double-entry transaction (same-shard direct transfer vs cross-shard clearing debit)
 	var errPost error
 	if srcShard == dstShard {
 		errPost = p.ledger.PostTransfer(ctx, srcShard, transfer)
@@ -76,26 +94,37 @@ func (p *JobService) ProcessJob(ctx context.Context, payload *eventsv1.JobReques
 		errPost = p.xshardStore.DebitToClearingAccount(ctx, srcShard, dstShard, payload.JobId, transfer)
 	}
 
+	// 6. Handle posting outcome: record business decline on terminal error, or return for retry
 	if errPost != nil {
 		if domain.IsTerminalError(errPost) {
+			platform.LoggerWithTrace(ctx, p.logger).Warn(platform.LogEventTransferDeclined,
+				zap.String(platform.LogFieldJobID, payload.JobId),
+				zap.String(platform.LogFieldMerchantID, payload.MerchantId),
+				zap.String(platform.LogFieldTransferID, transfer.ID),
+				zap.String(platform.LogFieldReason, errPost.Error()),
+			)
 			if failErr := p.ledger.FailTransfer(ctx, srcShard, transfer, errPost.Error()); failErr != nil {
+				platform.LoggerWithTrace(ctx, p.logger).Error(platform.LogEventTransferFailed, zap.Error(failErr))
 				return failErr
 			}
-			// Business metrics: decline + failed transfer
 			shardType := platform.ShardTypeSame
 			if srcShard != dstShard {
 				shardType = platform.ShardTypeCross
 			}
 			platform.RecordBusinessDecline(ctx, reasonFromError(errPost))
 			platform.RecordBusinessTransfer(ctx, platform.TransferMetricFailed, shardType)
-			return nil // Business failure recorded successfully, job is considered "processed"
+			return nil
 		}
-		return errPost // Transient error, return to consumer for retry
+		platform.LoggerWithTrace(ctx, p.logger).Error(platform.LogEventTransferFailed,
+			zap.String(platform.LogFieldJobID, payload.JobId),
+			zap.String(platform.LogFieldShardID, srcShard),
+			zap.Error(errPost),
+		)
+		return errPost
 	}
 
-	// Canonical log + business metrics: different events for same-shard vs cross-shard
+	// 7. Emit canonical event and business metrics upon successful posting
 	if srcShard == dstShard {
-		// Same-shard: transfer fully completed in one transaction
 		platform.RecordBusinessGTV(ctx, transferData.Amount, transferData.Currency)
 		platform.RecordBusinessTransfer(ctx, platform.TransferMetricSuccess, platform.ShardTypeSame)
 
@@ -110,7 +139,6 @@ func (p *JobService) ProcessJob(ctx context.Context, payload *eventsv1.JobReques
 			Currency:   transferData.Currency,
 		})
 	} else {
-		// Cross-shard: saga initiated (debit posted, credit pending on destination shard)
 		platform.RecordBusinessSagaInitiated(ctx)
 		platform.RecordBusinessTransfer(ctx, platform.TransferMetricPending, platform.ShardTypeCross)
 
