@@ -20,7 +20,7 @@ var _ pgx.QueryTracer = pgxQueryTracer{}
 // TraceQueryStart starts a client span covering the statement's execution.
 func (pgxQueryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	op := dbOperation(data.SQL)
-	if op == "SELECT" {
+	if op == "SELECT" || op == "BEGIN" || op == "ROLLBACK" || op == "COMMIT" {
 		return ctx
 	}
 	opts := []trace.SpanStartOption{
