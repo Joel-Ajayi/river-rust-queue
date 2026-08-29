@@ -2,8 +2,8 @@ package app
 
 import (
 	"context"
-	"testing"
 	_ "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/testutil"
+	"testing"
 
 	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
