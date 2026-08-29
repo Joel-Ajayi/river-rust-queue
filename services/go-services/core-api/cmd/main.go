@@ -23,12 +23,6 @@ import (
 func main() {
 	// 1. Load configuration and initialize Argon2 and request bounds
 	cfg := platform.LoadConfig("CORE_API_")
-
-	platform.SetArgon2Params(
-		cfg.Capacity.Argon2Iterations,
-		cfg.Capacity.Argon2MemoryKib,
-		cfg.Capacity.Argon2Parallelism,
-	)
 	rest.SetMaxRequestBodyBytes(int64(cfg.Capacity.MaxRequestBytes))
 
 	// 2. Initialize structured Zap logger

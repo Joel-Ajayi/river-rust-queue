@@ -21,20 +21,11 @@ const (
 )
 
 // Package-level Argon2 params. Defaults match the RFC 9151 "OWASP recommended"
-// presets above; SetArgon2Params overrides them from the capacity engine.
 var (
 	argonTime    uint32 = ArgonTime
 	argonMemory  uint32 = ArgonMemory
 	argonThreads uint8  = ArgonThreads
 )
-
-// SetArgon2Params overrides the Argon2id cost parameters used by
-// HashAPIKeySecret with the capacity-engine derived values.
-func SetArgon2Params(timeCost, memoryKib, parallelism int) {
-	argonTime = uint32(timeCost)
-	argonMemory = uint32(memoryKib)
-	argonThreads = uint8(parallelism)
-}
 
 // HashAPIKey Secret hashes an API key secret using OWASP-recommended Argon2id parameters.
 func HashAPIKeySecret(secret string) (string, error) {

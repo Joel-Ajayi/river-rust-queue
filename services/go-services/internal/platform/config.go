@@ -78,9 +78,6 @@ type CapacityConfig struct {
 
 	// Other Specific
 	JWTAccessHrs      int
-	Argon2MemoryKib   int
-	Argon2Iterations  int
-	Argon2Parallelism int
 	VelocityThreshold float64
 	VelocityWindowMs  int
 	FetchBatchSize    int
@@ -310,9 +307,6 @@ func LoadCapacityConfig(prefix string) *CapacityConfig {
 		DLQCapDelayMs:                envOrDefaultInt(prefix+"DLQ_CAP_DELAY_MS", 0),
 		DLQWriteTimeoutMs:            envOrDefaultInt(prefix+"DLQ_WRITE_TIMEOUT_MS", 0),
 		JWTAccessHrs:                 envOrDefaultInt(prefix+"JWT_ACCESS_HRS", 0),
-		Argon2MemoryKib:              envOrDefaultInt(prefix+"ARGON2_MEMORY_KIB", 0),
-		Argon2Iterations:             envOrDefaultInt(prefix+"ARGON2_ITERATIONS", 0),
-		Argon2Parallelism:            envOrDefaultInt(prefix+"ARGON2_PARALLELISM", 0),
 		VelocityThreshold:            envOrDefaultFloat(prefix+"VELOCITY_THRESHOLD", 5.0),
 		VelocityWindowMs:             envOrDefaultInt(prefix+"VELOCITY_WINDOW_MS", 60_000),
 		FetchBatchSize:               envOrDefaultInt(prefix+"FETCH_BATCH_SIZE", 0),
