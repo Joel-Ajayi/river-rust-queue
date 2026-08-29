@@ -16,6 +16,7 @@ type RelayService struct {
 	publisher      port.EventPublisher
 	log            *zap.Logger
 	draining       chan struct{}
+	wakeCh         chan struct{}
 	shardID        string
 	pollInterval   atomic.Int64 // nanoseconds; adjusted by the Kafka buffer monitor
 	processTimeout time.Duration
@@ -36,6 +37,7 @@ func NewRelayService(store port.EventStore, publisher port.EventPublisher, log *
 		publisher:      publisher,
 		log:            log,
 		draining:       make(chan struct{}),
+		wakeCh:         make(chan struct{}, 1),
 		shardID:        shardID,
 		processTimeout: cfg.ProcessTimeout,
 		fetchBatchSize: cfg.FetchBatchSize,
@@ -53,6 +55,10 @@ func (s *RelayService) SetDraining() {
 // SetPollInterval updates the poll interval (used by the Kafka buffer monitor).
 func (s *RelayService) SetPollInterval(d time.Duration) {
 	s.pollInterval.Store(int64(d))
+	select {
+	case s.wakeCh <- struct{}{}:
+	default:
+	}
 }
 
 // ShardID returns the shard this relay is responsible for.
@@ -74,6 +80,14 @@ func (s *RelayService) Start(ctx context.Context, shardID string) error {
 		case <-s.draining:
 			platform.LoggerWithTrace(ctx, s.log).Info(platform.LogEventRelayServiceDraining, zap.String(platform.LogFieldShardID, shardID))
 			return nil
+		case <-s.wakeCh:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(time.Duration(s.pollInterval.Load()))
 		case <-timer.C:
 			start := time.Now()
 			if err := s.processBatch(ctx, shardID); err != nil {

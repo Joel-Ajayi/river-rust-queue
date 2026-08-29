@@ -59,8 +59,7 @@ func monitorKafkaBuffer(ctx context.Context, publisher *kafka.EventPublisher, re
 					if !st.paused {
 						st.paused = true
 						st.throttleLevel = 0
-						r.SetPollInterval(time.Hour)
-						log.Warn(platform.LogEventKafkaBufferFull,
+						r.SetPollInterval(500 * time.Millisecond)
 							zap.String(platform.LogFieldShardID, sid),
 						)
 					}
