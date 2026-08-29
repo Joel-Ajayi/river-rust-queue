@@ -240,7 +240,7 @@ func TestFullPipelineE2E(t *testing.T) {
 
 	createWallet := func() string {
 		wReq := &apiv1.CreateWalletRequest{
-			Currency: "USD",
+			Currency: "NGN",
 		}
 		wReqBody, _ := protojson.Marshal(wReq)
 		req, _ := http.NewRequest(http.MethodPost, apiURL+"/v1/wallets", bytes.NewBuffer(wReqBody))
@@ -267,17 +267,76 @@ func TestFullPipelineE2E(t *testing.T) {
 		shardPool = cluster.ShardB.Pool
 	}
 
-	_, err = shardPool.Exec(context.Background(), "UPDATE wallet_balance_cache SET balance = 100000 WHERE wallet_id = $1", wallet1)
-	if err != nil {
-		t.Fatalf("failed to fund wallet: %v", err)
+	// 1. Execute Deposit via API (POST /v1/transfers with from_wallet = "")
+	depPayload := map[string]interface{}{
+		"from_wallet": "",
+		"to_wallet":   wallet1,
+		"amount":      100000,
+		"currency":    "NGN",
+	}
+	depBody, _ := json.Marshal(depPayload)
+	depReq, _ := http.NewRequest(http.MethodPost, apiURL+"/v1/transfers", bytes.NewBuffer(depBody))
+	depReq.Header.Set("Authorization", "Bearer "+token)
+	depReq.Header.Set("X-Merchant-ID", merchantID)
+	depReq.Header.Set("X-Merchant-Tier", "standard")
+	depReq.Header.Set("X-Idempotency-Key", "e2e_dep_1")
+	depReq.Header.Set("Content-Type", "application/json")
+	depResp, err := http.DefaultClient.Do(depReq)
+	if err != nil || depResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("failed to execute deposit via API: err=%v code=%d", err, depResp.StatusCode)
+	}
+	var depJobResp apiv1.CreateTransferResponse
+	depRespBody, _ := io.ReadAll(depResp.Body)
+	protojson.Unmarshal(depRespBody, &depJobResp)
+	depResp.Body.Close()
+
+	// 2. Poll Deposit Job Status via API (GET /v1/jobs/{id})
+	var depStatus string
+	for i := 0; i < 30; i++ {
+		time.Sleep(500 * time.Millisecond)
+		jReq, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/jobs/%s", apiURL, depJobResp.JobId), nil)
+		jReq.Header.Set("Authorization", "Bearer "+token)
+		jReq.Header.Set("X-Merchant-ID", merchantID)
+		jReq.Header.Set("X-Merchant-Tier", "standard")
+		jResp, jErr := http.DefaultClient.Do(jReq)
+		if jErr == nil && jResp.StatusCode == http.StatusOK {
+			var jData apiv1.GetJobResponse
+			jDataBody, _ := io.ReadAll(jResp.Body)
+			protojson.Unmarshal(jDataBody, &jData)
+			jResp.Body.Close()
+			depStatus = jData.Status
+			if depStatus == "completed" {
+				break
+			}
+		}
+	}
+	if depStatus != "completed" {
+		t.Fatalf("expected deposit job status completed via API, got %s", depStatus)
 	}
 
+	// 3. Verify Wallet 1 Balance via API (GET /v1/balances)
+	bReq, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/balances?wallet_id=%s", apiURL, wallet1), nil)
+	bReq.Header.Set("Authorization", "Bearer "+token)
+	bReq.Header.Set("X-Merchant-ID", merchantID)
+	bReq.Header.Set("X-Merchant-Tier", "standard")
+	bResp, bErr := http.DefaultClient.Do(bReq)
+	if bErr != nil || bResp.StatusCode != http.StatusOK {
+		t.Fatalf("failed to get wallet1 balance via API: err=%v code=%d", bErr, bResp.StatusCode)
+	}
+	var bData apiv1.GetBalanceResponse
+	bDataBody, _ := io.ReadAll(bResp.Body)
+	protojson.Unmarshal(bDataBody, &bData)
+	bResp.Body.Close()
+	if bData.Balance != 100000 {
+		t.Fatalf("expected wallet1 balance 100000, got %d", bData.Balance)
+	}
+
+	// 4. Execute Transfer between Wallets via API (POST /v1/transfers)
 	payload := map[string]interface{}{
-		"idempotency_key": "e2e_idem_1",
-		"from_wallet":     wallet1,
-		"to_wallet":       wallet2,
-		"amount":          5000,
-		"currency":        "USD",
+		"from_wallet": wallet1,
+		"to_wallet":   wallet2,
+		"amount":      5000,
+		"currency":    "NGN",
 	}
 	reqBody, _ := json.Marshal(payload)
 
@@ -295,6 +354,34 @@ func TestFullPipelineE2E(t *testing.T) {
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("expected 202 Accepted, got %d", resp.StatusCode)
 	}
+	var txJobResp apiv1.CreateTransferResponse
+	txRespBody, _ := io.ReadAll(resp.Body)
+	protojson.Unmarshal(txRespBody, &txJobResp)
+	resp.Body.Close()
+
+	// 5. Poll Transfer Job Status via API (GET /v1/jobs/{id})
+	var txStatus string
+	for i := 0; i < 30; i++ {
+		time.Sleep(500 * time.Millisecond)
+		jReq, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/jobs/%s", apiURL, txJobResp.JobId), nil)
+		jReq.Header.Set("Authorization", "Bearer "+token)
+		jReq.Header.Set("X-Merchant-ID", merchantID)
+		jReq.Header.Set("X-Merchant-Tier", "standard")
+		jResp, jErr := http.DefaultClient.Do(jReq)
+		if jErr == nil && jResp.StatusCode == http.StatusOK {
+			var jData apiv1.GetJobResponse
+			jDataBody, _ := io.ReadAll(jResp.Body)
+			protojson.Unmarshal(jDataBody, &jData)
+			jResp.Body.Close()
+			txStatus = jData.Status
+			if txStatus == "completed" {
+				break
+			}
+		}
+	}
+	if txStatus != "completed" {
+		t.Fatalf("expected transfer job status completed via API, got %s", txStatus)
+	}
 
 	var webhookPayload []byte
 	select {
@@ -308,32 +395,31 @@ func TestFullPipelineE2E(t *testing.T) {
 		t.Fatalf("received empty webhook payload")
 	}
 
-	// 1. Verify Wallet Balances on Shard
-	var balance int64
-	err = shardPool.QueryRow(context.Background(), "SELECT balance FROM wallet_balance_cache WHERE wallet_id = $1", wallet1).Scan(&balance)
-	if err != nil {
-		t.Fatalf("failed to query wallet1: %v", err)
-	}
-	if balance != 95000 {
-		t.Fatalf("expected wallet1 balance to be 95000, got %d", balance)
-	}
-
-	err = shardPool.QueryRow(context.Background(), "SELECT balance FROM wallet_balance_cache WHERE wallet_id = $1", wallet2).Scan(&balance)
-	if err != nil {
-		t.Fatalf("failed to query wallet2: %v", err)
-	}
-	if balance != 5000 {
-		t.Fatalf("expected wallet2 balance to be 5000, got %d", balance)
+	// 6. Verify Final Wallet Balances via API
+	bReq1, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/balances?wallet_id=%s", apiURL, wallet1), nil)
+	bReq1.Header.Set("Authorization", "Bearer "+token)
+	bReq1.Header.Set("X-Merchant-ID", merchantID)
+	bReq1.Header.Set("X-Merchant-Tier", "standard")
+	bResp1, _ := http.DefaultClient.Do(bReq1)
+	var bData1 apiv1.GetBalanceResponse
+	bDataBody1, _ := io.ReadAll(bResp1.Body)
+	protojson.Unmarshal(bDataBody1, &bData1)
+	bResp1.Body.Close()
+	if bData1.Balance != 95000 {
+		t.Fatalf("expected wallet1 final balance to be 95000, got %d", bData1.Balance)
 	}
 
-	// 2. Verify Job Status on Shard
-	var status string
-	err = shardPool.QueryRow(context.Background(), "SELECT status FROM jobs WHERE idempotency_key = 'e2e_idem_1'").Scan(&status)
-	if err != nil {
-		t.Fatalf("failed to query job: %v", err)
-	}
-	if status != "completed" {
-		t.Fatalf("expected job status completed, got %s", status)
+	bReq2, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/balances?wallet_id=%s", apiURL, wallet2), nil)
+	bReq2.Header.Set("Authorization", "Bearer "+token)
+	bReq2.Header.Set("X-Merchant-ID", merchantID)
+	bReq2.Header.Set("X-Merchant-Tier", "standard")
+	bResp2, _ := http.DefaultClient.Do(bReq2)
+	var bData2 apiv1.GetBalanceResponse
+	bDataBody2, _ := io.ReadAll(bResp2.Body)
+	protojson.Unmarshal(bDataBody2, &bData2)
+	bResp2.Body.Close()
+	if bData2.Balance != 5000 {
+		t.Fatalf("expected wallet2 final balance to be 5000, got %d", bData2.Balance)
 	}
 
 	// 3. Verify Outbox Relay Published All Shard Events

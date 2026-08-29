@@ -73,8 +73,6 @@ func (s *WalletService) Deposit(ctx context.Context, t domain.Transfer, idempKey
 		return domain.SubmitResult{}, err
 	}
 	t.FromWallet = fiatVault
-	fromMerchantID, _, _ := platform.IsValidWalletID(t.FromWallet)
-	t.MerchantID = fromMerchantID
 
 	job := domain.Job{
 		ID:             s.getNewJobID(),
