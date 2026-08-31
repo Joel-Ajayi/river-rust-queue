@@ -43,14 +43,34 @@ This document provides step-by-step operational procedures for incident response
    - `poison`: Schema violation or invalid payload. **Do not replay directly** until upstream code fix is deployed.
    - `transient` / `infrastructure`: Downstream timeout or DB disconnect. Safe to replay once downstream recovers.
 
-4. **Trigger Replay via Admin API**:
-   ```bash
-   curl -X POST https://api.rrq.yotstack.tech/v1/admin/dlq/<DLQ_ENTRY_ID>/replay \
-     -H "Authorization: Bearer <ADMIN_JWT>"
-   ```
+4. **Trigger Replay via Admin API or Batch Runner**:
+   - **Batch Replay via Automated Runner**:
+     ```bash
+     cd rrq-gitops/tools/load-tests
+     NODE_TLS_REJECT_UNAUTHORIZED=0 node replay-dlq.mts
+     ```
+   - **Batch Replay via HTTP API**:
+     ```bash
+     curl -X POST https://api.127.0.0.1.nip.io:8443/v1/admin/dlq/replay \
+       -H "Authorization: Bearer <ADMIN_JWT>" \
+       -H "X-RRQ-Edge: true" \
+       -H "Content-Type: application/json" \
+       -d '{"source": "", "limit": 10}'
+     ```
+   - **Single Item Replay via HTTP API**:
+     ```bash
+     curl -X POST https://api.127.0.0.1.nip.io:8443/v1/admin/dlq/replay-one \
+       -H "Authorization: Bearer <ADMIN_JWT>" \
+       -H "X-RRQ-Edge: true" \
+       -H "Content-Type: application/json" \
+       -d '{"dlq_id": "<DLQ_ENTRY_ID>"}'
+     ```
 
 5. **Verify Resolution**:
-   Confirm that the `dlq_entries` status flipped to `replayed` and the job executed cleanly.
+   Confirm that the `dlq_entries` status flipped to `replayed` and the Kafka topic re-injected the event. Check Prometheus metric:
+   ```promql
+   sum(rate(admin_dlq_replayed_total[1m]))
+   ```
 
 ---
 
