@@ -46,7 +46,7 @@ func (e *EventStore) ProcessUnpublishedEvents(ctx context.Context, shardID strin
 
 	// 1. Get unpublished events and lock rows with "for update skip locked"
 	rows, err := tx.Query(ctx,
-		`SELECT event_id, event_type, aggregate_type, aggregate_id, correlation_id, payload, occurred_at, publish_topic
+		`SELECT event_id, event_type, aggregate_type, aggregate_id, COALESCE(correlation_id, ''), payload, occurred_at, publish_topic
 		 FROM events
 		 WHERE published_at IS NULL AND publish_topic IS NOT NULL
 		 ORDER BY id

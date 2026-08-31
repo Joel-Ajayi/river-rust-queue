@@ -12,9 +12,6 @@ import (
 
 // monitorKafkaBuffer samples in-flight publish bytes and throttles/pauses relay polling.
 // AIMD thresholds and buffer bounds come from the capacity engine (OUTBOX_RELAY_AIMD_*, RELAY_BUFFER_*).
-// Per-shard monitoring (Issue 10): the global staging budget applies across all
-// shards, but each shard's poll interval is throttled independently based on
-// its own in-flight bytes relative to the shared staging budget.
 func monitorKafkaBuffer(ctx context.Context, publisher *kafka.EventPublisher, relays []*app.RelayService, cfg *platform.Config, log *zap.Logger) {
 	ticker := time.NewTicker(time.Duration(cfg.Capacity.RelayBufferSampleIntervalMs) * time.Millisecond)
 	defer ticker.Stop()

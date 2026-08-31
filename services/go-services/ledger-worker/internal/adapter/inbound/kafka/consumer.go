@@ -205,6 +205,7 @@ func (m *ConsumerManager) processWithRetry(ctx context.Context, msg kafka.Messag
 				}
 				platform.RecordDLQIngestion(ctx, platform.ServiceNameLedgerWorker)
 				logger.Warn(platform.LogEventTerminalBusinessError,
+					zap.String(platform.LogFieldErrorType, string(classification)),
 					zap.String(platform.LogFieldTopic, msg.Topic),
 					zap.Int(platform.LogFieldPartition, msg.Partition),
 					zap.Int64(platform.LogFieldOffset, msg.Offset),
