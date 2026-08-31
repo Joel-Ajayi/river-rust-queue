@@ -36,14 +36,21 @@ func NewWalletRepositoryResilience(next port.WalletRepository, cbs *platform.DBC
 	return &walletRepoResilience{next: next, cbs: cbs}
 }
 
-func (w *walletRepoResilience) GetWalletStatus(ctx context.Context, shardID string, walletID string) (string, error) {
+type walletStatusResult struct {
+	status     string
+	walletType string
+}
+
+func (w *walletRepoResilience) GetWalletStatus(ctx context.Context, shardID string, walletID string) (string, string, error) {
 	res, err := w.cbs.ShardRO(shardID).Execute(ctx, func() (interface{}, error) {
-		return w.next.GetWalletStatus(ctx, shardID, walletID)
+		status, wtype, err := w.next.GetWalletStatus(ctx, shardID, walletID)
+		return walletStatusResult{status: status, walletType: wtype}, err
 	})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return res.(string), nil
+	r := res.(walletStatusResult)
+	return r.status, r.walletType, nil
 }
 
 func (w *walletRepoResilience) FreezeWallet(ctx context.Context, shardID string, walletID string, reason string) error {

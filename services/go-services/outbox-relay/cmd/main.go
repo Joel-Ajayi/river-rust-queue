@@ -81,6 +81,7 @@ func main() {
 			int64(cfg.Capacity.RetryBudgetMaxTokens),
 			cfg.Capacity.RetryBudgetFraction,
 		),
+		IsTerminalError: domain.IsTerminalError,
 	}
 	publishTimeout := time.Duration(cfg.Capacity.RequestTimeoutMs) * time.Millisecond
 	baseEventPublisher := resilience.NewEventPublisherRetry(baseKafkaPublisher, publishRetryCfg, publishTimeout)

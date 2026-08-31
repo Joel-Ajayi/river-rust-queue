@@ -122,8 +122,8 @@ func (s *FraudService) processEvent(ctx context.Context, merchantID string, even
 }
 
 func (s *FraudService) maybeFreezeWallet(ctx context.Context, shardID, walletID string, rule domain.VelocityRule) error {
-	// 1. Fetch current wallet status from shard database
-	status, err := s.repo.GetWalletStatus(ctx, shardID, walletID)
+	// 1. Fetch current wallet status and type from shard database
+	status, walletType, err := s.repo.GetWalletStatus(ctx, shardID, walletID)
 	if err != nil {
 		platform.LoggerWithTrace(ctx, s.logger).Error(platform.LogEventWalletStatusCheckFailed,
 			zap.String(platform.LogFieldWalletID, walletID),
@@ -132,11 +132,17 @@ func (s *FraudService) maybeFreezeWallet(ctx context.Context, shardID, walletID 
 		return err
 	}
 
+	// 2. Only customer wallets are subject to automated fraud freeze.
+	// System wallets and fiat vaults are platform infrastructure and never frozen.
+	if walletType != platform.WalletTypeCustomer {
+		return nil
+	}
+
 	if status != platform.WalletStatusActive {
 		return nil
 	}
 
-	// 2. Log freeze warning and update wallet status to frozen in database
+	// 3. Log freeze warning and update wallet status to frozen in database
 	platform.LoggerWithTrace(ctx, s.logger).Warn(string(platform.EventFraudWalletFrozen),
 		zap.String(platform.LogFieldWalletID, walletID),
 		zap.String(platform.LogFieldName, rule.Name),

@@ -34,14 +34,14 @@ func NewWalletRepositoryMetrics(next port.WalletRepository) port.WalletRepositor
 	return &walletRepositoryMetrics{next: next}
 }
 
-func (w *walletRepositoryMetrics) GetWalletStatus(ctx context.Context, shardID string, walletID string) (string, error) {
-	res, err := w.next.GetWalletStatus(ctx, shardID, walletID)
+func (w *walletRepositoryMetrics) GetWalletStatus(ctx context.Context, shardID string, walletID string) (string, string, error) {
+	status, wtype, err := w.next.GetWalletStatus(ctx, shardID, walletID)
 	if err != nil {
 		if platform.ClassifyError(err, func(error) bool { return false }) == platform.ClassificationInfrastructure {
 			platform.RecordInfrastructureError(ctx, platform.ComponentWalletDirectory)
 		}
 	}
-	return res, err
+	return status, wtype, err
 }
 
 func (w *walletRepositoryMetrics) FreezeWallet(ctx context.Context, shardID string, walletID string, reason string) error {

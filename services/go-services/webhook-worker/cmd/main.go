@@ -114,10 +114,11 @@ func main() {
 	defer reader.Close()
 
 	consumerRetryCfg := platform.RetryConfig{
-		MaxRetries: int(cfg.Capacity.MaxRetries),
-		BaseDelay:  time.Duration(cfg.Capacity.BackoffBaseMs) * time.Millisecond,
-		MaxDelay:   time.Duration(cfg.Capacity.BackoffCapMs) * time.Millisecond,
-		Budget:     sharedBudget,
+		MaxRetries:      int(cfg.Capacity.MaxRetries),
+		BaseDelay:       time.Duration(cfg.Capacity.BackoffBaseMs) * time.Millisecond,
+		MaxDelay:        time.Duration(cfg.Capacity.BackoffCapMs) * time.Millisecond,
+		Budget:          sharedBudget,
+		IsTerminalError: domain.IsTerminalError,
 	}
 
 	handler := kafka.WebhookHandler(decoratedService, consumerRetryCfg, logger)

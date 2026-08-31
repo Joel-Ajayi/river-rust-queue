@@ -183,10 +183,11 @@ func (m *ConsumerManager) processWithRetry(ctx context.Context, msg kafka.Messag
 	logger := platform.LoggerWithTrace(ctx, m.logger)
 
 	retryCfg := platform.RetryConfig{
-		MaxRetries: m.cfg.Capacity.MaxRetries,
-		BaseDelay:  time.Duration(m.cfg.Capacity.BackoffBaseMs) * time.Millisecond,
-		MaxDelay:   time.Duration(m.cfg.Capacity.BackoffCapMs) * time.Millisecond,
-		Budget:     m.retryBudget,
+		MaxRetries:      m.cfg.Capacity.MaxRetries,
+		BaseDelay:       time.Duration(m.cfg.Capacity.BackoffBaseMs) * time.Millisecond,
+		MaxDelay:        time.Duration(m.cfg.Capacity.BackoffCapMs) * time.Millisecond,
+		Budget:          m.retryBudget,
+		IsTerminalError: isTerminal,
 	}
 
 	var attemptCount int

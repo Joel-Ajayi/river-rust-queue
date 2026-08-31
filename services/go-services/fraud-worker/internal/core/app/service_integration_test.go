@@ -2,9 +2,10 @@ package app
 
 import (
 	"context"
-	_ "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/testutil"
 	"testing"
 	"time"
+
+	_ "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/testutil"
 
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/fraud-worker/internal/core/domain"
 	eventsv1 "github.com/Joel-Ajayi/river-rust-queue/go-services/internal/gen/proto/rrq/events/v1"
@@ -15,15 +16,15 @@ import (
 // === Mock Port Implementations ===
 
 type mockWalletRepository struct {
-	statusFunc func(ctx context.Context, shardID, walletID string) (string, error)
+	statusFunc func(ctx context.Context, shardID, walletID string) (string, string, error)
 	freezeFunc func(ctx context.Context, shardID, walletID, reason string) error
 }
 
-func (m *mockWalletRepository) GetWalletStatus(ctx context.Context, shardID, walletID string) (string, error) {
+func (m *mockWalletRepository) GetWalletStatus(ctx context.Context, shardID, walletID string) (string, string, error) {
 	if m.statusFunc != nil {
 		return m.statusFunc(ctx, shardID, walletID)
 	}
-	return platform.WalletStatusActive, nil
+	return platform.WalletStatusActive, platform.WalletTypeCustomer, nil
 }
 
 func (m *mockWalletRepository) FreezeWallet(ctx context.Context, shardID, walletID, reason string) error {

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/domain"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/core-api/internal/core/port"
 	"github.com/Joel-Ajayi/river-rust-queue/go-services/internal/platform"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -65,6 +66,7 @@ func NewServer(
 				int64(cfg.Capacity.RetryBudgetMaxTokens),
 				cfg.Capacity.RetryBudgetFraction,
 			),
+			IsTerminalError: domain.IsTerminalError,
 		},
 		attemptTimeout: time.Duration(cfg.Capacity.RequestTimeoutMs) * time.Millisecond,
 		jwtExpiration:  time.Duration(cfg.Capacity.JWTAccessHrs) * time.Hour,

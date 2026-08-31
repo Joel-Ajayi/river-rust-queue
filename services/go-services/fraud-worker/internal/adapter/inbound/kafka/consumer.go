@@ -88,10 +88,11 @@ func (m *ConsumerManager) messageHandler() platform_consumer.MessageHandler {
 		var attemptCount int
 
 		retryCfg := platform.RetryConfig{
-			MaxRetries: int(m.cfg.Capacity.MaxRetries),
-			BaseDelay:  time.Duration(m.cfg.Capacity.BackoffBaseMs) * time.Millisecond,
-			MaxDelay:   time.Duration(m.cfg.Capacity.BackoffCapMs) * time.Millisecond,
-			Budget:     m.retryBudget,
+			MaxRetries:      int(m.cfg.Capacity.MaxRetries),
+			BaseDelay:       time.Duration(m.cfg.Capacity.BackoffBaseMs) * time.Millisecond,
+			MaxDelay:        time.Duration(m.cfg.Capacity.BackoffCapMs) * time.Millisecond,
+			Budget:          m.retryBudget,
+			IsTerminalError: domain.IsTerminalError,
 		}
 
 		start := time.Now()

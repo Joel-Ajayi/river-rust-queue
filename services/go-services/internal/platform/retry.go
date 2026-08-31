@@ -85,10 +85,11 @@ var defaultPlatformRetryBudget = NewRetryBudget(10, 100, 0.10)
 
 // RetryConfig defines the parameters for Exponential Backoff and Full Jitter
 type RetryConfig struct {
-	MaxRetries int
-	BaseDelay  time.Duration
-	MaxDelay   time.Duration
-	Budget     *RetryBudget
+	MaxRetries      int
+	BaseDelay       time.Duration
+	MaxDelay        time.Duration
+	Budget          *RetryBudget
+	IsTerminalError func(error) bool
 }
 
 // DLQRetryConfig builds the per-service retry budget for durable DLQ writes from
@@ -135,7 +136,7 @@ func ExecuteWithJitter(ctx context.Context, cfg RetryConfig, fn func(exec failsa
 			RecordRetryBudgetExhausted(ctx) // B1: surface budget denial in rrq.retry.budget.exhausted
 			return false                    // Retry budget exhausted -> fail fast to DLQ!
 		}
-		classification := ClassifyError(err, nil)
+		classification := ClassifyError(err, cfg.IsTerminalError)
 		return classification == ClassificationTransient || classification == ClassificationInfrastructure
 	})
 

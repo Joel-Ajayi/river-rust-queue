@@ -71,6 +71,9 @@ const (
 	WalletStatusFrozen = "frozen"
 	WalletStatusClosed = "closed"
 
+	// Actors
+	ActorSystem = "system"
+
 	// Shard Status
 	DefaultShardID       = ShardIDPrefix + "a"
 	ShardStatusActive    = "active"

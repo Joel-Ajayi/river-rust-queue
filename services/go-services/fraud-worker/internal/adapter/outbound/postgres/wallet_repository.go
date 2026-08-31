@@ -24,22 +24,22 @@ func NewWalletRepository(pools *platform.ShardPools, logger *zap.Logger) *Wallet
 	return &WalletRepository{pools: pools, logger: logger}
 }
 
-func (r *WalletRepository) GetWalletStatus(ctx context.Context, shardID string, walletID string) (string, error) {
+func (r *WalletRepository) GetWalletStatus(ctx context.Context, shardID string, walletID string) (string, string, error) {
 	pool, err := r.pools.ShardPoolRO(shardID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	var status string
-	err = pool.QueryRow(ctx, `SELECT status FROM wallets WHERE id = $1`, walletID).Scan(&status)
+	var status, walletType string
+	err = pool.QueryRow(ctx, `SELECT status, wallet_type FROM wallets WHERE id = $1`, walletID).Scan(&status, &walletType)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil
+			return "", "", nil
 		}
-		return "", err
+		return "", "", err
 	}
 
-	return status, nil
+	return status, walletType, nil
 }
 
 func (r *WalletRepository) FreezeWallet(ctx context.Context, shardID string, walletID string, reason string) error {
@@ -82,7 +82,7 @@ func (r *WalletRepository) FreezeWallet(ctx context.Context, shardID string, wal
 			WalletFrozen: &eventsv1.WalletFrozenPayload{
 				WalletId: walletID,
 				Reason:   reason,
-				FrozenBy: "system",
+				FrozenBy: platform.ActorSystem,
 			},
 		},
 	}
