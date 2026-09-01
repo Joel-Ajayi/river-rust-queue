@@ -2,6 +2,8 @@
 
 This document provides the canonical architectural specification for **River Rust Queue (RRQ)**, a high-performance, fault-tolerant payment processing core built in Go and Rust.
 
+For the observability pipeline and telemetry topology, see the RRQ GitOps observability architecture in [the observability stack documentation](https://github.com/Joel-Ajayi/rrq-gitops/blob/main/base/observability/README.md).
+
 ---
 
 ## 1. System Overview
